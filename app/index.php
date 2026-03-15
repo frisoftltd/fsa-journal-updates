@@ -38,6 +38,7 @@ $u = currentUser();
     <div class="nav-section">Account</div>
     <a href="#" data-page="settings" onclick="showPage('settings');return false;"><span class="icon">⚙️</span>Settings</a>
     <a href="logout.php"><span class="icon">🚪</span>Logout</a>
+    <a href="updater.php" style="margin-top:auto;border-top:1px solid var(--border);color:var(--text3)" id="update-link"><span class="icon">🔄</span>Check Update <span id="update-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:auto"></span></a>
   </nav>
   <div class="sidebar-bottom">
     <div class="balance-card">

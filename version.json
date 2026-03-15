@@ -1,22 +1,10 @@
 {
-  "current_version": "2.0.0",
+  "current_version": "2.0.1",
   "release_date": "2026-03-15",
-  "release_notes": "Initial release — full professional trading platform",
+  "release_notes": "Added Check Update link on sidebar",
   "changelog": [
-    "Dashboard with 8 live charts",
-    "Risk Calculator with auto lot size",
-    "Real-time alerts (daily limit, drawdown, streak)",
-    "Pre-trade FSA checklist popup",
-    "Multi-user login system",
-    "Trade screenshots upload",
-    "Performance calendar heatmap",
-    "Trading hours heatmap",
-    "Drawdown curve",
-    "Streak tracker",
-    "Import from Excel",
-    "Mobile responsive design",
-    "Custom pairs management",
-    "Time In/Out with date support"
+    "Added Check Update link at bottom of sidebar",
+    "Green dot appears when new update is available"
   ],
   "files": [
     {"path": "index.php", "critical": false},

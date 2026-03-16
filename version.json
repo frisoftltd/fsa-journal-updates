@@ -1,21 +1,10 @@
 {
-  "current_version": "2.0.1",
-  "release_date": "2026-03-15",
-  "release_notes": "Added Check Update link on sidebar",
+  "current_version": "2.0.2",
+  "release_date": "2026-03-16",
+  "release_notes": "Fixed save trade, fixed import, fixed calculator, live server launch",
   "changelog": [
-    "Added Check Update link at bottom of sidebar",
-    "Green dot appears when new update is available"
-  ],
-  "files": [
-    {"path": "index.php", "critical": false},
-    {"path": "login.php", "critical": false},
-    {"path": "logout.php", "critical": false},
-    {"path": "includes/api.php", "critical": false},
-    {"path": "includes/config.php", "critical": true},
-    {"path": "css/style.css", "critical": false},
-    {"path": "js/app.js", "critical": false}
-  ],
-  "db_migrations": [],
-  "min_php": "7.4",
-  "base_url": "https://raw.githubusercontent.com/acrobcrypto250/fsa-journal-updates/main/app"
-}
+    "Fixed save trade function — was silently failing",
+    "Fixed Excel import — now reads headers from correct row",
+    "Fixed pair filter — defaults to All Pairs",
+    "Simplified Risk Calculator — 4 inputs only",
+    "App is now live on journal.acrobcrypto.com"

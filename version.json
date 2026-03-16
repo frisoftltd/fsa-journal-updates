@@ -1,14 +1,9 @@
 {
-  "current_version": "2.1.0",
+  "current_version": "2.1.1",
   "release_date": "2026-03-16",
-  "release_notes": "Fixed save trade, import Excel, calculator, filter dropdown",
+  "release_notes": "Fixed unknown date display in updater",
   "changelog": [
-    "Fixed save trade — was silently failing due to PHP syntax error",
-    "Fixed Excel import — now reads correct header row and all date formats",
-    "Fixed pair filter — now defaults to All Pairs",
-    "Simplified Risk Calculator — 4 inputs only",
-    "Removed Pre-Trade Check button from topbar",
-    "Added Check Update link to sidebar"
+    "Fixed unknown date showing in updater page"
   ],
   "files": [
     {"path": "index.php", "critical": false},

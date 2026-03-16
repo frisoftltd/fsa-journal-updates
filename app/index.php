@@ -68,7 +68,7 @@ $u = currentUser();
     </div>
     <div class="topbar-right">
       <span style="font-size:11px;color:var(--text3);display:none" id="today-info">Today: <span id="today-pnl" style="color:var(--green)">$0</span></span>
-      <button class="btn btn-success btn-sm" onclick="openChecklist()">✅ Pre-Trade Check</button>
+
       <button class="btn btn-primary btn-sm" onclick="openTradeModal()">+ Trade</button>
       <button class="btn btn-ghost btn-sm" onclick="exportPDF()">🖨 PDF</button>
     </div>
@@ -118,7 +118,12 @@ $u = currentUser();
   <div class="page" id="page-trades">
     <div class="filter-bar">
       <input type="text" placeholder="🔍 Search..." id="trade-search" oninput="filterTrades(this.value)" style="max-width:180px">
-      <select id="filter-pair" class="pair-select" onchange="loadTrades()" style="max-width:140px"><option value="">All Pairs</option></select>
+      <select id="filter-pair" onchange="loadTrades()" style="max-width:140px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:7px 12px;font-size:13px;outline:none">
+        <option value="" selected>All Pairs</option>
+        <option value="BTCUSDT">BTCUSDT</option>
+        <option value="ETHUSDT">ETHUSDT</option>
+        <option value="BNBUSDT">BNBUSDT</option>
+      </select>
       <select id="filter-result" onchange="loadTrades()" style="max-width:130px"><option value="">All Results</option><option>Win</option><option>Loss</option><option>Break Even</option></select>
       <input type="date" id="filter-from" onchange="loadTrades()" title="From date">
       <input type="date" id="filter-to" onchange="loadTrades()" title="To date">
@@ -213,45 +218,59 @@ $u = currentUser();
 
   <!-- ── RISK CALCULATOR ── -->
   <div class="page" id="page-calculator">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:900px">
-      <div class="card">
-        <div class="card-title">Position Size Calculator</div>
-        <div class="form-group" style="margin-bottom:10px"><label>Account Balance ($)</label><input type="number" id="calc-balance" step="0.01" oninput="clearCalcResult()"></div>
-        <div class="form-group" style="margin-bottom:10px"><label>Risk Per Trade (%)</label><input type="number" id="calc-risk-pct" step="0.01" oninput="clearCalcResult()"></div>
-        <div class="form-group" style="margin-bottom:10px"><label>Entry Price</label><input type="number" id="calc-entry" step="0.01" placeholder="e.g. 73500" oninput="clearCalcResult()"></div>
-        <div class="form-group" style="margin-bottom:10px"><label>Stop Loss Price</label><input type="number" id="calc-sl" step="0.01" placeholder="e.g. 72000" oninput="clearCalcResult()"></div>
-        <div class="form-group" style="margin-bottom:16px"><label>Take Profit Price (optional)</label><input type="number" id="calc-tp" step="0.01" placeholder="e.g. 76500" oninput="clearCalcResult()"></div>
-        <button class="btn btn-primary" style="width:100%" onclick="calcRisk()">Calculate Position Size</button>
-        <button class="btn btn-success" style="width:100%;margin-top:8px" onclick="fillTradeFromCalc()">Use These Values in Trade Form</button>
-      </div>
-      <div>
-        <div class="calc-result card" id="calc-results" style="display:none">
-          <div class="card-title">📊 Calculation Results</div>
-          <div class="calc-row"><span class="calc-label">Risk Amount ($)</span><span class="calc-val red" id="res-risk">—</span></div>
-          <div class="calc-row"><span class="calc-label">Lot Size</span><span class="calc-val green" id="res-lot" style="font-size:22px">—</span></div>
-          <div class="calc-row"><span class="calc-label">SL Distance (pts)</span><span class="calc-val" id="res-sl-dist">—</span></div>
-          <div class="calc-row"><span class="calc-label">Risk / Reward</span><span class="calc-val" id="res-rr">—</span></div>
-          <div class="calc-row"><span class="calc-label">Potential Profit</span><span class="calc-val green" id="res-profit">—</span></div>
+    <div style="max-width:800px;margin:0 auto">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+        <!-- Inputs -->
+        <div class="card">
+          <div class="card-title">Inputs</div>
+          <div class="form-group" style="margin-bottom:14px">
+            <label>1. Full Trading Balance ($)</label>
+            <input type="number" id="calc-balance" step="0.01" placeholder="e.g. 9446">
+          </div>
+          <div class="form-group" style="margin-bottom:14px">
+            <label>2. Stop Loss (%)</label>
+            <input type="number" id="calc-sl-pct" step="0.01" placeholder="e.g. 1.61">
+          </div>
+          <div class="form-group" style="margin-bottom:14px">
+            <label>3. Risk Level (%)</label>
+            <input type="number" id="calc-risk-pct" step="0.01" placeholder="e.g. 0.25">
+          </div>
+          <div class="form-group" style="margin-bottom:20px">
+            <label>4. Leverage (x)</label>
+            <input type="number" id="calc-leverage" step="1" placeholder="e.g. 5">
+          </div>
+          <button class="btn btn-success" style="width:100%;padding:12px;font-size:14px" onclick="calcSimple()">Calculate</button>
         </div>
-        <div class="card" style="margin-top:14px">
-          <div class="card-title">FSA Risk Rules</div>
-          <?php
-          $u2 = currentUser();
-          $balance = $u2['account_balance'];
-          $rules = [
-            ['Recovery Mode (<$10k)', '$'.number_format($balance*0.0025,2), '0.25%'],
-            ['Normal ($10k)', '$'.number_format($balance*0.005,2), '0.5%'],
-            ['Passing (>$10,200)', '$'.number_format($balance*0.01,2), '1.0%'],
-          ];
-          foreach($rules as $r): ?>
-          <div class="stat-row">
-            <span class="stat-label"><?= $r[0] ?></span>
-            <span style="font-family:var(--font-head);font-size:13px;color:var(--green)"><?= $r[1] ?></span>
+        <!-- Results -->
+        <div class="card" id="calc-results" style="display:flex;flex-direction:column;justify-content:center">
+          <div class="card-title">Calculation Results</div>
+          <div id="calc-results-inner" style="color:var(--text3);text-align:center;padding:30px 0">
+            Enter your values and click Calculate
           </div>
-          <?php endforeach; ?>
-          <div style="margin-top:10px;padding:10px;background:var(--bg3);border-radius:6px;font-size:12px;color:var(--text2)">
-            ⚠️ Max 2 trades/day &nbsp;|&nbsp; Stop if -$200/day &nbsp;|&nbsp; Stop after 3 consecutive losses
+        </div>
+      </div>
+      <!-- FSA Rules reminder -->
+      <div class="card" style="margin-top:16px">
+        <div class="card-title">FSA Risk Rules</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+          <div style="background:var(--bg3);border-radius:8px;padding:12px;text-align:center">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Recovery Mode</div>
+            <div style="font-family:var(--font-head);font-size:18px;color:var(--orange)">0.25%</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:4px">Below $10,000</div>
           </div>
+          <div style="background:var(--bg3);border-radius:8px;padding:12px;text-align:center">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Normal Mode</div>
+            <div style="font-family:var(--font-head);font-size:18px;color:var(--blue2)">0.50%</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:4px">At $10,000</div>
+          </div>
+          <div style="background:var(--bg3);border-radius:8px;padding:12px;text-align:center">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Passing Mode</div>
+            <div style="font-family:var(--font-head);font-size:18px;color:var(--green)">1.00%</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:4px">Above $10,200</div>
+          </div>
+        </div>
+        <div style="margin-top:12px;padding:10px;background:var(--bg3);border-radius:6px;font-size:12px;color:var(--text2);text-align:center">
+          ⚠️ Max 2 trades/day &nbsp;|&nbsp; Stop if -$200/day &nbsp;|&nbsp; Stop after 3 consecutive losses
         </div>
       </div>
     </div>

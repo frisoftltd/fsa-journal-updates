@@ -141,9 +141,11 @@ if (isset($_GET['action'])) {
 // ── HELPERS ──────────────────────────────────────────────
 function getLocalVersion() {
     if (!file_exists(LOCAL_VERSION_FILE)) {
-        return ['current_version' => '2.0.0', 'changelog' => []];
+        return ['current_version' => '2.1.0', 'release_date' => '2026-03-16', 'changelog' => []];
     }
-    return json_decode(file_get_contents(LOCAL_VERSION_FILE), true);
+    $data = json_decode(file_get_contents(LOCAL_VERSION_FILE), true);
+    if (empty($data['release_date'])) $data['release_date'] = '2026-03-16';
+    return $data;
 }
 
 function getRemoteVersion() {

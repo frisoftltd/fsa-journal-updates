@@ -24,17 +24,3 @@
   "min_php": "7.4",
   "base_url": "https://raw.githubusercontent.com/acrobcrypto250/fsa-journal-updates/main/app"
 }
-
-  "files": [
-    {"path": "index.php", "critical": false},
-    {"path": "login.php", "critical": false},
-    {"path": "logout.php", "critical": false},
-    {"path": "includes/api.php", "critical": false},
-    {"path": "includes/config.php", "critical": true},
-    {"path": "css/style.css", "critical": false},
-    {"path": "js/app.js", "critical": false}
-  ],
-  "db_migrations": [],
-  "min_php": "7.4",
-  "base_url": "https://raw.githubusercontent.com/acrobcrypto250/fsa-journal-updates/main/app"
-}

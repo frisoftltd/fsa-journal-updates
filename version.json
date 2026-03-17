@@ -1,20 +1,11 @@
 {
-  "current_version": "2.2.3",
+  "current_version": "2.2.4",
   "release_date": "2026-03-17",
-  "release_notes": "Fixed screenshot upload on shared hosting",
-  "changelog": [
-    "Fixed screenshot upload — better error handling",
-    "Screenshot saves to media/uploads/{user_id}/ folder"
-  ],
+  "release_notes": "Debug screenshot upload",
+  "changelog": ["Debug mode for screenshot upload"],
   "files": [
-    {"path": "index.php", "critical": false},
-    {"path": "login.php", "critical": false},
-    {"path": "logout.php", "critical": false},
-    {"path": "updater.php", "critical": false},
     {"path": "includes/api.php", "critical": false},
-    {"path": "includes/config.php", "critical": true},
-    {"path": "css/style.css", "critical": false},
-    {"path": "js/app.js", "critical": false}
+    {"path": "includes/config.php", "critical": true}
   ],
   "db_migrations": [],
   "min_php": "7.4",

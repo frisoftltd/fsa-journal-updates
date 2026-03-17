@@ -87,43 +87,21 @@ case 'update_trade':
     }
     // Handle screenshot upload — stored in media/uploads/{user_id}/
     $screenshot = isset($d['screenshot']) && $d['screenshot'] ? $d['screenshot'] : null;
-    $debug_info = [
-        'media_base_dir' => MEDIA_BASE_DIR,
-        'media_dir' => MEDIA_BASE_DIR . $uid . '/',
-        'base_exists' => is_dir(MEDIA_BASE_DIR),
-        'base_writable' => is_writable(MEDIA_BASE_DIR),
-        'files_received' => !empty($_FILES),
-        'screenshot_error' => $_FILES['screenshot']['error'] ?? 'no file key',
-        'uid' => $uid,
-    ];
-    if (!empty($_FILES['screenshot'])) {
-        $file_error = $_FILES['screenshot']['error'];
-        if ($file_error === UPLOAD_ERR_OK) {
-            $ext = strtolower(pathinfo($_FILES['screenshot']['name'], PATHINFO_EXTENSION));
-            $allowed = ['jpg','jpeg','png','gif','webp'];
-            if (in_array($ext, $allowed)) {
-                $media_dir = MEDIA_BASE_DIR . $uid . '/';
-                if (!is_dir($media_dir)) {
-                    mkdir($media_dir, 0755, true);
-                }
-                $fn = 'trade_' . time() . '_' . uniqid() . '.' . $ext;
-                if (move_uploaded_file($_FILES['screenshot']['tmp_name'], $media_dir . $fn)) {
-                    $screenshot = $fn;
-                    $debug_info['upload'] = 'SUCCESS: ' . $fn;
-                } else {
-                    $debug_info['upload'] = 'FAILED: move_uploaded_file to ' . $media_dir . $fn;
-                }
-            } else {
-                $debug_info['upload'] = 'INVALID ext: ' . $ext;
+    if (!empty($_FILES['screenshot']) && $_FILES['screenshot']['error'] === UPLOAD_ERR_OK) {
+        $ext = strtolower(pathinfo($_FILES['screenshot']['name'], PATHINFO_EXTENSION));
+        $allowed = ['jpg','jpeg','png','gif','webp'];
+        if (in_array($ext, $allowed)) {
+            // Build path directly — do not rely on config constant
+            $media_dir = dirname(dirname(__FILE__)) . '/media/uploads/' . $uid . '/';
+            if (!is_dir($media_dir)) {
+                mkdir($media_dir, 0755, true);
             }
-        } else {
-            $debug_info['upload'] = 'PHP upload error code: ' . $file_error;
+            $fn = 'trade_' . time() . '_' . uniqid() . '.' . $ext;
+            if (move_uploaded_file($_FILES['screenshot']['tmp_name'], $media_dir . $fn)) {
+                $screenshot = $fn;
+            }
         }
-    } else {
-        $debug_info['upload'] = 'No $_FILES[screenshot] received';
     }
-    // Uncomment next line to debug, then comment again after fixing:
-    echo json_encode(['debug'=>$debug_info]); exit;
     $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'];
     
     if ($action==='update_trade') {

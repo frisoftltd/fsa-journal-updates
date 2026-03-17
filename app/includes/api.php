@@ -1,5 +1,4 @@
 <?php
-session_start();
 define('IS_API', true);
 header('Content-Type: application/json');
 require_once 'config.php';

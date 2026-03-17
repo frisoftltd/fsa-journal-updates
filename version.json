@@ -1,10 +1,10 @@
 {
-  "current_version": "2.2.5",
+  "current_version": "2.2.6",
   "release_date": "2026-03-17",
-  "release_notes": "Fixed screenshot upload path",
+  "release_notes": "Fixed delete trade + bulk delete",
   "changelog": [
-    "Fixed screenshot upload — uses direct path instead of config constant",
-    "Removed debug code"
+    "Fixed delete trade button with better error handling",
+    "Added bulk delete selected trades"
   ],
   "files": [
     {"path": "index.php", "critical": false},

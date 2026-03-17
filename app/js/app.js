@@ -259,17 +259,102 @@ function renderTradesTable(trades) {
         <td>${resultBadge(t.result)}</td>
         <td style="color:var(--purple);font-size:12px">${t.fib_level||'—'}</td>
         <td>${t.confidence?`<span class="badge badge-${(t.confidence||'').toLowerCase()}">${t.confidence}</span>`:'—'}</td>
-        <td>${t.screenshot?`<img src="uploads/screenshots/${t.screenshot}" class="screenshot-preview" onclick="viewScreenshot('uploads/screenshots/${t.screenshot}')" style="width:40px;height:30px">`:'—'}</td>
+        <td>${t.screenshot?`<img src="media/uploads/${t.user_id||1}/${t.screenshot}" class="screenshot-preview" onclick="viewTrade(${t.id})" style="width:40px;height:30px;cursor:pointer" title="Click to view trade">`:'—'}</td>
         <td style="white-space:nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="viewTrade(${t.id})" title="View trade details">👁</button>
             <button class="btn btn-ghost btn-sm" onclick="editTrade(${t.id})">✏️</button>
             <button class="btn btn-danger btn-sm" onclick="deleteTrade(${t.id})" style="margin-left:3px">🗑</button>
         </td>
     </tr>`).join('');
 }
 
+function viewTrade(id) {
+    const t = allTrades.find(t=>t.id==id);
+    if(!t) return;
+    const u = currentUser;
+    const uid = u?.id || 1;
+    const imgHtml = t.screenshot
+        ? `<img src="media/uploads/${uid}/${t.screenshot}" style="width:100%;max-height:400px;object-fit:contain;border-radius:8px;border:1px solid var(--border);cursor:pointer" onclick="window.open(this.src,'_blank')" title="Click to open full size">`
+        : `<div style="height:200px;display:flex;align-items:center;justify-content:center;background:var(--bg3);border-radius:8px;color:var(--text3)">No chart screenshot</div>`;
+
+    document.getElementById('view-trade-content').innerHTML = `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+            <div>
+                ${imgHtml}
+                ${t.notes?`<div style="margin-top:12px;padding:12px;background:var(--bg3);border-radius:8px;font-size:13px;color:var(--text2);line-height:1.6"><strong style="color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:1px">Notes</strong><br>${t.notes}</div>`:''}
+            </div>
+            <div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Date</div>
+                        <div style="font-family:var(--font-head);font-size:13px">${t.trade_date}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Pair</div>
+                        <div style="font-family:var(--font-head);font-size:13px;color:var(--blue2)">${t.pair}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Direction</div>
+                        <div>${t.direction==='Long'?'<span class="badge badge-long">Long</span>':'<span class="badge badge-short">Short</span>'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Result</div>
+                        <div>${resultBadge(t.result)}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Entry</div>
+                        <div style="font-family:var(--font-head);font-size:13px">${t.entry_price?parseFloat(t.entry_price).toFixed(2):'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Stop Loss</div>
+                        <div style="font-family:var(--font-head);font-size:13px;color:var(--red)">${t.stop_loss?parseFloat(t.stop_loss).toFixed(2):'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Take Profit</div>
+                        <div style="font-family:var(--font-head);font-size:13px;color:var(--green)">${t.take_profit?parseFloat(t.take_profit).toFixed(2):'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exit Price</div>
+                        <div style="font-family:var(--font-head);font-size:13px">${t.exit_price?parseFloat(t.exit_price).toFixed(2):'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Net P&L</div>
+                        <div class="${pnlCls(t.net_pnl)}" style="font-size:18px">${fmt(t.net_pnl)}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">R Multiple</div>
+                        <div style="font-family:var(--font-head);font-size:16px;color:${parseFloat(t.r_multiple||0)>=0?'var(--green)':'var(--red)'}">${t.r_multiple}R</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Fib Level</div>
+                        <div style="color:var(--purple);font-weight:600">${t.fib_level||'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">FSA Rules</div>
+                        <div style="color:${t.fsa_rules==='All 5'?'var(--green)':'var(--orange)'};font-weight:600">${t.fsa_rules||'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Session</div>
+                        <div>${t.session||'—'}</div>
+                    </div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px">
+                        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exec Score</div>
+                        <div style="font-family:var(--font-head);font-size:16px;color:var(--gold)">${t.exec_score?t.exec_score+'/10':'—'}</div>
+                    </div>
+                </div>
+                <div style="margin-top:12px;display:flex;gap:8px">
+                    <button class="btn btn-ghost" style="flex:1" onclick="document.getElementById('view-trade-modal').classList.remove('open')">Close</button>
+                    <button class="btn btn-primary" style="flex:1" onclick="document.getElementById('view-trade-modal').classList.remove('open');editTrade(${t.id})">✏️ Edit Trade</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.getElementById('view-trade-title').textContent = `Trade #${t.id} — ${t.pair} ${t.direction} — ${t.trade_date}`;
+    document.getElementById('view-trade-modal').classList.add('open');
+}
+
 function viewScreenshot(url){
-    document.getElementById('screenshot-img').src=url;
-    document.getElementById('screenshot-modal').classList.add('open');
+    window.open(url,'_blank');
 }
 
 function openTradeModal(data=null) {

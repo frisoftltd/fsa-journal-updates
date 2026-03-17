@@ -87,6 +87,15 @@ case 'update_trade':
     }
     // Handle screenshot upload — stored in media/uploads/{user_id}/
     $screenshot = isset($d['screenshot']) && $d['screenshot'] ? $d['screenshot'] : null;
+    $debug_info = [
+        'media_base_dir' => MEDIA_BASE_DIR,
+        'media_dir' => MEDIA_BASE_DIR . $uid . '/',
+        'base_exists' => is_dir(MEDIA_BASE_DIR),
+        'base_writable' => is_writable(MEDIA_BASE_DIR),
+        'files_received' => !empty($_FILES),
+        'screenshot_error' => $_FILES['screenshot']['error'] ?? 'no file key',
+        'uid' => $uid,
+    ];
     if (!empty($_FILES['screenshot'])) {
         $file_error = $_FILES['screenshot']['error'];
         if ($file_error === UPLOAD_ERR_OK) {
@@ -100,14 +109,21 @@ case 'update_trade':
                 $fn = 'trade_' . time() . '_' . uniqid() . '.' . $ext;
                 if (move_uploaded_file($_FILES['screenshot']['tmp_name'], $media_dir . $fn)) {
                     $screenshot = $fn;
+                    $debug_info['upload'] = 'SUCCESS: ' . $fn;
                 } else {
-                    error_log("FSA: move_uploaded_file failed to: " . $media_dir . $fn);
+                    $debug_info['upload'] = 'FAILED: move_uploaded_file to ' . $media_dir . $fn;
                 }
+            } else {
+                $debug_info['upload'] = 'INVALID ext: ' . $ext;
             }
-        } elseif ($file_error !== UPLOAD_ERR_NO_FILE) {
-            error_log("FSA Upload error code: " . $file_error);
+        } else {
+            $debug_info['upload'] = 'PHP upload error code: ' . $file_error;
         }
+    } else {
+        $debug_info['upload'] = 'No $_FILES[screenshot] received';
     }
+    // Uncomment next line to debug, then comment again after fixing:
+    echo json_encode(['debug'=>$debug_info]); exit;
     $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'];
     
     if ($action==='update_trade') {

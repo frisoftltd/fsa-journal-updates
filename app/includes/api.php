@@ -58,7 +58,13 @@ case 'get_trades':
 
 case 'add_trade':
 case 'update_trade':
-    $d = json_decode(file_get_contents('php://input'),true);
+    // Handle both JSON and FormData
+    $isForm = !empty($_FILES) || !empty($_POST);
+    if ($isForm) {
+        $d = $_POST;
+    } else {
+        $d = json_decode(file_get_contents('php://input'), true) ?? [];
+    }
     $pnl = 0;
     if (!empty($d['exit_price']) && !empty($d['entry_price']) && !empty($d['lot_size'])) {
         $pnl = $d['direction']==='Long'
@@ -79,29 +85,42 @@ case 'update_trade':
             $r = round($r,2);
         }
     }
-    // Handle screenshot upload — stored in media/{user_id}/
-    $screenshot = $d['screenshot'] ?? null;
-    if (!empty($_FILES['screenshot']['tmp_name'])) {
-        $ext = strtolower(pathinfo($_FILES['screenshot']['name'], PATHINFO_EXTENSION));
-        $allowed = ['jpg','jpeg','png','gif','webp'];
-        if (in_array($ext, $allowed)) {
-            $media_dir = getMediaDir($uid);
-            $fn = 'trade_' . time() . '_' . uniqid() . '.' . $ext;
-            if (move_uploaded_file($_FILES['screenshot']['tmp_name'], $media_dir . $fn)) {
-                $screenshot = $fn;
+    // Handle screenshot upload — stored in media/uploads/{user_id}/
+    $screenshot = isset($d['screenshot']) && $d['screenshot'] ? $d['screenshot'] : null;
+    if (!empty($_FILES['screenshot'])) {
+        $file_error = $_FILES['screenshot']['error'];
+        if ($file_error === UPLOAD_ERR_OK) {
+            $ext = strtolower(pathinfo($_FILES['screenshot']['name'], PATHINFO_EXTENSION));
+            $allowed = ['jpg','jpeg','png','gif','webp'];
+            if (in_array($ext, $allowed)) {
+                $media_dir = MEDIA_BASE_DIR . $uid . '/';
+                if (!is_dir($media_dir)) {
+                    mkdir($media_dir, 0755, true);
+                }
+                $fn = 'trade_' . time() . '_' . uniqid() . '.' . $ext;
+                if (move_uploaded_file($_FILES['screenshot']['tmp_name'], $media_dir . $fn)) {
+                    $screenshot = $fn;
+                } else {
+                    error_log("FSA: move_uploaded_file failed to: " . $media_dir . $fn);
+                }
             }
+        } elseif ($file_error !== UPLOAD_ERR_NO_FILE) {
+            error_log("FSA Upload error code: " . $file_error);
         }
     }
     $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'];
-    $vals = array_map(fn($k)=>($d[$k]??null)?:null, $cols);
-    $vals[] = round($pnl,4); $vals[] = round($net,4); $vals[] = $r; $vals[] = $screenshot;
-
+    
     if ($action==='update_trade') {
+        $update_vals = array_map(fn($k)=>($d[$k]??null)?:null, $cols);
+        $update_vals[] = round($pnl,4); 
+        $update_vals[] = round($net,4); 
+        $update_vals[] = $r; 
+        $update_vals[] = $screenshot;
+        $update_vals[] = $d['id']; 
+        $update_vals[] = $uid;
         $sets = implode(',', array_map(fn($c)=>"$c=?", $cols));
         $sets .= ",pnl=?,net_pnl=?,r_multiple=?,screenshot=?";
-        $vals[] = round($pnl,4); $vals[] = round($net,4); $vals[] = $r; $vals[] = $screenshot;
-        $vals[] = $d['id']; $vals[] = $uid;
-        $db->prepare("UPDATE trades SET $sets WHERE id=? AND user_id=?")->execute($vals);
+        $db->prepare("UPDATE trades SET $sets WHERE id=? AND user_id=?")->execute($update_vals);
     } else {
         $vals2 = array_map(fn($k)=>($d[$k]??null)?:null, $cols);
         $vals2 = array_merge([$uid], $vals2, [round($pnl,4), round($net,4), $r, $screenshot]);

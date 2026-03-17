@@ -79,14 +79,18 @@ case 'update_trade':
             $r = round($r,2);
         }
     }
-    // Handle screenshot upload
+    // Handle screenshot upload — stored in media/{user_id}/
     $screenshot = $d['screenshot'] ?? null;
     if (!empty($_FILES['screenshot']['tmp_name'])) {
-        $ext = pathinfo($_FILES['screenshot']['name'],PATHINFO_EXTENSION);
-        $fn = 'trade_'.$uid.'_'.time().'.'.$ext;
-        if (!is_dir(UPLOAD_DIR)) mkdir(UPLOAD_DIR,0755,true);
-        move_uploaded_file($_FILES['screenshot']['tmp_name'], UPLOAD_DIR.$fn);
-        $screenshot = $fn;
+        $ext = strtolower(pathinfo($_FILES['screenshot']['name'], PATHINFO_EXTENSION));
+        $allowed = ['jpg','jpeg','png','gif','webp'];
+        if (in_array($ext, $allowed)) {
+            $media_dir = getMediaDir($uid);
+            $fn = 'trade_' . time() . '_' . uniqid() . '.' . $ext;
+            if (move_uploaded_file($_FILES['screenshot']['tmp_name'], $media_dir . $fn)) {
+                $screenshot = $fn;
+            }
+        }
     }
     $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'];
     $vals = array_map(fn($k)=>($d[$k]??null)?:null, $cols);
@@ -116,8 +120,11 @@ case 'delete_trade':
     // Get screenshot to delete
     $s = $db->prepare("SELECT screenshot FROM trades WHERE id=? AND user_id=?");
     $s->execute([$d['id'],$uid]); $t=$s->fetch();
-    if ($t && $t['screenshot'] && file_exists(UPLOAD_DIR.$t['screenshot'])) {
-        unlink(UPLOAD_DIR.$t['screenshot']);
+    if ($t && $t['screenshot']) {
+        $media_dir = getMediaDir($uid);
+        if (file_exists($media_dir.$t['screenshot'])) {
+            unlink($media_dir.$t['screenshot']);
+        }
     }
     $db->prepare("DELETE FROM trades WHERE id=? AND user_id=?")->execute([$d['id'],$uid]);
     echo json_encode(['success'=>true]); break;

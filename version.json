@@ -1,10 +1,18 @@
 {
-  "current_version": "2.2.5",
-  "release_date": "2026-03-17",
-  "release_notes": "Fixed screenshot upload path",
+  "current_version": "2.2.6",
+  "release_date": "2026-03-19",
+  "release_notes": "Security hardening — all backend vulnerabilities patched",
   "changelog": [
-    "Fixed screenshot upload — uses direct path",
-    "Removed debug code"
+    "CSRF protection on all POST requests",
+    "Input validation — all numeric fields sanitized",
+    "Password change now requires current password",
+    "Screenshot upload — 5MB limit + MIME type validation",
+    "Import limit — max 500 trades per batch",
+    "Division by zero fixes in alerts and stats",
+    "Consistent media path handling",
+    "Secure random filenames for screenshots",
+    "Sanitized error messages",
+    "ID validation on all delete/update actions"
   ],
   "files": [
     {"path": "index.php", "critical": false},

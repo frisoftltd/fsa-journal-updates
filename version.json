@@ -1,18 +1,19 @@
 {
-  "current_version": "2.2.7",
-  "release_date": "2026-03-19",
-  "release_notes": "Security hardening — all backend vulnerabilities patched",
+  "current_version": "2.3.0",
+  "release_date": "2026-03-20",
+  "release_notes": "Major: Challenge Settings separated from User Profile — one user, many challenges",
   "changelog": [
-    "CSRF protection on all POST requests",
-    "Input validation — all numeric fields sanitized",
-    "Password change now requires current password",
-    "Screenshot upload — 5MB limit + MIME type validation",
-    "Import limit — max 500 trades per batch",
-    "Division by zero fixes in alerts and stats",
-    "Consistent media path handling",
-    "Secure random filenames for screenshots",
-    "Sanitized error messages",
-    "ID validation on all delete/update actions"
+    "NEW: Challenges system — create and manage multiple trading challenges",
+    "NEW: Challenge switcher in sidebar — switch between challenges instantly",
+    "NEW: Profile Settings page — personal identity (name, avatar, bio)",
+    "NEW: Challenges page — add, edit, delete, switch challenges",
+    "NEW: Any prop firm — custom input, not hardcoded",
+    "NEW: Trades scoped to active challenge",
+    "NEW: Stats and alerts use active challenge settings",
+    "IMPROVED: Settings split into Profile + Challenges",
+    "IMPROVED: Sidebar shows active challenge name and balance",
+    "FIX: Current password required for password changes",
+    "Migration: Existing data auto-migrated to first challenge"
   ],
   "files": [
     {"path": "index.php", "critical": false},
@@ -23,7 +24,28 @@
     {"path": "css/style.css", "critical": false},
     {"path": "js/app.js", "critical": false}
   ],
-  "db_migrations": [],
+  "db_migrations": [
+    {
+      "name": "create_challenges_table",
+      "sql": "CREATE TABLE IF NOT EXISTS challenges (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, name VARCHAR(100) NOT NULL DEFAULT 'My Challenge', prop_firm VARCHAR(100) DEFAULT '', challenge_phase VARCHAR(50) DEFAULT 'Phase 1', starting_balance DECIMAL(12,2) DEFAULT 10000, current_balance DECIMAL(12,2) DEFAULT 10000, max_drawdown_pct DECIMAL(5,2) DEFAULT 10, daily_loss_limit DECIMAL(12,2) DEFAULT 500, risk_per_trade_pct DECIMAL(5,2) DEFAULT 0.5, profit_target_pct DECIMAL(5,2) DEFAULT 8, status ENUM('active','completed','failed') DEFAULT 'active', is_active TINYINT(1) DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, INDEX idx_user_active (user_id, is_active))"
+    },
+    {
+      "name": "add_challenge_id_to_trades",
+      "sql": "ALTER TABLE trades ADD COLUMN challenge_id INT DEFAULT NULL AFTER user_id"
+    },
+    {
+      "name": "add_bio_to_users",
+      "sql": "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT NULL"
+    },
+    {
+      "name": "migrate_user_data_to_challenges",
+      "sql": "INSERT INTO challenges (user_id, name, prop_firm, challenge_phase, starting_balance, current_balance, max_drawdown_pct, daily_loss_limit, risk_per_trade_pct, is_active) SELECT id, CONCAT(COALESCE(prop_firm,'Challenge'), ' - ', COALESCE(challenge_phase,'Phase 1')), COALESCE(prop_firm,''), COALESCE(challenge_phase,'Phase 1'), COALESCE(starting_balance,10000), COALESCE(account_balance,10000), COALESCE(max_drawdown_pct,10), COALESCE(daily_loss_limit,500), COALESCE(risk_per_trade_pct,0.5), 1 FROM users WHERE id NOT IN (SELECT DISTINCT user_id FROM challenges)"
+    },
+    {
+      "name": "link_existing_trades_to_challenges",
+      "sql": "UPDATE trades t INNER JOIN challenges c ON t.user_id = c.user_id AND c.is_active = 1 SET t.challenge_id = c.id WHERE t.challenge_id IS NULL"
+    }
+  ],
   "min_php": "7.4",
   "base_url": "https://raw.githubusercontent.com/acrobcrypto250/fsa-journal-updates/main/app"
 }

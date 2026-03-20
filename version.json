@@ -1,19 +1,22 @@
 {
-  "current_version": "2.3.0",
+  "current_version": "3.0.0",
   "release_date": "2026-03-20",
-  "release_notes": "Major: Challenge Settings separated from User Profile — one user, many challenges",
+  "release_notes": "Phase 1: Modular backend architecture — 11 controllers replace monolithic api.php",
   "changelog": [
-    "NEW: Challenges system — create and manage multiple trading challenges",
-    "NEW: Challenge switcher in sidebar — switch between challenges instantly",
-    "NEW: Profile Settings page — personal identity (name, avatar, bio)",
-    "NEW: Challenges page — add, edit, delete, switch challenges",
-    "NEW: Any prop firm — custom input, not hardcoded",
-    "NEW: Trades scoped to active challenge",
-    "NEW: Stats and alerts use active challenge settings",
-    "IMPROVED: Settings split into Profile + Challenges",
-    "IMPROVED: Sidebar shows active challenge name and balance",
-    "FIX: Current password required for password changes",
-    "Migration: Existing data auto-migrated to first challenge"
+    "ARCHITECTURE: api.php replaced with thin router + 11 independent controllers",
+    "NEW: includes/router.php — maps actions to controllers",
+    "NEW: includes/helpers.php — shared utility functions",
+    "NEW: ProfileController — user identity management",
+    "NEW: ChallengeController — challenge CRUD + switching",
+    "NEW: TradeController — trade CRUD scoped to challenge",
+    "NEW: StatsController — statistics scoped to challenge",
+    "NEW: AlertController — alerts using challenge settings",
+    "NEW: CalculatorController — risk calculator",
+    "NEW: PairController — trading pairs management",
+    "NEW: ImportController — Excel import with 500 limit",
+    "NEW: StrategyController — strategy test trades",
+    "NEW: ReviewController — weekly reviews",
+    "No visual changes — app looks and works exactly the same"
   ],
   "files": [
     {"path": "index.php", "critical": false},
@@ -21,31 +24,22 @@
     {"path": "logout.php", "critical": false},
     {"path": "updater.php", "critical": false},
     {"path": "includes/api.php", "critical": false},
+    {"path": "includes/helpers.php", "critical": false},
+    {"path": "includes/router.php", "critical": false},
+    {"path": "includes/controllers/ProfileController.php", "critical": false},
+    {"path": "includes/controllers/ChallengeController.php", "critical": false},
+    {"path": "includes/controllers/TradeController.php", "critical": false},
+    {"path": "includes/controllers/StatsController.php", "critical": false},
+    {"path": "includes/controllers/AlertController.php", "critical": false},
+    {"path": "includes/controllers/CalculatorController.php", "critical": false},
+    {"path": "includes/controllers/PairController.php", "critical": false},
+    {"path": "includes/controllers/ImportController.php", "critical": false},
+    {"path": "includes/controllers/StrategyController.php", "critical": false},
+    {"path": "includes/controllers/ReviewController.php", "critical": false},
     {"path": "css/style.css", "critical": false},
     {"path": "js/app.js", "critical": false}
   ],
-  "db_migrations": [
-    {
-      "name": "create_challenges_table",
-      "sql": "CREATE TABLE IF NOT EXISTS challenges (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, name VARCHAR(100) NOT NULL DEFAULT 'My Challenge', prop_firm VARCHAR(100) DEFAULT '', challenge_phase VARCHAR(50) DEFAULT 'Phase 1', starting_balance DECIMAL(12,2) DEFAULT 10000, current_balance DECIMAL(12,2) DEFAULT 10000, max_drawdown_pct DECIMAL(5,2) DEFAULT 10, daily_loss_limit DECIMAL(12,2) DEFAULT 500, risk_per_trade_pct DECIMAL(5,2) DEFAULT 0.5, profit_target_pct DECIMAL(5,2) DEFAULT 8, status ENUM('active','completed','failed') DEFAULT 'active', is_active TINYINT(1) DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, INDEX idx_user_active (user_id, is_active))"
-    },
-    {
-      "name": "add_challenge_id_to_trades",
-      "sql": "ALTER TABLE trades ADD COLUMN challenge_id INT DEFAULT NULL AFTER user_id"
-    },
-    {
-      "name": "add_bio_to_users",
-      "sql": "ALTER TABLE users ADD COLUMN bio TEXT DEFAULT NULL"
-    },
-    {
-      "name": "migrate_user_data_to_challenges",
-      "sql": "INSERT INTO challenges (user_id, name, prop_firm, challenge_phase, starting_balance, current_balance, max_drawdown_pct, daily_loss_limit, risk_per_trade_pct, is_active) SELECT id, CONCAT(COALESCE(prop_firm,'Challenge'), ' - ', COALESCE(challenge_phase,'Phase 1')), COALESCE(prop_firm,''), COALESCE(challenge_phase,'Phase 1'), COALESCE(starting_balance,10000), COALESCE(account_balance,10000), COALESCE(max_drawdown_pct,10), COALESCE(daily_loss_limit,500), COALESCE(risk_per_trade_pct,0.5), 1 FROM users WHERE id NOT IN (SELECT DISTINCT user_id FROM challenges)"
-    },
-    {
-      "name": "link_existing_trades_to_challenges",
-      "sql": "UPDATE trades t INNER JOIN challenges c ON t.user_id = c.user_id AND c.is_active = 1 SET t.challenge_id = c.id WHERE t.challenge_id IS NULL"
-    }
-  ],
+  "db_migrations": [],
   "min_php": "7.4",
   "base_url": "https://raw.githubusercontent.com/acrobcrypto250/fsa-journal-updates/main/app"
 }

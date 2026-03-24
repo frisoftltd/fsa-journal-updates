@@ -1,21 +1,13 @@
 {
-    "current_version": "3.2.0",
+    "current_version": "3.2.1",
     "release_date": "2026-03-24",
     "changelog": [
-        "FundedControl Light Authority brand applied",
-        "New fonts: Outfit + JetBrains Mono",
-        "Light background, white cards, deep blue sidebar",
-        "Login page redesigned with brand showcase",
-        "Sidebar updated with FC logo and branding",
-        "All chart colors updated for light theme",
-        "Badge colors: light bg + dark text",
-        "All numbers use JetBrains Mono"
+        "Favicon added (browser tab icon)",
+        "Logo border-radius on login page and sidebar",
+        "Apple touch icon for mobile bookmarks"
     ],
     "files": [
-        {"path": "css/brand.css", "critical": false},
         {"path": "login.php", "critical": false},
-        {"path": "index.php", "critical": false},
-        {"path": "js/app.js", "critical": false},
-        {"path": "js/dashboard.js", "critical": false}
+        {"path": "index.php", "critical": false}
     ]
 }

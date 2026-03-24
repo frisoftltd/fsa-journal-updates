@@ -1,4 +1,3 @@
-
 /**
  * FundedControl — Dashboard Module (v3.0.0 Phase 2)
  * KPIs, charts, calendar heatmap, hours heatmap
@@ -50,41 +49,41 @@ async function loadDashboard() {
 
     charts.donut = new Chart(document.getElementById('chart-donut'),{
         type:'doughnut',
-        data:{labels:['Wins','Losses','Break Even'],datasets:[{data:[s.wins,s.losses,s.break_evens],backgroundColor:['#00d4a0','#ff4d6d','#ffb347'],borderWidth:0,hoverOffset:6}]},
-        options:{...co,cutout:'65%',plugins:{legend:{position:'bottom',labels:{color:'#8892b0',padding:10,font:{size:11}}}}}
+        data:{labels:['Wins','Losses','Break Even'],datasets:[{data:[s.wins,s.losses,s.break_evens],backgroundColor:['#0FA958','#DC3545','#F59E0B'],borderWidth:0,hoverOffset:6}]},
+        options:{...co,cutout:'65%',plugins:{legend:{position:'bottom',labels:{color:'#6C7A8D',padding:10,font:{size:11}}}}}
     });
 
     const cum=s.cumulative||[];
     charts.line = new Chart(document.getElementById('chart-cumulative'),{
         type:'line',
-        data:{labels:cum.map(t=>'T'+t.trade),datasets:[{label:'Cumulative P&L',data:cum.map(t=>t.cumulative),borderColor:'#4f7cff',backgroundColor:'rgba(79,124,255,0.08)',fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#4f7cff'}]},
-        options:{...noLegend,scales:{x:{ticks:{color:'#4a5580',font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}},y:{ticks:{color:'#4a5580',callback:v=>'$'+v,font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}}}}
+        data:{labels:cum.map(t=>'T'+t.trade),datasets:[{label:'Cumulative P&L',data:cum.map(t=>t.cumulative),borderColor:'#1A56DB',backgroundColor:'rgba(26,86,219,0.08)',fill:true,tension:0.4,pointRadius:3,pointBackgroundColor:'#1A56DB'}]},
+        options:{...noLegend,scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>'$'+v,font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
 
     charts.drawdown = new Chart(document.getElementById('chart-drawdown'),{
         type:'line',
-        data:{labels:cum.map(t=>'T'+t.trade),datasets:[{label:'Drawdown %',data:cum.map(t=>-t.drawdown),borderColor:'#ff4d6d',backgroundColor:'rgba(255,77,109,0.07)',fill:true,tension:0.4,pointRadius:2}]},
-        options:{...noLegend,scales:{x:{ticks:{color:'#4a5580',font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}},y:{ticks:{color:'#4a5580',callback:v=>v+'%',font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}}}}
+        data:{labels:cum.map(t=>'T'+t.trade),datasets:[{label:'Drawdown %',data:cum.map(t=>-t.drawdown),borderColor:'#DC3545',backgroundColor:'rgba(220,53,69,0.08)',fill:true,tension:0.4,pointRadius:2}]},
+        options:{...noLegend,scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>v+'%',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
 
     charts.barPnl = new Chart(document.getElementById('chart-pnl'),{
         type:'bar',
-        data:{labels:cum.map(t=>'T'+t.trade),datasets:[{data:cum.map(t=>t.net_pnl),backgroundColor:cum.map(t=>t.net_pnl>=0?'rgba(0,212,160,0.7)':'rgba(255,77,109,0.7)'),borderRadius:3}]},
-        options:{...noLegend,scales:{x:{ticks:{color:'#4a5580',font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}},y:{ticks:{color:'#4a5580',callback:v=>'$'+v,font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}}}}
+        data:{labels:cum.map(t=>'T'+t.trade),datasets:[{data:cum.map(t=>t.net_pnl),backgroundColor:cum.map(t=>t.net_pnl>=0?'rgba(15,169,88,0.7)':'rgba(220,53,69,0.7)'),borderRadius:3}]},
+        options:{...noLegend,scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>'$'+v,font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
 
     const sess=s.by_session||[];
     charts.barSession = new Chart(document.getElementById('chart-session'),{
         type:'bar',
-        data:{labels:sess.map(s=>s.session),datasets:[{label:'Net P&L',data:sess.map(s=>s.pnl),backgroundColor:['#4f7cff','#00d4a0','#9b6dff'],borderRadius:4}]},
-        options:{...co,scales:{x:{ticks:{color:'#4a5580',font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}},y:{ticks:{color:'#4a5580',callback:v=>'$'+v,font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}}}}
+        data:{labels:sess.map(s=>s.session),datasets:[{label:'Net P&L',data:sess.map(s=>s.pnl),backgroundColor:['#1A56DB','#0FA958','#7C3AED'],borderRadius:4}]},
+        options:{...co,scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>'$'+v,font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
 
     const fib=s.by_fib||[];
     charts.barFib = new Chart(document.getElementById('chart-fib'),{
         type:'bar',
-        data:{labels:fib.map(f=>f.fib_level),datasets:[{label:'Win Rate %',data:fib.map(f=>f.trades>0?Math.round(f.wins/f.trades*100):0),backgroundColor:'rgba(155,109,255,0.7)',borderRadius:4}]},
-        options:{...co,scales:{x:{ticks:{color:'#4a5580',font:{size:10}},grid:{color:'rgba(255,255,255,0.03)'}},y:{ticks:{color:'#4a5580',callback:v=>v+'%',font:{size:10}},max:100,grid:{color:'rgba(255,255,255,0.03)'}}}}
+        data:{labels:fib.map(f=>f.fib_level),datasets:[{label:'Win Rate %',data:fib.map(f=>f.trades>0?Math.round(f.wins/f.trades*100):0),backgroundColor:'rgba(124,58,237,0.7)',borderRadius:4}]},
+        options:{...co,scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>v+'%',font:{size:10}},max:100,grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
 
     renderCalendar(s.calendar||[]);
@@ -113,7 +112,7 @@ function renderCalendar(data) {
         for(let d=1;d<=days;d++){
             const key = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
             const info = map[key];
-            let bg = '#1a2035';
+            let bg = '#E2E8F0';
             if(info){
                 const intensity = Math.min(1,Math.abs(info.pnl)/maxAbs);
                 const r = info.pnl>=0?0:255, g=info.pnl>=0?212:77;
@@ -138,7 +137,7 @@ function renderHoursHeatmap(data) {
     wrap.innerHTML = Array.from({length:24},(_,h)=>{
         const info=byHour[h];
         const height = info.trades>0?Math.max(12,Math.abs(info.pnl)/maxPnl*80):4;
-        const color = info.pnl>0?'rgba(0,212,160,0.7)':info.pnl<0?'rgba(255,77,109,0.7)':'rgba(74,85,128,0.3)';
+        const color = info.pnl>0?'rgba(15,169,88,0.5)':info.pnl<0?'rgba(220,53,69,0.5)':'rgba(0,0,0,0.06)';
         const label = h===0?'12a':h<12?h+'a':h===12?'12p':(h-12)+'p';
         return `<div class="heatmap-col">
             <div class="heatmap-bar" style="height:${height}px;background:${color}" title="${h}:00 — ${info.trades} trades, P&L: ${fmt(info.pnl)}"></div>

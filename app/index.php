@@ -8,6 +8,8 @@ $u = currentUser();
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0">
 <title>FundedControl — Professional Trading Journal</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="favicon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
@@ -21,7 +23,7 @@ $u = currentUser();
 <!-- ══ SIDEBAR ══ -->
 <aside class="sidebar">
   <div class="sidebar-logo">
-    <img src="media/fc-logo.png" alt="FC" style="height:32px;width:auto">
+    <img src="media/fc-logo.png" alt="FC" style="height:32px;width:auto;border-radius:6px">
     <div>
       <h1>FundedControl</h1>
       <p>Get Funded. Stay Funded.</p>

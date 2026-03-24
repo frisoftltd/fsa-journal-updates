@@ -20,6 +20,8 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>FundedControl — Sign In</title>
+<link rel="icon" type="image/x-icon" href="favicon.ico">
+<link rel="apple-touch-icon" sizes="180x180" href="favicon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -48,7 +50,7 @@ body{background:var(--fc-bg);color:var(--fc-text);font-family:var(--font-head);m
 }
 .brand-content{position:relative;z-index:1;text-align:center;max-width:380px}
 .brand-logo{margin-bottom:32px}
-.brand-logo img{max-width:200px;height:auto}
+.brand-logo img{max-width:200px;height:auto;border-radius:16px}
 .brand-name{font-size:28px;font-weight:600;color:#FFFFFF;letter-spacing:1px;margin-bottom:8px}
 .brand-tagline{font-size:15px;color:var(--fc-light);font-weight:400;line-height:1.6;opacity:0.85;margin-bottom:40px}
 .brand-features{text-align:left}

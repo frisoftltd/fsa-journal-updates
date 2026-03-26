@@ -1,13 +1,40 @@
 {
-    "current_version": "3.2.1",
-    "release_date": "2026-03-24",
+    "current_version": "3.3.0",
+    "release_date": "2026-03-25",
     "changelog": [
-        "Favicon added (browser tab icon)",
-        "Logo border-radius on login page and sidebar",
-        "Apple touch icon for mobile bookmarks"
+        "User registration — new traders can sign up",
+        "Email verification — account activation via email",
+        "Login now accepts username or email",
+        "Verification email with FundedControl branding",
+        "Create Account link on login page",
+        "Email verified check before login allowed"
     ],
     "files": [
-        {"path": "login.php", "critical": false},
-        {"path": "index.php", "critical": false}
+        {"path": "includes/auth.php", "critical": false},
+        {"path": "register.php", "critical": false},
+        {"path": "verify.php", "critical": false},
+        {"path": "login.php", "critical": false}
+    ],
+    "db_migrations": [
+        {
+            "name": "add_email_column",
+            "sql": "ALTER TABLE users ADD COLUMN email VARCHAR(255) DEFAULT NULL"
+        },
+        {
+            "name": "add_email_verified_column",
+            "sql": "ALTER TABLE users ADD COLUMN email_verified TINYINT(1) DEFAULT 0"
+        },
+        {
+            "name": "add_verification_token_column",
+            "sql": "ALTER TABLE users ADD COLUMN verification_token VARCHAR(64) DEFAULT NULL"
+        },
+        {
+            "name": "add_created_at_column",
+            "sql": "ALTER TABLE users ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
+        },
+        {
+            "name": "mark_existing_users_verified",
+            "sql": "UPDATE users SET email_verified = 1 WHERE email IS NULL OR email = ''"
+        }
     ]
 }

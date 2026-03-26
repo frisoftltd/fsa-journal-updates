@@ -5,13 +5,19 @@ if (isset($_SESSION['user_id'])) { header('Location: index.php'); exit; }
 $error = '';
 if ($_SERVER['REQUEST_METHOD']==='POST') {
     $db = getDB();
-    $s = $db->prepare("SELECT * FROM users WHERE username=?");
-    $s->execute([trim($_POST['username'])]);
+    $s = $db->prepare("SELECT * FROM users WHERE username=? OR email=?");
+    $input = trim($_POST['username']);
+    $s->execute([$input, $input]);
     $u = $s->fetch();
     if ($u && password_verify($_POST['password'],$u['password'])) {
-        $_SESSION['user_id'] = $u['id'];
-        $_SESSION['username'] = $u['username'];
-        header('Location: index.php'); exit;
+        // Check if email verified (skip for legacy users without email)
+        if ($u['email'] && isset($u['email_verified']) && $u['email_verified'] == 0) {
+            $error = 'Please verify your email before signing in. Check your inbox.';
+        } else {
+            $_SESSION['user_id'] = $u['id'];
+            $_SESSION['username'] = $u['username'];
+            header('Location: index.php'); exit;
+        }
     } else { $error = 'Invalid username or password'; }
 }
 ?><!DOCTYPE html>
@@ -141,11 +147,12 @@ body{background:var(--fc-bg);color:var(--fc-text);font-family:var(--font-head);m
     </div>
     <?php if($error): ?><div class="error"><?= htmlspecialchars($error) ?></div><?php endif; ?>
     <form method="POST">
-      <div class="form-group"><label>Username</label><input type="text" name="username" placeholder="Enter your username" required autofocus></div>
+      <div class="form-group"><label>Username or Email</label><input type="text" name="username" placeholder="Username or email" required autofocus></div>
       <div class="form-group"><label>Password</label><input type="password" name="password" placeholder="Enter your password" required></div>
       <button type="submit" class="btn-login">Sign In</button>
     </form>
     <div class="login-footer">
+      <p>Don't have an account? <a href="register.php">Create one free</a></p>
       <p style="margin-top:16px;font-size:11px;color:#94A3B8">Discipline is the edge.</p>
     </div>
   </div>

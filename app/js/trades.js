@@ -79,7 +79,7 @@ function viewTrade(id) {
                     ${images.map((img, idx) => `
                         <div class="slide" style="${idx > 0 ? 'display:none' : ''}" data-slide="${idx}">
                             <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;text-align:center">${img.label || 'Chart'}</div>
-                            <img src="media/uploads/${uid}/${img.file}" style="width:100%;max-height:350px;object-fit:contain;border-radius:8px;border:1px solid var(--border);cursor:pointer" onclick="window.open(this.src,'_blank')" title="Click to open full size">
+                            <img src="media/uploads/${uid}/${img.file}" style="width:100%;max-height:350px;object-fit:contain;border-radius:8px;border:1px solid var(--border);cursor:zoom-in" onclick="openLightbox('media/uploads/${uid}/${img.file}','${img.label||'Chart'}')" title="Click to zoom">
                         </div>
                     `).join('')}
                 </div>
@@ -96,7 +96,7 @@ function viewTrade(id) {
             </div>`;
     } else if (t.screenshot) {
         // Backward compat: single screenshot
-        imgHtml = `<img src="media/uploads/${uid}/${t.screenshot}" style="width:100%;max-height:350px;object-fit:contain;border-radius:8px;border:1px solid var(--border);cursor:pointer" onclick="window.open(this.src,'_blank')" title="Click to open full size">`;
+        imgHtml = `<img src="media/uploads/${uid}/${t.screenshot}" style="width:100%;max-height:350px;object-fit:contain;border-radius:8px;border:1px solid var(--border);cursor:zoom-in" onclick="openLightbox(this.src,'Chart')" title="Click to zoom">`;
     } else {
         imgHtml = `<div style="height:120px;display:flex;align-items:center;justify-content:center;background:var(--bg3);border-radius:8px;color:var(--text3);font-size:13px">📷 No chart screenshots uploaded</div>`;
     }
@@ -159,6 +159,28 @@ function goToSlide(idx) {
     const counter = document.getElementById('slide-counter');
     if (counter) counter.textContent = (idx + 1) + ' / ' + slides.length;
     window._currentSlide = idx;
+}
+
+// ── LIGHTBOX ZOOM ─────────────────────────────────────────
+function openLightbox(src, label) {
+    // Remove existing lightbox if any
+    const existing = document.getElementById('fc-lightbox');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'fc-lightbox';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.9);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:zoom-out;padding:20px';
+    overlay.onclick = () => overlay.remove();
+    overlay.innerHTML = `
+        <div style="color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;font-family:var(--font-head)">${label}</div>
+        <img src="${src}" style="max-width:95vw;max-height:85vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,0.5)" onclick="event.stopPropagation();window.open('${src}','_blank')">
+        <div style="color:#666;font-size:11px;margin-top:12px">Click image to open full size • Click background to close</div>
+    `;
+    document.body.appendChild(overlay);
+
+    // Close on Escape key
+    const closeOnEsc = (e) => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', closeOnEsc); } };
+    document.addEventListener('keydown', closeOnEsc);
 }
 
 // ── TRADE MODAL ─────────────────────────────────────────
@@ -249,26 +271,49 @@ async function saveTrade() {
         }
     }
 
-    // Always use FormData for multi-file support
-    const fd = new FormData(form);
+    // ── Check if any files are attached ──
+    let hasFiles = false;
+    for (let i = 1; i <= 4; i++) {
+        const inp = document.getElementById('f-screenshot_' + i);
+        if (inp && inp.files.length > 0) { hasFiles = true; break; }
+    }
+
     const tin_d=document.getElementById('f-time_in_date').value;
     const tin_t=document.getElementById('f-time_in_time').value;
     const tout_d=document.getElementById('f-time_out_date').value;
     const tout_t=document.getElementById('f-time_out_time').value;
-    if(tin_d&&tin_t) fd.set('time_in',tin_d+' '+tin_t+':00');
-    if(tout_d&&tout_t) fd.set('time_out',tout_d+' '+tout_t+':00');
-    if(id) fd.set('id',id);
 
-    // Pass existing screenshots data if editing (so server can keep them if no new uploads)
-    if (id) {
-        const t = allTrades.find(t => t.id == id);
-        if (t && t.screenshots) {
-            fd.set('existing_screenshots', t.screenshots);
+    let r;
+    if (hasFiles) {
+        // Use FormData for file uploads
+        const fd = new FormData(form);
+        if(tin_d&&tin_t) fd.set('time_in',tin_d+' '+tin_t+':00');
+        if(tout_d&&tout_t) fd.set('time_out',tout_d+' '+tout_t+':00');
+        if(id) fd.set('id',id);
+        if (id) {
+            const t = allTrades.find(t => t.id == id);
+            if (t && t.screenshots) fd.set('existing_screenshots', t.screenshots);
         }
+        const resp = await fetch(`${API}?action=${id?'update_trade':'add_trade'}`,{method:'POST',body:fd});
+        r = await resp.json();
+    } else {
+        // Use JSON for speed (no files)
+        const data = {};
+        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
+        data.time_in=tin_d&&tin_t?tin_d+' '+tin_t+':00':null;
+        data.time_out=tout_d&&tout_t?tout_d+' '+tout_t+':00':null;
+        if(id) {
+            data.id=id;
+            const t = allTrades.find(t => t.id == id);
+            if (t && t.screenshots) data.existing_screenshots = t.screenshots;
+        }
+        // Pass labels even without files
+        for (let i = 1; i <= 4; i++) {
+            const lbl = document.getElementById('f-label_' + i);
+            if (lbl) data['label_' + i] = lbl.value;
+        }
+        r = await api(id?'update_trade':'add_trade','POST',data);
     }
-
-    const resp = await fetch(`${API}?action=${id?'update_trade':'add_trade'}`,{method:'POST',body:fd});
-    const r = await resp.json();
     if(r.error){toast(r.error,'error');return;}
 
     toast(id?'Trade updated!':'Trade added! ✅');

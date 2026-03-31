@@ -1,4 +1,3 @@
-
 <?php
 /**
  * FundedControl — Shared Helper Functions
@@ -44,7 +43,7 @@ function validId($val) {
  * Get safe media directory for user uploads
  */
 function safeMediaDir($user_id) {
-    $dir = dirname(dirname(__DIR__)) . '/media/uploads/' . intval($user_id) . '/';
+    $dir = dirname(__DIR__) . '/media/uploads/' . intval($user_id) . '/';
     if (!is_dir($dir)) mkdir($dir, 0755, true);
     return $dir;
 }

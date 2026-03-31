@@ -1,4 +1,3 @@
-
 <!-- ══ TRADE MODAL ══ -->
 <div class="modal-overlay" id="trade-modal">
   <div class="modal">
@@ -32,11 +31,47 @@
         <div class="form-group"><label>Confidence</label><select id="f-confidence" name="confidence"><option value="">—</option><option>High</option><option>Medium</option><option>Low</option></select></div>
         <div class="form-group"><label>Exec Score (1-10)</label><input type="number" min="1" max="10" id="f-exec_score" name="exec_score"></div>
         <div class="section-divider"></div>
-        <div class="section-label">Chart Screenshot</div>
-        <div class="form-group full">
-          <label>Upload Chart Screenshot</label>
-          <input type="file" id="f-screenshot" name="screenshot" accept="image/*" style="padding:6px">
-          <div id="screenshot-current"></div>
+        <div class="section-label">Chart Screenshots (max 4, 1MB each)</div>
+        <div class="form-group full" id="screenshots-area">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+              <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+                <select name="label_1" id="f-label_1" style="flex:1;padding:4px 8px;font-size:11px;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+                  <option value="4H">4H Context</option><option value="1H">1H Setup</option><option value="15M">15M Entry</option><option value="Entry">Entry</option><option value="Exit">Exit</option><option value="Other">Other</option>
+                </select>
+              </div>
+              <input type="file" name="screenshot_1" id="f-screenshot_1" accept="image/*" style="font-size:11px;width:100%">
+              <div id="preview-1" style="margin-top:4px"></div>
+            </div>
+            <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+              <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+                <select name="label_2" id="f-label_2" style="flex:1;padding:4px 8px;font-size:11px;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+                  <option value="4H">4H Context</option><option value="1H" selected>1H Setup</option><option value="15M">15M Entry</option><option value="Entry">Entry</option><option value="Exit">Exit</option><option value="Other">Other</option>
+                </select>
+              </div>
+              <input type="file" name="screenshot_2" id="f-screenshot_2" accept="image/*" style="font-size:11px;width:100%">
+              <div id="preview-2" style="margin-top:4px"></div>
+            </div>
+            <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+              <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+                <select name="label_3" id="f-label_3" style="flex:1;padding:4px 8px;font-size:11px;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+                  <option value="4H">4H Context</option><option value="1H">1H Setup</option><option value="15M" selected>15M Entry</option><option value="Entry">Entry</option><option value="Exit">Exit</option><option value="Other">Other</option>
+                </select>
+              </div>
+              <input type="file" name="screenshot_3" id="f-screenshot_3" accept="image/*" style="font-size:11px;width:100%">
+              <div id="preview-3" style="margin-top:4px"></div>
+            </div>
+            <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px">
+              <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+                <select name="label_4" id="f-label_4" style="flex:1;padding:4px 8px;font-size:11px;background:var(--card);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+                  <option value="4H">4H Context</option><option value="1H">1H Setup</option><option value="15M">15M Entry</option><option value="Entry" selected>Entry</option><option value="Exit">Exit</option><option value="Other">Other</option>
+                </select>
+              </div>
+              <input type="file" name="screenshot_4" id="f-screenshot_4" accept="image/*" style="font-size:11px;width:100%">
+              <div id="preview-4" style="margin-top:4px"></div>
+            </div>
+          </div>
+          <div id="screenshot-current" style="margin-top:8px"></div>
         </div>
         <div class="form-group full"><label>Notes</label><textarea id="f-notes" name="notes" rows="2"></textarea></div>
       </div>

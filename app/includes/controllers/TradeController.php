@@ -102,7 +102,7 @@ class TradeController {
             }
         }
 
-        $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
+        $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
 
         if ($isUpdate) {
             $trade_id = validId($d['id'] ?? 0);

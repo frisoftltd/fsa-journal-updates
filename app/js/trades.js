@@ -37,7 +37,7 @@ async function loadPairs() {
 
 function renderTradesTable(trades) {
     const tbody=document.getElementById('trades-tbody');
-    if(!trades.length){tbody.innerHTML='<tr><td colspan="16" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';return;}
+    if(!trades.length){tbody.innerHTML='<tr><td colspan="13" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';return;}
     tbody.innerHTML = trades.map((t,i)=>`<tr>
         <td style="white-space:nowrap">${t.trade_date}</td>
         <td><span class="badge" style="background:rgba(79,124,255,0.1);color:var(--blue2);font-size:10px">${t.session||'—'}</span></td>
@@ -51,8 +51,6 @@ function renderTradesTable(trades) {
         <td><span class="${pnlCls(t.net_pnl)}">${fmt(t.net_pnl)}</span></td>
         <td style="font-family:var(--font-head);font-size:11px;color:${parseFloat(t.r_multiple)>=0?'var(--green)':'var(--red)'}">${t.r_multiple!==null?t.r_multiple+'R':'—'}</td>
         <td>${resultBadge(t.result)}</td>
-        <td style="color:var(--purple);font-size:12px">${t.fib_level||'—'}</td>
-        <td>${t.confidence?`<span class="badge badge-${(t.confidence||'').toLowerCase()}">${t.confidence}</span>`:'—'}</td>
         <td style="white-space:nowrap">
             <button class="btn btn-ghost btn-sm" onclick="viewTrade(${t.id})" title="View trade">👁</button>
             <button class="btn btn-ghost btn-sm" onclick="editTrade(${t.id})">✏️</button>
@@ -121,8 +119,6 @@ function viewTrade(id) {
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exit</div><div style="font-family:var(--font-head);font-size:13px">${t.exit_price?parseFloat(t.exit_price).toFixed(2):'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Net P&L</div><div class="${pnlCls(t.net_pnl)}" style="font-size:18px">${fmt(t.net_pnl)}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">R Multiple</div><div style="font-family:var(--font-head);font-size:16px;color:${parseFloat(t.r_multiple||0)>=0?'var(--green)':'var(--red)'}">${t.r_multiple}R</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Fib Level</div><div style="color:var(--purple);font-weight:600">${t.fib_level||'—'}</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">FSA Rules</div><div style="color:${t.fsa_rules==='All 5'?'var(--green)':'var(--orange)'};font-weight:600">${t.fsa_rules||'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Session</div><div>${t.session||'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exec Score</div><div style="font-family:var(--font-head);font-size:16px;color:var(--gold)">${t.exec_score?t.exec_score+'/10':'—'}</div></div>
                 </div>
@@ -253,7 +249,7 @@ function openTradeModal(data=null) {
     document.getElementById('strategy-vars-fields').innerHTML='';
     populateStrategySelect(data);
     if(data){
-        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes','note_saw','note_why','note_unsure'];
+        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes','note_saw','note_why','note_unsure'];
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
         if(data.time_in) { const d=data.time_in.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_in_date').value=parts[0]; document.getElementById('f-time_in_time').value=parts[1]?.substring(0,5)||''; }
         if(data.time_out) { const d=data.time_out.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_out_date').value=parts[0]; document.getElementById('f-time_out_time').value=parts[1]?.substring(0,5)||''; }
@@ -451,7 +447,7 @@ async function saveTrade() {
     } else {
         // Use JSON for speed (no files)
         const data = {};
-        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
+        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
         data.time_in=tin_d&&tin_t?tin_d+' '+tin_t+':00':null;
         data.time_out=tout_d&&tout_t?tout_d+' '+tout_t+':00':null;
         data.trade_variables = collectTradeVariables();

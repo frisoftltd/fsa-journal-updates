@@ -22,7 +22,7 @@
           <th>Date</th><th>Session</th><th>Pair</th><th>Dir</th>
           <th>Entry</th><th>SL</th><th>Exit</th>
           <th>Gross P&amp;L</th><th>Fees</th><th>Net P&amp;L</th><th>R</th>
-          <th>Result</th><th>Fib</th><th>Conf</th><th>Action</th>
+          <th>Result</th><th>Action</th>
         </tr></thead>
         <tbody id="trades-tbody"></tbody>
       </table>

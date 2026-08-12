@@ -26,9 +26,6 @@
         <div class="section-divider"></div>
         <div class="section-label">Outcome</div>
         <div class="form-group"><label>Result</label><select id="f-result" name="result"><option value="">—</option><option>Win</option><option>Loss</option><option>Break Even</option><option>Open</option></select></div>
-        <div class="form-group"><label>Fib Level</label><select id="f-fib_level" name="fib_level"><option value="">—</option><option>0.236</option><option>0.382</option><option>0.5</option><option>0.618</option><option>0.705</option><option>0.786</option><option>Other</option></select></div>
-        <div class="form-group"><label>FSA Rules</label><select id="f-fsa_rules" name="fsa_rules"><option value="">—</option><option>All 5</option><option>4 of 5</option><option>3 of 5</option><option>2 of 5</option></select></div>
-        <div class="form-group"><label>Confidence</label><select id="f-confidence" name="confidence"><option value="">—</option><option>High</option><option>Medium</option><option>Low</option></select></div>
         <div class="form-group"><label>Exec Score (1-10)</label><input type="number" min="1" max="10" id="f-exec_score" name="exec_score"></div>
         <div class="section-divider"></div>
         <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleStrategySection()">

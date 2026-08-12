@@ -1,23 +1,17 @@
 {
-    "current_version": "3.5.1",
+    "current_version": "3.5.2",
     "release_date": "2026-08-12",
     "changelog": [
-        "Trade form: Strategy & Psychology section — strategy selector with dynamic variables",
-        "Emotion tap-grid (8 states), setup-grade A/B/C, three guided micro-notes",
-        "Automatic Strategy Leaderboard: rank by expectancy/win-rate/profit-factor",
-        "Sample-size guard: strategies under 20 trades held in 'gathering' bucket, not ranked",
-        "Variable attribution with 8-trade minimum per split; honest 'not enough data' states"
+        "Trade form cleanup: removed redundant FSA Rules, Fib Level, and Confidence fields",
+        "These are replaced by dynamic strategy variables, emotion grid, and setup grade",
+        "Database columns preserved — existing 55 trades keep their historical values",
+        "Leaderboard handles legacy adherence data gracefully when absent"
     ],
     "files": [
-        {"path": "includes/router.php", "critical": false},
-        {"path": "includes/controllers/StrategyBuilderController.php", "critical": false},
         {"path": "includes/controllers/TradeController.php", "critical": false},
         {"path": "modals/trade-modal.php", "critical": false},
-        {"path": "pages/leaderboard.php", "critical": false},
         {"path": "js/trades.js", "critical": false},
-        {"path": "js/leaderboard.js", "critical": false},
-        {"path": "js/app.js", "critical": false},
-        {"path": "index.php", "critical": false}
+        {"path": "pages/trades.php", "critical": false}
     ],
     "db_migrations": []
 }

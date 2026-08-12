@@ -1,12 +1,32 @@
 {
-    "current_version": "3.4.4",
-    "release_date": "2026-03-31",
+    "current_version": "3.5.0",
+    "release_date": "2026-08-12",
     "changelog": [
-        "Fixed consecutive loss alert: different messages for same-day vs multi-day",
-        "3 losses TODAY = STOP TRADING (danger)",
-        "3 losses across days = review your setups (warning)"
+        "New: Strategy Lab — create unlimited custom strategies, each with up to 5 user-defined variables (checkbox, 1-5 scale, dropdown, or short text)",
+        "New additive schema: strategies, strategy_variables, trade_variables tables",
+        "Additive trade columns reserved for Wave 2 (strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure)",
+        "Additive challenges.default_strategy_id for hybrid challenge-strategy linking",
+        "Foundation only — trade form and review engine are unchanged this release"
     ],
     "files": [
-        {"path": "includes/controllers/AlertController.php", "critical": false}
+        {"path": "includes/router.php", "critical": false},
+        {"path": "includes/controllers/StrategyBuilderController.php", "critical": false},
+        {"path": "pages/strategies.php", "critical": false},
+        {"path": "modals/strategy-builder-modal.php", "critical": false},
+        {"path": "js/strategies.js", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "index.php", "critical": false}
+    ],
+    "db_migrations": [
+        {"name": "create_strategies_table", "sql": "CREATE TABLE IF NOT EXISTS strategies (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, name VARCHAR(100) NOT NULL, is_active TINYINT(1) DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, KEY idx_user (user_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"},
+        {"name": "create_strategy_variables_table", "sql": "CREATE TABLE IF NOT EXISTS strategy_variables (id INT AUTO_INCREMENT PRIMARY KEY, strategy_id INT NOT NULL, label VARCHAR(100) NOT NULL, input_type ENUM('checkbox','scale','select','text') NOT NULL DEFAULT 'checkbox', options VARCHAR(255) DEFAULT NULL, sort_order TINYINT DEFAULT 0, KEY idx_strategy (strategy_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"},
+        {"name": "create_trade_variables_table", "sql": "CREATE TABLE IF NOT EXISTS trade_variables (id INT AUTO_INCREMENT PRIMARY KEY, trade_id INT NOT NULL, variable_id INT NOT NULL, value VARCHAR(255) DEFAULT NULL, KEY idx_trade (trade_id), KEY idx_variable (variable_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"},
+        {"name": "add_strategy_id_to_trades", "sql": "ALTER TABLE trades ADD COLUMN strategy_id INT DEFAULT NULL"},
+        {"name": "add_emotion_tag_to_trades", "sql": "ALTER TABLE trades ADD COLUMN emotion_tag VARCHAR(30) DEFAULT NULL"},
+        {"name": "add_setup_grade_to_trades", "sql": "ALTER TABLE trades ADD COLUMN setup_grade CHAR(1) DEFAULT NULL"},
+        {"name": "add_note_saw_to_trades", "sql": "ALTER TABLE trades ADD COLUMN note_saw TEXT DEFAULT NULL"},
+        {"name": "add_note_why_to_trades", "sql": "ALTER TABLE trades ADD COLUMN note_why TEXT DEFAULT NULL"},
+        {"name": "add_note_unsure_to_trades", "sql": "ALTER TABLE trades ADD COLUMN note_unsure TEXT DEFAULT NULL"},
+        {"name": "add_default_strategy_id_to_challenges", "sql": "ALTER TABLE challenges ADD COLUMN default_strategy_id INT DEFAULT NULL"}
     ]
 }

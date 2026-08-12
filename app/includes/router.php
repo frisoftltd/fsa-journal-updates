@@ -44,6 +44,12 @@ $routes = [
     // Reviews
     'get_reviews'           => ['ReviewController', 'getAll'],
     'save_review'           => ['ReviewController', 'save'],
+    // Strategy Builder (dynamic strategies)
+    'get_strategies'        => ['StrategyBuilderController', 'getAll'],
+    'add_strategy'          => ['StrategyBuilderController', 'add'],
+    'update_strategy'       => ['StrategyBuilderController', 'update'],
+    'delete_strategy'       => ['StrategyBuilderController', 'delete'],
+    'save_strategy_vars'    => ['StrategyBuilderController', 'saveVariables'],
 ];
 
 if (!isset($routes[$action])) {

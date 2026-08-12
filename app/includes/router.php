@@ -50,6 +50,7 @@ $routes = [
     'update_strategy'       => ['StrategyBuilderController', 'update'],
     'delete_strategy'       => ['StrategyBuilderController', 'delete'],
     'save_strategy_vars'    => ['StrategyBuilderController', 'saveVariables'],
+    'get_leaderboard'       => ['StrategyBuilderController', 'getLeaderboard'],
 ];
 
 if (!isset($routes[$action])) {

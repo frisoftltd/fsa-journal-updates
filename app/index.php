@@ -38,6 +38,7 @@ $u = currentUser();
     <a href="#" data-page="calculator" onclick="showPage('calculator');return false;"><span class="icon">🧮</span>Risk Calculator</a>
     <a href="#" data-page="strategy" onclick="showPage('strategy');return false;"><span class="icon">🧪</span>Strategy Tester</a>
     <a href="#" data-page="strategies" onclick="showPage('strategies');return false;"><span class="icon">🧩</span>Strategies</a>
+    <a href="#" data-page="leaderboard" onclick="showPage('leaderboard');return false;"><span class="icon">🏅</span>Leaderboard</a>
     <a href="#" data-page="review" onclick="showPage('review');return false;"><span class="icon">📝</span>Weekly Review</a>
     <div class="nav-section">Account</div>
     <a href="#" data-page="profile" onclick="showPage('profile');return false;"><span class="icon">👤</span>Profile</a>
@@ -84,7 +85,7 @@ $u = currentUser();
 
   <?php
   // ── Load each page from its own file ──
-  $pages = ['dashboard','trades','stats','calculator','strategy','strategies','review','profile','challenges'];
+  $pages = ['dashboard','trades','stats','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
   foreach ($pages as $p) {
       include "pages/{$p}.php";
   }
@@ -133,6 +134,7 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 <script src="js/calculator.js"></script>
 <script src="js/strategy.js"></script>
 <script src="js/strategies.js"></script>
+<script src="js/leaderboard.js"></script>
 <script src="js/review.js"></script>
 <script src="js/profile.js"></script>
 <script src="js/challenges.js"></script>

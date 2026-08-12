@@ -247,11 +247,18 @@ function openTradeModal(data=null) {
         const prev = document.getElementById('preview-' + i);
         if (prev) prev.innerHTML = '';
     }
+    // Collapse Strategy & Psychology section by default
+    document.getElementById('strategy-section-body').style.display='none';
+    document.getElementById('strategy-section-chevron').textContent='▸';
+    document.getElementById('strategy-vars-fields').innerHTML='';
+    populateStrategySelect(data);
     if(data){
-        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'];
+        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes','note_saw','note_why','note_unsure'];
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
         if(data.time_in) { const d=data.time_in.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_in_date').value=parts[0]; document.getElementById('f-time_in_time').value=parts[1]?.substring(0,5)||''; }
         if(data.time_out) { const d=data.time_out.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_out_date').value=parts[0]; document.getElementById('f-time_out_time').value=parts[1]?.substring(0,5)||''; }
+        selectEmotion(data.emotion_tag||null);
+        selectGrade(data.setup_grade||null);
         // Show existing screenshots
         const images = data.screenshots_data || [];
         if (images.length > 0) {
@@ -269,8 +276,101 @@ function openTradeModal(data=null) {
         document.getElementById('f-trade_date').value=today;
         document.getElementById('f-time_in_date').value=today;
         document.getElementById('f-time_out_date').value=today;
+        selectEmotion(null);
+        selectGrade(null);
     }
     document.getElementById('trade-modal').classList.add('open');
+}
+
+// ── STRATEGY & PSYCHOLOGY SECTION ────────────────────────
+function toggleStrategySection(){
+    const body = document.getElementById('strategy-section-body');
+    const chevron = document.getElementById('strategy-section-chevron');
+    const open = body.style.display !== 'none';
+    body.style.display = open ? 'none' : 'block';
+    chevron.textContent = open ? '▸' : '▾';
+}
+
+async function populateStrategySelect(data=null){
+    allStrategies = await api('get_strategies');
+    const sel = document.getElementById('f-strategy_id');
+    sel.innerHTML = '<option value="">— none —</option>' + allStrategies.filter(s=>s.is_active==1).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+
+    let selectedId = data?.strategy_id || '';
+    if(!data){
+        const ch = await api('get_active_challenge');
+        if(ch && ch.default_strategy_id) selectedId = ch.default_strategy_id;
+    }
+    sel.value = selectedId || '';
+
+    let prefillMap = null;
+    if(data && Array.isArray(data.trade_variables)){
+        prefillMap = {};
+        data.trade_variables.forEach(tv=>{ prefillMap[tv.variable_id] = tv.value; });
+    }
+    renderStrategyVarFields(prefillMap);
+}
+
+function renderStrategyVarFields(prefillMap=null){
+    const stId = document.getElementById('f-strategy_id').value;
+    const wrap = document.getElementById('strategy-vars-fields');
+    const st = allStrategies.find(s=>s.id==stId);
+    if(!st || !st.variables || !st.variables.length){ wrap.innerHTML=''; return; }
+    wrap.innerHTML = st.variables.map(v=>{
+        const val = prefillMap ? (prefillMap[v.id] ?? '') : '';
+        const fieldId = `f-var-${v.id}`;
+        if(v.input_type==='checkbox'){
+            return `<div class="form-group"><label>${v.label}</label>
+                <select id="${fieldId}" data-var-id="${v.id}">
+                    <option value="0" ${val!=='1'?'selected':''}>No</option>
+                    <option value="1" ${val==='1'?'selected':''}>Yes</option>
+                </select></div>`;
+        }
+        if(v.input_type==='scale'){
+            return `<div class="form-group"><label>${v.label}</label>
+                <select id="${fieldId}" data-var-id="${v.id}">
+                    <option value="">—</option>
+                    ${[1,2,3,4,5].map(n=>`<option value="${n}" ${String(val)===String(n)?'selected':''}>${n}</option>`).join('')}
+                </select></div>`;
+        }
+        if(v.input_type==='select'){
+            const opts=(v.options||'').split(',').map(o=>o.trim()).filter(Boolean);
+            return `<div class="form-group"><label>${v.label}</label>
+                <select id="${fieldId}" data-var-id="${v.id}">
+                    <option value="">—</option>
+                    ${opts.map(o=>`<option value="${o}" ${val===o?'selected':''}>${o}</option>`).join('')}
+                </select></div>`;
+        }
+        return `<div class="form-group"><label>${v.label}</label><input type="text" id="${fieldId}" data-var-id="${v.id}" value="${(val||'').toString().replace(/"/g,'&quot;')}"></div>`;
+    }).join('');
+}
+
+function collectTradeVariables(){
+    const vars = [];
+    document.querySelectorAll('#strategy-vars-fields [data-var-id]').forEach(el=>{
+        vars.push({ variable_id: el.dataset.varId, value: el.value });
+    });
+    return vars;
+}
+
+function selectEmotion(val){
+    document.getElementById('f-emotion_tag').value = val || '';
+    document.querySelectorAll('.emotion-pill').forEach(b=>{
+        const active = !!val && b.dataset.value === val;
+        b.style.background = active ? 'var(--blue)' : '';
+        b.style.color = active ? '#fff' : '';
+        b.style.borderColor = active ? 'var(--blue)' : '';
+    });
+}
+
+function selectGrade(val){
+    document.getElementById('f-setup_grade').value = val || '';
+    document.querySelectorAll('.grade-pill').forEach(b=>{
+        const active = !!val && b.dataset.value === val;
+        b.style.background = active ? 'var(--blue)' : '';
+        b.style.color = active ? '#fff' : '';
+        b.style.borderColor = active ? 'var(--blue)' : '';
+    });
 }
 
 async function editTrade(id){ const t=allTrades.find(t=>t.id==id); if(t) openTradeModal(t); }
@@ -345,14 +445,16 @@ async function saveTrade() {
             const t = allTrades.find(t => t.id == id);
             if (t && t.screenshots) fd.set('existing_screenshots', t.screenshots);
         }
+        fd.set('trade_variables', JSON.stringify(collectTradeVariables()));
         const resp = await fetch(`${API}?action=${id?'update_trade':'add_trade'}`,{method:'POST',body:fd});
         r = await resp.json();
     } else {
         // Use JSON for speed (no files)
         const data = {};
-        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
+        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','confidence','exec_score','fib_level','fsa_rules','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
         data.time_in=tin_d&&tin_t?tin_d+' '+tin_t+':00':null;
         data.time_out=tout_d&&tout_t?tout_d+' '+tout_t+':00':null;
+        data.trade_variables = collectTradeVariables();
         if(id) {
             data.id=id;
             const t = allTrades.find(t => t.id == id);

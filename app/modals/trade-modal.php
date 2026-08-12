@@ -31,6 +31,45 @@
         <div class="form-group"><label>Confidence</label><select id="f-confidence" name="confidence"><option value="">—</option><option>High</option><option>Medium</option><option>Low</option></select></div>
         <div class="form-group"><label>Exec Score (1-10)</label><input type="number" min="1" max="10" id="f-exec_score" name="exec_score"></div>
         <div class="section-divider"></div>
+        <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleStrategySection()">
+          <span>Strategy &amp; Psychology</span>
+          <span id="strategy-section-chevron" style="font-size:11px">▸</span>
+        </div>
+        <div class="form-group full" id="strategy-section-body" style="display:none">
+          <div class="form-group">
+            <label>Strategy</label>
+            <select id="f-strategy_id" name="strategy_id" onchange="renderStrategyVarFields()">
+              <option value="">— none —</option>
+            </select>
+          </div>
+          <div id="strategy-vars-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px"></div>
+
+          <label style="display:block;margin-top:12px">How am I feeling right now?</label>
+          <div id="emotion-grid" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="calm" onclick="selectEmotion('calm')">Calm — waiting for setup</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="itchy" onclick="selectEmotion('itchy')">Itchy — hard to wait</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="fomo" onclick="selectEmotion('fomo')">FOMO — moving without me</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="revenge" onclick="selectEmotion('revenge')">Revenge — make back a loss</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="bored" onclick="selectEmotion('bored')">Bored — forcing action</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="overconf" onclick="selectEmotion('overconf')">Overconfident — win streak</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="anxious" onclick="selectEmotion('anxious')">Anxious — scared to enter</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="unsure" onclick="selectEmotion('unsure')">Unsure — not convinced</button>
+          </div>
+          <input type="hidden" id="f-emotion_tag" name="emotion_tag">
+
+          <label style="display:block;margin-top:12px">Setup Quality (grade the SETUP, not the outcome)</label>
+          <div id="grade-grid" style="display:flex;gap:6px;margin-top:4px">
+            <button type="button" class="btn btn-ghost btn-sm grade-pill" data-value="A" onclick="selectGrade('A')">A</button>
+            <button type="button" class="btn btn-ghost btn-sm grade-pill" data-value="B" onclick="selectGrade('B')">B</button>
+            <button type="button" class="btn btn-ghost btn-sm grade-pill" data-value="C" onclick="selectGrade('C')">C</button>
+          </div>
+          <input type="hidden" id="f-setup_grade" name="setup_grade">
+
+          <div style="margin-top:12px"><label>What did I see?</label><textarea id="f-note_saw" name="note_saw" rows="2"></textarea></div>
+          <div style="margin-top:8px"><label>Why enter now?</label><textarea id="f-note_why" name="note_why" rows="2"></textarea></div>
+          <div style="margin-top:8px"><label>What am I unsure about?</label><textarea id="f-note_unsure" name="note_unsure" rows="2"></textarea></div>
+        </div>
+        <div class="section-divider"></div>
         <div class="section-label">Chart Screenshots (max 4, 1MB each)</div>
         <div class="form-group full" id="screenshots-area">
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">

@@ -44,7 +44,7 @@ function showPage(id) {
     if(pg) pg.classList.add('active');
     const lnk = document.querySelector(`[data-page="${id}"]`);
     if(lnk) lnk.classList.add('active');
-    const titles={dashboard:'Dashboard',trades:'Trade Log',stats:'Statistics',review:'Weekly Review',strategy:'Strategy Tester',strategies:'Strategy Lab',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges'};
+    const titles={dashboard:'Dashboard',trades:'Trade Log',stats:'Statistics',review:'Weekly Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges'};
     document.querySelector('.topbar h2').textContent = titles[id]||id;
     document.querySelector('.sidebar').classList.remove('open');
     if(id==='dashboard') loadDashboard();
@@ -53,6 +53,7 @@ function showPage(id) {
     if(id==='review') loadReviews();
     if(id==='strategy') loadStrategyTrades();
     if(id==='strategies') loadStrategies();
+    if(id==='leaderboard') loadLeaderboard();
     if(id==='calculator') loadCalculator();
     if(id==='profile') loadProfile();
     if(id==='challenges') loadChallenges();

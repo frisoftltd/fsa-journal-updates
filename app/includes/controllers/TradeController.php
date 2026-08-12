@@ -28,6 +28,7 @@ class TradeController {
         $trades = $s->fetchAll();
 
         // Parse screenshots JSON for frontend
+        $tv = $this->db->prepare("SELECT variable_id, value FROM trade_variables WHERE trade_id=?");
         foreach ($trades as &$t) {
             if (!empty($t['screenshots'])) {
                 $t['screenshots_data'] = json_decode($t['screenshots'], true) ?: [];
@@ -37,6 +38,8 @@ class TradeController {
             } else {
                 $t['screenshots_data'] = [];
             }
+            $tv->execute([$t['id']]);
+            $t['trade_variables'] = $tv->fetchAll();
         }
         jsonResponse($trades);
     }
@@ -99,7 +102,7 @@ class TradeController {
             }
         }
 
-        $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes'];
+        $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','confidence','exec_score','fib_level','fsa_rules','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
 
         if ($isUpdate) {
             $trade_id = validId($d['id'] ?? 0);
@@ -115,12 +118,29 @@ class TradeController {
             $sets = implode(',', array_map(fn($c) => "$c=?", $cols));
             $sets .= ",pnl=?,net_pnl=?,r_multiple=?,screenshot=?,screenshots=?";
             $this->db->prepare("UPDATE trades SET $sets WHERE id=? AND user_id=?")->execute($update_vals);
+            $finalTradeId = $trade_id;
         } else {
             $vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
             $vals = array_merge([$this->uid, $chId], $vals, [round($pnl, 4), round($net, 4), $r, $singleScreenshot, $screenshotsJson]);
             $ph = implode(',', array_fill(0, count($cols) + 5, '?'));
             $allcols = implode(',', $cols) . ",pnl,net_pnl,r_multiple,screenshot,screenshots";
             $this->db->prepare("INSERT INTO trades (user_id,challenge_id,$allcols) VALUES (?,?,{$ph})")->execute($vals);
+            $finalTradeId = $this->db->lastInsertId();
+        }
+
+        // Persist strategy variable values (delete-then-insert, scoped to this trade)
+        $tradeVars = $d['trade_variables'] ?? [];
+        if (is_string($tradeVars)) $tradeVars = json_decode($tradeVars, true) ?: [];
+        if (is_array($tradeVars)) {
+            $this->db->prepare("DELETE FROM trade_variables WHERE trade_id=?")->execute([$finalTradeId]);
+            $insertVar = $this->db->prepare("INSERT INTO trade_variables (trade_id,variable_id,value) VALUES (?,?,?)");
+            foreach ($tradeVars as $tv) {
+                $variableId = validId($tv['variable_id'] ?? 0);
+                if (!$variableId) continue;
+                $value = $tv['value'] ?? null;
+                if ($value === '') $value = null;
+                $insertVar->execute([$finalTradeId, $variableId, $value]);
+            }
         }
 
         // Update daily limits
@@ -128,7 +148,7 @@ class TradeController {
         $this->db->prepare("INSERT INTO daily_limits (user_id,log_date,daily_pnl,trades_count) VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE daily_pnl=daily_pnl+?,trades_count=trades_count+1")
             ->execute([$this->uid, $dl_date, round($net, 4), round($net, 4)]);
 
-        jsonResponse(['success' => true, 'id' => $this->db->lastInsertId()]);
+        jsonResponse(['success' => true, 'id' => $finalTradeId]);
     }
 
     /**

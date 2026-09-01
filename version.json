@@ -1,17 +1,22 @@
 {
-    "current_version": "3.5.2",
-    "release_date": "2026-08-12",
+    "current_version": "3.6.0",
+    "release_date": "2026-09-01",
     "changelog": [
-        "Trade form cleanup: removed redundant FSA Rules, Fib Level, and Confidence fields",
-        "These are replaced by dynamic strategy variables, emotion grid, and setup grade",
-        "Database columns preserved — existing 55 trades keep their historical values",
-        "Leaderboard handles legacy adherence data gracefully when absent"
+        "Behavioral Review Engine: daily/weekly/monthly/quarterly/yearly, per-challenge & combined",
+        "20+ deterministic behavior rules: revenge-trade detection, risk creep, overtrading, tilt, emotion-outcome correlation, session leaks, setup-grade validity, variable attribution, drawdown proximity",
+        "Every insight states its sample size and flags early signals vs conclusive patterns",
+        "Replaces manual Weekly Review with automatic AI-style nudges (deterministic PHP, no external API calls)",
+        "New ai_reviews table stores each generated review; old ReviewController/weekly_reviews left untouched"
     ],
     "files": [
-        {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "modals/trade-modal.php", "critical": false},
-        {"path": "js/trades.js", "critical": false},
-        {"path": "pages/trades.php", "critical": false}
+        {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "pages/review.php", "critical": false},
+        {"path": "js/review.js", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "index.php", "critical": false}
     ],
-    "db_migrations": []
+    "db_migrations": [
+        {"name": "create_ai_reviews_table", "sql": "CREATE TABLE IF NOT EXISTS ai_reviews (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, challenge_id INT DEFAULT NULL, period_type ENUM('daily','weekly','monthly','quarterly','yearly') NOT NULL, period_start DATE NOT NULL, period_end DATE NOT NULL, insights_json MEDIUMTEXT, metrics_json MEDIUMTEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, KEY idx_user_period (user_id, period_type, period_start)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"}
+    ]
 }

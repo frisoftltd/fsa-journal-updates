@@ -41,9 +41,12 @@ $routes = [
     'get_strategy_stats'    => ['StrategyController', 'getStats'],
     'add_strategy_trade'    => ['StrategyController', 'add'],
     'delete_strategy_trade' => ['StrategyController', 'delete'],
-    // Reviews
+    // Reviews (manual, legacy)
     'get_reviews'           => ['ReviewController', 'getAll'],
     'save_review'           => ['ReviewController', 'save'],
+    // Review Engine (behavioral, automatic)
+    'get_review'            => ['ReviewEngineController', 'getReview'],
+    'get_review_periods'    => ['ReviewEngineController', 'listPeriods'],
     // Strategy Builder (dynamic strategies)
     'get_strategies'        => ['StrategyBuilderController', 'getAll'],
     'add_strategy'          => ['StrategyBuilderController', 'add'],

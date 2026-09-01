@@ -44,13 +44,13 @@ function showPage(id) {
     if(pg) pg.classList.add('active');
     const lnk = document.querySelector(`[data-page="${id}"]`);
     if(lnk) lnk.classList.add('active');
-    const titles={dashboard:'Dashboard',trades:'Trade Log',stats:'Statistics',review:'Weekly Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges'};
+    const titles={dashboard:'Dashboard',trades:'Trade Log',stats:'Statistics',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges'};
     document.querySelector('.topbar h2').textContent = titles[id]||id;
     document.querySelector('.sidebar').classList.remove('open');
     if(id==='dashboard') loadDashboard();
     if(id==='trades') { loadPairs(); loadTrades(); }
     if(id==='stats') loadStats();
-    if(id==='review') loadReviews();
+    if(id==='review') loadReviewEngine();
     if(id==='strategy') loadStrategyTrades();
     if(id==='strategies') loadStrategies();
     if(id==='leaderboard') loadLeaderboard();

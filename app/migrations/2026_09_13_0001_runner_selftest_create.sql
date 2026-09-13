@@ -1,0 +1,4 @@
+CREATE TABLE _runner_selftest (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    note VARCHAR(50) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;

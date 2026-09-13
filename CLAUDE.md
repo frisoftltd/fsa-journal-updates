@@ -22,11 +22,11 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 |-------|-------|
 | Live URL | https://www.fundedcontrol.com/ |
 | Updater | https://www.fundedcontrol.com/updater.php |
-| GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates |
+| GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (git remote origin and `updater.php` both still say `acrobcrypto250/fsa-journal-updates` — that account was renamed to `frisoftltd`; GitHub redirects it, so it still works, but the hardcoded name in `updater.php` is stale) |
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
-| DB Name | `theittav_journal` on Namecheap shared hosting |
-| Current Version | v3.3.0 |
+| DB Name | `theittav_fundedcontrol` on Namecheap shared hosting (confirmed live 2026-09-13; this file previously said `theittav_journal` — stale) |
+| Current Version | v3.7.0 |
 
 ### Tech Stack
 
@@ -211,6 +211,62 @@ All trade queries must include:
 WHERE user_id = ? AND (challenge_id = ? OR challenge_id IS NULL)
 ```
 The `OR challenge_id IS NULL` handles trades from before v2.3.0.
+
+---
+
+## 3A. DATABASE MIGRATIONS (added v3.7.0)
+
+Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
+database except an inline `db_migrations` array in `version.json` (documented below in §16,
+executed by `updater.php`'s `apply` action). That inline mechanism has no tracking table and no
+checksum, so there was never a durable record of what had actually run on live. As of v3.7.0
+there is a proper tracked runner. **Prefer it over `db_migrations` in `version.json` for all new
+schema work** — the old field still exists and still works, but stop adding to it.
+
+### How it works
+
+- Migration files live in `migrations/` (repo path `app/migrations/`), plain `.sql`, one logical
+  change per file.
+- `migrate.php` scans that directory, compares against a `schema_migrations` tracking table it
+  creates itself, and applies whatever is pending, in filename order.
+- Every applied (or baselined) file has its sha256 checksum recorded. If a file is edited after
+  it was applied, the checksum no longer matches and the runner stops and reports it instead of
+  silently re-running or ignoring the edit.
+- MariaDB commits DDL implicitly, so there is no rollback. A migration that fails partway leaves
+  the schema partly changed — the runner's error output names the exact statement that failed so
+  that state can be reasoned about. Keep migrations small for this reason.
+
+### Naming
+
+```
+migrations/YYYY_MM_DD_NNNN_short_description.sql
+```
+The filename is the sort order, so the sequence number must be zero-padded and unique for that
+date. Example: `2026_09_20_0001_add_default_strategy_id_to_challenges.sql`.
+
+### Adding a migration
+
+1. Write the `.sql` file in `app/migrations/` — plain SQL, statements separated by `;`, no PHP.
+2. Add its path to `version.json`'s `"files"` array (`{"path": "migrations/...sql", "critical": false}`) —
+   if it's not in the manifest, `updater.php` will never deploy it to the server, full stop.
+3. Bump `current_version`, commit, push, tag, release.
+4. **Export the database before running `?mode=run` on live.** DDL can't be rolled back — a
+   backup is the only undo.
+5. Deploy via the normal updater workflow (Acrob runs `updater.php`), then hit
+   `migrate.php?mode=run&token=...` to apply it.
+
+### Running it
+
+`migrate.php` sits next to `updater.php` at the site root, token-protected via a constant defined
+in `includes/config.php` (never in this repo — Acrob sets it by hand on the server):
+
+- `migrate.php?mode=status&token=...` — lists applied/pending, changes nothing. Default mode.
+- `migrate.php?mode=run&token=...` — applies pending migrations, stops at the first failure.
+- `migrate.php?mode=baseline&token=...` — records pending migrations as applied without running
+  them. Used once per already-existing table, so a migration describing a table that's already
+  live isn't re-run against it.
+
+Missing or wrong token → 403, logged via `error_log()`.
 
 ---
 
@@ -511,6 +567,30 @@ define('MEDIA_BASE_DIR', DIR . '/../media/uploads/');
 define('MEDIA_BASE_DIR', __DIR__ . '/../media/uploads/');
 ```
 > ⚠️ config.php is NEVER uploaded to GitHub. Fix must be applied manually in cPanel File Manager.
+
+### Bug 2: `strategies`, `strategy_variables`, `trade_variables` tables don't exist on live (confirmed 2026-09-13)
+
+v3.5.0, v3.5.1, and v3.6.0 all shipped code assuming these tables exist (plus `trades.strategy_id`,
+`emotion_tag`, `setup_grade`, `note_saw`, `note_why`, `note_unsure` and
+`challenges.default_strategy_id`). The `db_migrations` in each version's `version.json` that would
+have created them were never actually applied on live. This is not a soft-degrade bug:
+
+- `TradeController::saveTrade()` (`includes/controllers/TradeController.php`) writes
+  `strategy_id`, `emotion_tag`, `setup_grade`, `note_saw`, `note_why`, `note_unsure` on **every**
+  `add_trade` / `update_trade` call, with no try/catch. PDO defaults to `ERRMODE_EXCEPTION` as of
+  PHP 8.1, so every trade save throws an uncaught `PDOException` — this is a fatal error, not a
+  degraded experience.
+- `TradeController::getAll()` queries `trade_variables` unconditionally — every `get_trades` call
+  (dashboard, trade list) fatals the same way.
+- `StrategyBuilderController` and `ReviewEngineController` query `strategies`, `strategy_variables`,
+  and `trade_variables` directly — every Strategy Lab and Review Engine action fatals too.
+
+In short: core trade logging has likely been fatally broken on live since v3.5.0
+(2026-08-12) — over a month as of this writing. This is release-2 scope (creating the three
+tables + the `trades`/`challenges` columns), but it changes that release's priority from "new
+feature" to "fix a live outage." See the migration runner in §3A — release 2 should ship these as
+tracked migrations, then use `migrate.php?mode=baseline` for the seven tables that already exist
+on live.
 
 ---
 
@@ -917,7 +997,13 @@ Credentials are stored in `includes/config.php` — ask Acrob for exact values w
 3. Bump version
 4. Upload to GitHub via updater workflow
 
-### When adding a DB column:
+### When adding a DB column or table (v3.7.0+):
+Use the migration runner (see §3A) — write a `.sql` file in `app/migrations/`, list it in
+`version.json`'s `files`, deploy, then hit `migrate.php?mode=run&token=...`. Export the DB first.
+
+The `db_migrations` field below still exists in `version.json` and `updater.php` still executes
+it on `apply`, but it predates the tracked runner, has no checksum or persistent ledger, and
+should not be used for new work:
 ```json
 "db_migrations": [
     {
@@ -926,7 +1012,6 @@ Credentials are stored in `includes/config.php` — ask Acrob for exact values w
     }
 ]
 ```
-Add to `version.json` — updater runs it automatically, skips gracefully if already exists.
 
 ---
 
@@ -1081,8 +1166,8 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.3.0
-DB: theittav_journal on Namecheap shared hosting
+Current Version: v3.7.0
+DB: theittav_fundedcontrol on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 
 GitHub Token: [paste token here]

@@ -1,25 +1,26 @@
 {
-    "current_version": "3.8.0",
+    "current_version": "3.9.0",
     "release_date": "2026-09-13",
     "changelog": [
-        "Fix: repairs 95 orphaned trade_variables answers (19 trades) caused by a delete-then-reinsert bug in the strategy variable editor",
-        "New: foreign keys on trade_variables (variable_id RESTRICT, trade_id CASCADE) so the orphaning bug cannot recur",
-        "New: strategy_variables gains role (gate/tag), timeframe, criteria, is_active, created_at — the pass/fail checklist model",
-        "Fix: removed the hardcoded 5-variable-per-strategy cap",
-        "Fix: strategy variable editing is now non-destructive — existing ids are updated in place, never deleted out from under recorded answers; deactivate replaces delete for variables with history",
-        "Change: pre-trade checklist now renders from the active strategy's gate variables instead of a hardcoded FSA rule set",
-        "Delivered via the migrate.php runner shipped in v3.7.0 — export the database before running these migrations on live"
+        "Fix: sidebar nav is now independently scrollable on short viewports (768px/600px) — it was previously cut off with no way to reach the lower items",
+        "Fix: dashboard/stats Win Rate and Avg R no longer count Open trades in their denominator/average; a caption now discloses the active-challenge scope and any excluded open trades",
+        "Fix: the same closed-trades-only rule applied to the by-session/fib/pair/direction breakdown win% columns, for one consistent convention across the Statistics page",
+        "Fix: CalculatorController's calculate_risk endpoint now requires a direction and rejects a stop/target on the wrong side of entry instead of silently computing a plausible-looking R",
+        "Fix: trades.session no longer silently defaults to London when omitted — the column is now nullable with no default, and the trade form and Excel import both leave it unset rather than guessing",
+        "No retroactive changes to existing session values — we cannot know which historical London trades were genuine"
     ],
     "files": [
-        {"path": "migrations/2026_09_13_0003_remap_orphaned_trade_variables.sql", "critical": false},
-        {"path": "migrations/2026_09_13_0004_add_trade_variables_foreign_keys.sql", "critical": false},
-        {"path": "migrations/2026_09_13_0005_extend_strategy_variables_attributes.sql", "critical": false},
-        {"path": "includes/controllers/StrategyBuilderController.php", "critical": false},
-        {"path": "modals/strategy-builder-modal.php", "critical": false},
-        {"path": "modals/checklist-modal.php", "critical": false},
-        {"path": "pages/strategies.php", "critical": false},
-        {"path": "js/strategies.js", "critical": false},
-        {"path": "js/trades.js", "critical": false}
+        {"path": "migrations/2026_09_13_0006_make_trades_session_nullable.sql", "critical": false},
+        {"path": "css/style.css", "critical": false},
+        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "includes/controllers/CalculatorController.php", "critical": false},
+        {"path": "includes/controllers/ImportController.php", "critical": false},
+        {"path": "modals/trade-modal.php", "critical": false},
+        {"path": "pages/dashboard.php", "critical": false},
+        {"path": "pages/stats.php", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "js/dashboard.js", "critical": false},
+        {"path": "js/stats.js", "critical": false}
     ],
     "db_migrations": []
 }

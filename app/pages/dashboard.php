@@ -2,6 +2,7 @@
 <!-- ── DASHBOARD ── -->
 <div class="page active" id="page-dashboard">
   <div class="alert-bar" id="alert-bar"></div>
+  <div id="dash-scope-caption" style="font-size:11px;color:var(--text3);margin-bottom:8px"></div>
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Total Trades</div><div class="kpi-val blue" id="kpi-trades">—</div></div>
     <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-val" id="kpi-winrate">—</div></div>

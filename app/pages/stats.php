@@ -11,6 +11,7 @@
     </select>
     <button class="btn btn-primary btn-sm" onclick="loadStats()">Apply</button>
   </div>
+  <div id="stats-scope-caption" style="font-size:11px;color:var(--text3);margin-bottom:8px"></div>
   <div class="stats-grid" style="margin-bottom:14px">
     <div class="card">
       <div class="card-title">Overall Performance</div>

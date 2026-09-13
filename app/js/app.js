@@ -19,6 +19,17 @@ function fmt(n,prefix='$'){
 }
 function fmtPct(n){return parseFloat(n).toFixed(1)+'%';}
 function fmtR(n){return parseFloat(n).toFixed(2)+'R';}
+// Shared by dashboard.js and stats.js — both render get_stats() output and both need to
+// disclose the challenge scope + open-trade exclusion, not leave it silent.
+function renderScopeCaption(elId, s){
+    const el=document.getElementById(elId);
+    if(!el) return;
+    const scope=s.scope||{};
+    const parts=[];
+    if(scope.challenge_name) parts.push(`Scoped to "${scope.challenge_name}"`);
+    if(s.open_trades) parts.push(`${s.open_trades} open trade${s.open_trades>1?'s':''} excluded from Win Rate & Avg R`);
+    el.textContent = parts.join(' · ');
+}
 function pnlCls(n){return parseFloat(n)>=0?'pnl-pos':'pnl-neg';}
 function resultBadge(r){
     if(!r) return '—';

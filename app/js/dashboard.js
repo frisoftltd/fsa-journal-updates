@@ -17,6 +17,7 @@ async function loadDashboard() {
     const s = await api('get_stats');
     const u = currentUser;
 
+    renderScopeCaption('dash-scope-caption', s);
     const set = (id,val,cls='')=>{const el=document.getElementById(id);if(el){el.textContent=val;if(cls)el.className='kpi-val '+cls;}};
     set('kpi-trades',s.total_trades,'blue');
     set('kpi-winrate',fmtPct(s.win_rate),s.win_rate>=50?'green':'red');

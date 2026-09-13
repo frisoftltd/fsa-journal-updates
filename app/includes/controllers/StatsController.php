@@ -25,28 +25,39 @@ class StatsController {
         $qv = function($sql, $p) { $s = $this->db->prepare($sql); $s->execute($p); return $s->fetchColumn(); };
         $qa = function($sql, $p) { $s = $this->db->prepare($sql); $s->execute($p); return $s->fetchAll(); };
 
+        // Closed trades only (Win/Loss/Break Even) is the one rule for realised R and win
+        // rate across this whole controller — Open trades haven't resolved yet and would
+        // otherwise dilute both just by existing. Applied uniformly below, not per-query.
+        $closedFilter = "result IN ('Win','Loss','Break Even')";
+
         $stats = [];
         $stats['total_trades']  = $qv("SELECT COUNT(*) FROM trades $where", $p);
         $stats['wins']          = $qv("SELECT COUNT(*) FROM trades $where AND result='Win'", $p);
         $stats['losses']        = $qv("SELECT COUNT(*) FROM trades $where AND result='Loss'", $p);
         $stats['break_evens']   = $qv("SELECT COUNT(*) FROM trades $where AND result='Break Even'", $p);
-        $stats['win_rate']      = $stats['total_trades'] > 0 ? round($stats['wins'] / $stats['total_trades'] * 100, 1) : 0;
+        $stats['open_trades']   = $qv("SELECT COUNT(*) FROM trades $where AND result='Open'", $p);
+        $stats['closed_trades'] = $stats['wins'] + $stats['losses'] + $stats['break_evens'];
+        $stats['win_rate']      = $stats['closed_trades'] > 0 ? round($stats['wins'] / $stats['closed_trades'] * 100, 1) : 0;
         $stats['net_pnl']       = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades $where", $p);
         $stats['gross_pnl']     = $qv("SELECT COALESCE(SUM(pnl),0) FROM trades $where", $p);
         $stats['total_fees']    = $qv("SELECT COALESCE(SUM(fees),0) FROM trades $where", $p);
         $stats['avg_win']       = $qv("SELECT COALESCE(AVG(net_pnl),0) FROM trades $where AND result='Win'", $p);
         $stats['avg_loss']      = $qv("SELECT COALESCE(AVG(net_pnl),0) FROM trades $where AND result='Loss'", $p);
-        $stats['avg_r']         = $qv("SELECT COALESCE(AVG(r_multiple),0) FROM trades $where AND r_multiple IS NOT NULL", $p);
+        $stats['avg_r']         = $qv("SELECT COALESCE(AVG(r_multiple),0) FROM trades $where AND $closedFilter", $p);
 
         $wins_sum = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades $where AND result='Win'", $p);
         $loss_sum = abs($qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades $where AND result='Loss'", $p));
         $stats['profit_factor'] = $loss_sum > 0 ? round($wins_sum / $loss_sum, 2) : 0;
 
-        // Breakdowns
-        $stats['by_session']   = $qa("SELECT session,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND session IS NOT NULL GROUP BY session", $p);
-        $stats['by_fib']       = $qa("SELECT fib_level,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND fib_level IS NOT NULL GROUP BY fib_level ORDER BY fib_level", $p);
-        $stats['by_pair']      = $qa("SELECT pair,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND pair IS NOT NULL GROUP BY pair", $p);
-        $stats['by_direction'] = $qa("SELECT direction,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND direction IS NOT NULL GROUP BY direction", $p);
+        // Which challenge these numbers are scoped to, and how many open trades were
+        // excluded from win rate/avg R — surfaced in the UI as a caption, not left silent.
+        $stats['scope'] = ['challenge_id' => $chId ?: null, 'challenge_name' => $ch['name'] ?? null];
+
+        // Breakdowns — closed trades only, same convention as win_rate/avg_r above.
+        $stats['by_session']   = $qa("SELECT session,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND session IS NOT NULL AND $closedFilter GROUP BY session", $p);
+        $stats['by_fib']       = $qa("SELECT fib_level,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND fib_level IS NOT NULL AND $closedFilter GROUP BY fib_level ORDER BY fib_level", $p);
+        $stats['by_pair']      = $qa("SELECT pair,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND pair IS NOT NULL AND $closedFilter GROUP BY pair", $p);
+        $stats['by_direction'] = $qa("SELECT direction,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND direction IS NOT NULL AND $closedFilter GROUP BY direction", $p);
 
         // Cumulative P&L + drawdown
         $cum_trades = $qa("SELECT id,trade_date,net_pnl FROM trades $where ORDER BY trade_date,id", $p);

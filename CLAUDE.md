@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.8.0 |
+| Current Version | v3.9.0 |
 
 ### Tech Stack
 
@@ -172,6 +172,11 @@ result, confidence, exec_score, fib_level, fsa_rules,
 notes, screenshot, screenshots (JSON, up to 4, added later — screenshot kept for back-compat),
 strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0)
 ```
+> `session` is `ENUM('London','New York','Asia','Other') NULL` (nullable, no default, since v3.9.0 —
+> was `NOT NULL DEFAULT 'London'` before, which silently mislabeled every trade saved without an
+> explicit session as London). `NULL` means genuinely not recorded; do not treat it as London.
+> Existing pre-v3.9.0 rows were not touched — some of their `'London'` values are real, some are
+> silent defaults, and there's no way to tell which after the fact.
 
 **pairs**
 ```sql
@@ -257,6 +262,26 @@ All trade queries must include:
 WHERE user_id = ? AND (challenge_id = ? OR challenge_id IS NULL)
 ```
 The `OR challenge_id IS NULL` handles trades from before v2.3.0.
+
+**This means every dashboard/stats number is scoped to the currently active challenge, not the
+user's whole history.** A user with multiple challenges will see different totals depending on
+which one is active — this was reported as a bug in v3.9.0 (17 trades on screen vs. 28 in the
+table) and turned out to be this rule working as designed, just never surfaced in the UI. Since
+v3.9.0 the Dashboard and Statistics pages render a caption disclosing which challenge is in scope
+(`get_stats`'s `scope.challenge_name`) — if you add a new stats card, make sure it goes through
+`StatsController::getStats()` rather than a fresh query, so it inherits both the scoping and the
+caption instead of silently disagreeing with the rest of the page.
+
+### Closed-Trades-Only Rule (added v3.9.0)
+
+One rule, applied everywhere `r_multiple` or win rate is computed: **Open trades are excluded.**
+An `Open` trade's `r_multiple` is a live/interim value, not a settled outcome, and it has no
+business pulling an average or a win rate in either direction just by existing unresolved.
+`result IN ('Win','Loss','Break Even')` is the filter; `ReviewEngineController` and
+`StrategyBuilderController::getLeaderboard()` already did this correctly before v3.9.0 —
+`StatsController::getStats()` (Dashboard + Statistics page, they share one endpoint) did not, and
+was fixed to match. If you add a new R-multiple or win-rate calculation anywhere, use the same
+filter rather than re-deriving the convention.
 
 ---
 
@@ -629,6 +654,17 @@ in the audit, not a bug in the product. See §3A for the DB name correction.
 The real, confirmed defect in this area is the strategy-variable orphaning bug fixed in v3.8.0
 (deleting and re-inserting the variable list on every edit detached 95 recorded answers from
 19 trades) — see the v3.8.0 changelog and migrations `2026_09_13_0003`–`0005`.
+
+### Note: `calculate_risk` / `CalculatorController.php` is not wired to the UI
+
+The Risk Calculator page (`pages/calculator.php`) calls `calcSimple()` (`js/calculator.js`), a
+purely client-side, percentage-based calculation (balance/stop-loss %/risk %/leverage — no entry,
+stop, or target prices, no direction). It never calls the API. `calculate_risk` →
+`CalculatorController::calculate()` is still registered in `router.php` and reachable by a direct
+API call, and as of v3.9.0 it validates that a stop/target sits on the correct side of entry for
+the given direction — but nothing in the current UI exercises that code path. If a future release
+wires a price-based calculator into the UI, it already has this validation; if not, don't assume
+`CalculatorController.php` is being exercised by manual testing of the Risk Calculator page.
 
 ---
 
@@ -1204,7 +1240,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.8.0
+Current Version: v3.9.0
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

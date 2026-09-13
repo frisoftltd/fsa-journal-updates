@@ -8,6 +8,7 @@ async function loadStats(){
     const m=document.getElementById('stat-month')?.value||'';
     const y=document.getElementById('stat-year')?.value||'';
     const s=await api('get_stats'+(m&&y?`&month=${m}&year=${y}`:''));
+    renderScopeCaption('stats-scope-caption', s);
     const set=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val;};
     set('s-total',s.total_trades); set('s-wins',s.wins); set('s-losses',s.losses);
     set('s-be',s.break_evens); set('s-wr',fmtPct(s.win_rate));

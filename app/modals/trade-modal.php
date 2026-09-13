@@ -6,7 +6,7 @@
     <form id="trade-form" enctype="multipart/form-data">
       <div class="form-grid">
         <div class="form-group"><label>Trade Date</label><input type="date" id="f-trade_date" name="trade_date" required></div>
-        <div class="form-group"><label>Session</label><select id="f-session" name="session"><option>London</option><option>New York</option><option>Asia</option><option>Other</option></select></div>
+        <div class="form-group"><label>Session</label><select id="f-session" name="session"><option value="">— Not recorded —</option><option>London</option><option>New York</option><option>Asia</option><option>Other</option></select></div>
         <div class="form-group"><label>Pair</label><select id="f-pair" name="pair" class="pair-select"></select></div>
         <div class="section-divider"></div>
         <div class="section-label">Time In</div>

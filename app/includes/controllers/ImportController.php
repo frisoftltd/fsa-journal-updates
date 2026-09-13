@@ -28,7 +28,7 @@ class ImportController {
             $fees = num($t['fees'] ?? 0);
             $net  = $pnl - $fees;
             $this->db->prepare("INSERT INTO trades (user_id,challenge_id,trade_date,session,pair,direction,entry_price,stop_loss,take_profit,exit_price,lot_size,pnl,fees,net_pnl,r_multiple,result,confidence,exec_score,fib_level,fsa_rules,notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-                ->execute([$this->uid, $chId, $t['trade_date'], $t['session'] ?? 'London', $t['pair'], $t['direction'], $t['entry_price'] ?? null, $t['stop_loss'] ?? null, $t['take_profit'] ?? null, $t['exit_price'] ?? null, $t['lot_size'] ?? null, $pnl, $fees, $net, num($t['r_multiple'] ?? 0), $t['result'] ?? null, $t['confidence'] ?? null, $t['exec_score'] ?? null, $t['fib_level'] ?? null, $t['fsa_rules'] ?? null, $t['notes'] ?? null]);
+                ->execute([$this->uid, $chId, $t['trade_date'], !empty($t['session']) ? $t['session'] : null, $t['pair'], $t['direction'], $t['entry_price'] ?? null, $t['stop_loss'] ?? null, $t['take_profit'] ?? null, $t['exit_price'] ?? null, $t['lot_size'] ?? null, $pnl, $fees, $net, num($t['r_multiple'] ?? 0), $t['result'] ?? null, $t['confidence'] ?? null, $t['exec_score'] ?? null, $t['fib_level'] ?? null, $t['fsa_rules'] ?? null, $t['notes'] ?? null]);
             $count++;
         }
         jsonResponse(['success' => true, 'imported' => $count]);

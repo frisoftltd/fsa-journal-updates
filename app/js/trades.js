@@ -311,8 +311,9 @@ function renderStrategyVarFields(prefillMap=null){
     const stId = document.getElementById('f-strategy_id').value;
     const wrap = document.getElementById('strategy-vars-fields');
     const st = allStrategies.find(s=>s.id==stId);
-    if(!st || !st.variables || !st.variables.length){ wrap.innerHTML=''; return; }
-    wrap.innerHTML = st.variables.map(v=>{
+    const activeVars = st ? (st.variables||[]).filter(v=>v.is_active==1) : [];
+    if(!activeVars.length){ wrap.innerHTML=''; return; }
+    wrap.innerHTML = activeVars.map(v=>{
         const val = prefillMap ? (prefillMap[v.id] ?? '') : '';
         const fieldId = `f-var-${v.id}`;
         if(v.input_type==='checkbox'){
@@ -470,12 +471,26 @@ async function saveTrade() {
     loadTrades(); loadDashboard();
 }
 
-// ── FSA CHECKLIST ─────────────────────────────────────────
-function openChecklist(){
-    const items=document.querySelectorAll('.check-item');
-    items.forEach(i=>{ i.classList.remove('checked'); i.querySelector('input').checked=false; });
-    updateCheckScore();
+// ── PRE-TRADE CHECKLIST ───────────────────────────────────
+// Renders from the active challenge's default strategy's 'gate' variables
+// (criteria/timeframe/role/sort_order) — no hardcoded rule set here.
+async function openChecklist(){
+    const wrap = document.getElementById('checklist-items');
+    wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:4px 0 10px">Loading checklist…</div>';
     document.getElementById('checklist-popup').classList.add('open');
+
+    const [ch, strategies] = await Promise.all([api('get_active_challenge'), api('get_strategies')]);
+    const st = (ch && ch.default_strategy_id) ? strategies.find(s=>s.id==ch.default_strategy_id) : null;
+    const gates = st ? (st.variables||[]).filter(v=>v.role==='gate' && v.is_active==1) : [];
+
+    if(!gates.length){
+        wrap.innerHTML = `<div style="font-size:12px;color:var(--text3);padding:4px 0 10px">
+            No pre-trade checklist is configured${st?` for ${st.name}`:''} yet. Set one up in Strategy Lab, or continue straight to logging the trade.
+        </div>`;
+    } else {
+        wrap.innerHTML = gates.map(v=>`<div class="check-item" onclick="toggleCheck(this)"><input type="checkbox"><span class="check-text">${v.timeframe?`[${v.timeframe}] `:''}${(v.criteria||v.label).replace(/</g,'&lt;')}</span></div>`).join('');
+    }
+    updateCheckScore();
 }
 function toggleCheck(el){
     el.classList.toggle('checked');

@@ -1,7 +1,7 @@
 
 /**
  * FundedControl — Strategy Lab Module
- * Dynamic strategy builder: CRUD strategies + up to 5 custom variables each
+ * Dynamic strategy builder: CRUD strategies + any number of custom variables each
  */
 let allStrategies = [];
 let currentVarRows = [];
@@ -26,7 +26,7 @@ async function loadStrategies(){
                         : '<span style="background:var(--text3);color:#000;font-size:9px;font-weight:700;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:1px">Inactive</span>'}
                     <span style="font-family:var(--font-head);font-size:13px;letter-spacing:0.5px">${st.name}</span>
                 </div>
-                <div style="font-size:12px;color:var(--text2)">${(st.variables||[]).length}/5 variables</div>
+                <div style="font-size:12px;color:var(--text2)">${(st.variables||[]).filter(v=>v.is_active==1).length} active variable${(st.variables||[]).filter(v=>v.is_active==1).length===1?'':'s'}${(st.variables||[]).some(v=>v.is_active==0)?` (${(st.variables||[]).filter(v=>v.is_active==0).length} inactive)`:''}</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center">
                 <button class="btn btn-ghost btn-sm" onclick="openVariablesModal(${st.id})" title="Edit Variables">⚙️ Variables</button>
@@ -83,25 +83,46 @@ function openVariablesModal(strategyId){
     if(!st) return;
     document.getElementById('sv-strategy-id').value = st.id;
     document.getElementById('sv-strategy-name').textContent = st.name;
-    currentVarRows = (st.variables||[]).map(v=>({label:v.label, input_type:v.input_type, options:v.options||''}));
+    currentVarRows = (st.variables||[]).map(v=>({
+        id: v.id, label:v.label, input_type:v.input_type, options:v.options||'',
+        role: v.role || 'gate', timeframe: v.timeframe || '', criteria: v.criteria || '',
+        is_active: v.is_active==0 ? 0 : 1
+    }));
     renderVariableRows();
     document.getElementById('strategy-vars-modal').classList.add('open');
 }
 
 function renderVariableRows(){
     const wrap = document.getElementById('sv-rows');
-    wrap.innerHTML = currentVarRows.map((v,i)=>`<div class="form-grid-2" style="gap:8px;align-items:end;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--border)">
-        <div class="form-group"><label>Label</label><input type="text" value="${(v.label||'').replace(/"/g,'&quot;')}" oninput="updateVarRow(${i},'label',this.value)" placeholder="e.g. Confirmed 4H trend"></div>
-        <div class="form-group"><label>Type</label><select onchange="updateVarRow(${i},'input_type',this.value)">
-            <option value="checkbox" ${v.input_type==='checkbox'?'selected':''}>Checkbox</option>
-            <option value="scale" ${v.input_type==='scale'?'selected':''}>1–5 Scale</option>
-            <option value="select" ${v.input_type==='select'?'selected':''}>Dropdown</option>
-            <option value="text" ${v.input_type==='text'?'selected':''}>Short text</option>
-        </select></div>
-        ${v.input_type==='select'?`<div class="form-group full"><label>Options (comma-separated)</label><input type="text" value="${(v.options||'').replace(/"/g,'&quot;')}" oninput="updateVarRow(${i},'options',this.value)" placeholder="e.g. London,New York,Tokyo"></div>`:''}
-        <div class="form-group"><button class="btn btn-danger btn-sm" onclick="removeVariableRow(${i})">🗑 Remove</button></div>
+    wrap.innerHTML = currentVarRows.map((v,i)=>`<div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;margin-bottom:8px;${v.is_active?'':'opacity:0.55'}">
+        <div class="form-grid-2" style="gap:8px;align-items:end">
+            <div class="form-group"><label>Label</label><input type="text" value="${(v.label||'').replace(/"/g,'&quot;')}" oninput="updateVarRow(${i},'label',this.value)" placeholder="e.g. Confirmed 4H trend"></div>
+            <div class="form-group"><label>Type</label><select onchange="updateVarRow(${i},'input_type',this.value)">
+                <option value="checkbox" ${v.input_type==='checkbox'?'selected':''}>Checkbox</option>
+                <option value="scale" ${v.input_type==='scale'?'selected':''}>1–5 Scale</option>
+                <option value="select" ${v.input_type==='select'?'selected':''}>Dropdown</option>
+                <option value="text" ${v.input_type==='text'?'selected':''}>Short text</option>
+            </select></div>
+            ${v.input_type==='select'?`<div class="form-group full"><label>Options (comma-separated)</label><input type="text" value="${(v.options||'').replace(/"/g,'&quot;')}" oninput="updateVarRow(${i},'options',this.value)" placeholder="e.g. London,New York,Tokyo"></div>`:''}
+            <div class="form-group"><label>Role</label><select onchange="updateVarRow(${i},'role',this.value)">
+                <option value="gate" ${v.role==='gate'?'selected':''}>Gate — mandatory pass/fail</option>
+                <option value="tag" ${v.role==='tag'?'selected':''}>Tag — observed only</option>
+            </select></div>
+            <div class="form-group"><label>Timeframe</label><select onchange="updateVarRow(${i},'timeframe',this.value)">
+                <option value="" ${!v.timeframe?'selected':''}>—</option>
+                <option value="4H" ${v.timeframe==='4H'?'selected':''}>4H</option>
+                <option value="1H" ${v.timeframe==='1H'?'selected':''}>1H</option>
+                <option value="15M" ${v.timeframe==='15M'?'selected':''}>15M</option>
+            </select></div>
+            <div class="form-group full"><label>Criteria (shown to you on the pre-trade checklist)</label><textarea rows="2" oninput="updateVarRow(${i},'criteria',this.value)" placeholder="e.g. Price at 0.618 or 0.705 Fib level on 1H">${(v.criteria||'').replace(/</g,'&lt;')}</textarea></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)">
+                <input type="checkbox" ${v.is_active?'checked':''} onchange="updateVarRow(${i},'is_active',this.checked?1:0)"> Active
+            </label>
+            <button class="btn btn-danger btn-sm" onclick="removeVariableRow(${i})">🗑 Remove</button>
+        </div>
     </div>`).join('');
-    document.getElementById('sv-add-row-btn').disabled = currentVarRows.length >= 5;
 }
 
 function updateVarRow(i, key, val){
@@ -110,22 +131,31 @@ function updateVarRow(i, key, val){
 }
 
 function addVariableRow(){
-    if(currentVarRows.length >= 5){ toast('Maximum 5 variables per strategy','error'); return; }
-    currentVarRows.push({label:'', input_type:'checkbox', options:''});
+    currentVarRows.push({id:null, label:'', input_type:'checkbox', options:'', role:'gate', timeframe:'', criteria:'', is_active:1});
     renderVariableRows();
 }
 
 function removeVariableRow(i){
+    if(!confirm('Remove this variable? If it has recorded trade history it will be deactivated instead of deleted.')) return;
     currentVarRows.splice(i,1);
     renderVariableRows();
 }
 
 async function saveVariables(){
     const strategyId = document.getElementById('sv-strategy-id').value;
-    if(currentVarRows.length > 5){ toast('Maximum 5 variables per strategy','error'); return; }
     const variables = currentVarRows
         .filter(v=>v.label && v.label.trim() !== '')
-        .map((v,i)=>({ label: v.label.trim(), input_type: v.input_type, options: v.input_type==='select' ? (v.options||'') : null, sort_order: i }));
+        .map((v,i)=>({
+            id: v.id || null,
+            label: v.label.trim(),
+            input_type: v.input_type,
+            options: v.input_type==='select' ? (v.options||'') : null,
+            role: v.role || 'gate',
+            timeframe: v.timeframe || null,
+            criteria: v.criteria || null,
+            is_active: v.is_active ? 1 : 0,
+            sort_order: i
+        }));
     const r = await api('save_strategy_vars','POST',{ strategy_id: strategyId, variables });
     if(r.error){ toast(r.error,'error'); return; }
     toast('Variables saved! ✅');

@@ -14,10 +14,10 @@
 
 <!-- ══ STRATEGY VARIABLES EDITOR MODAL ══ -->
 <div class="modal-overlay" id="strategy-vars-modal">
-  <div class="modal" style="max-width:640px">
+  <div class="modal" style="max-width:720px">
     <h3>⚙️ EDIT VARIABLES — <span id="sv-strategy-name"></span></h3>
     <input type="hidden" id="sv-strategy-id">
-    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Up to 5 custom variables to track on every trade for this strategy.</div>
+    <div style="font-size:12px;color:var(--text3);margin-bottom:12px">Custom variables to track on every trade for this strategy. "Gate" variables are mandatory pass/fail checks; "Tag" variables are observed-only. Deactivate a variable to retire it without losing its trade history.</div>
     <div id="sv-rows"></div>
     <div style="margin:10px 0">
       <button class="btn btn-ghost btn-sm" id="sv-add-row-btn" onclick="addVariableRow()">+ Add Variable</button>

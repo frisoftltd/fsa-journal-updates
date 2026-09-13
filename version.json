@@ -1,16 +1,25 @@
 {
-    "current_version": "3.7.0",
+    "current_version": "3.8.0",
     "release_date": "2026-09-13",
     "changelog": [
-        "New: tracked SQL migration runner (migrate.php) — the app can now actually deliver schema changes, not just files",
-        "schema_migrations tracking table with checksum verification, stop-on-first-failure, and status/run/baseline modes",
-        "Two self-test migrations included to prove the runner end to end (create + drop a throwaway table)",
-        "No product-facing schema changes in this release — see release notes for the three missing tables (strategies, strategy_variables, trade_variables) planned for the next release"
+        "Fix: repairs 95 orphaned trade_variables answers (19 trades) caused by a delete-then-reinsert bug in the strategy variable editor",
+        "New: foreign keys on trade_variables (variable_id RESTRICT, trade_id CASCADE) so the orphaning bug cannot recur",
+        "New: strategy_variables gains role (gate/tag), timeframe, criteria, is_active, created_at — the pass/fail checklist model",
+        "Fix: removed the hardcoded 5-variable-per-strategy cap",
+        "Fix: strategy variable editing is now non-destructive — existing ids are updated in place, never deleted out from under recorded answers; deactivate replaces delete for variables with history",
+        "Change: pre-trade checklist now renders from the active strategy's gate variables instead of a hardcoded FSA rule set",
+        "Delivered via the migrate.php runner shipped in v3.7.0 — export the database before running these migrations on live"
     ],
     "files": [
-        {"path": "migrate.php", "critical": false},
-        {"path": "migrations/2026_09_13_0001_runner_selftest_create.sql", "critical": false},
-        {"path": "migrations/2026_09_13_0002_runner_selftest_drop.sql", "critical": false}
+        {"path": "migrations/2026_09_13_0003_remap_orphaned_trade_variables.sql", "critical": false},
+        {"path": "migrations/2026_09_13_0004_add_trade_variables_foreign_keys.sql", "critical": false},
+        {"path": "migrations/2026_09_13_0005_extend_strategy_variables_attributes.sql", "critical": false},
+        {"path": "includes/controllers/StrategyBuilderController.php", "critical": false},
+        {"path": "modals/strategy-builder-modal.php", "critical": false},
+        {"path": "modals/checklist-modal.php", "critical": false},
+        {"path": "pages/strategies.php", "critical": false},
+        {"path": "js/strategies.js", "critical": false},
+        {"path": "js/trades.js", "critical": false}
     ],
     "db_migrations": []
 }

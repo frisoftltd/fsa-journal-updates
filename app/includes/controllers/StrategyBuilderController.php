@@ -3,7 +3,7 @@
 /**
  * FundedControl — Strategy Builder Controller
  * Handles: get_strategies, add_strategy, update_strategy, delete_strategy, save_strategy_vars
- * User-defined strategies, each with up to 5 custom variables. Separate from
+ * User-defined strategies, each with any number of custom variables. Separate from
  * StrategyController (strategy_tests sandbox) — do not merge.
  */
 class StrategyBuilderController {
@@ -23,7 +23,7 @@ class StrategyBuilderController {
         $s->execute([$this->uid]);
         $strategies = $s->fetchAll();
 
-        $v = $this->db->prepare("SELECT id,strategy_id,label,input_type,options,sort_order FROM strategy_variables WHERE strategy_id=? ORDER BY sort_order ASC, id ASC");
+        $v = $this->db->prepare("SELECT id,strategy_id,label,input_type,options,role,timeframe,criteria,sort_order,is_active FROM strategy_variables WHERE strategy_id=? ORDER BY sort_order ASC, id ASC");
         foreach ($strategies as &$st) {
             $v->execute([$st['id']]);
             $st['variables'] = $v->fetchAll();
@@ -66,11 +66,25 @@ class StrategyBuilderController {
         $owns->execute([$id, $this->uid]);
         if (!$owns->fetch()) jsonError('Strategy not found');
 
-        $this->db->prepare("DELETE FROM strategy_variables WHERE strategy_id=?")->execute([$id]);
-        $this->db->prepare("DELETE FROM strategies WHERE id=? AND user_id=?")->execute([$id, $this->uid]);
+        try {
+            $this->db->prepare("DELETE FROM strategy_variables WHERE strategy_id=?")->execute([$id]);
+            $this->db->prepare("DELETE FROM strategies WHERE id=? AND user_id=?")->execute([$id, $this->uid]);
+        } catch (PDOException $e) {
+            if ($this->isForeignKeyViolation($e)) {
+                jsonError('This strategy has trade history recorded against its variables and cannot be deleted. Deactivate it instead.');
+            }
+            throw $e;
+        }
         jsonResponse(['success' => true]);
     }
 
+    /**
+     * Non-destructive by design: existing variable ids are updated in place and
+     * never change, so answers already recorded in trade_variables stay attached.
+     * A variable dropped from the submitted list is deactivated if it has any
+     * recorded answers, and only actually deleted if it was never used (the
+     * trade_variables FK enforces this even if the pre-check below races).
+     */
     public function saveVariables() {
         $d = jsonInput();
         $strategyId = validId($d['strategy_id'] ?? 0);
@@ -82,23 +96,68 @@ class StrategyBuilderController {
 
         $variables = $d['variables'] ?? [];
         if (!is_array($variables)) jsonError('Invalid variables payload');
-        if (count($variables) > 5) jsonError('Maximum 5 variables per strategy');
 
         $allowedTypes = ['checkbox', 'scale', 'select', 'text'];
+        $allowedRoles = ['gate', 'tag'];
 
-        $this->db->prepare("DELETE FROM strategy_variables WHERE strategy_id=?")->execute([$strategyId]);
+        $existingStmt = $this->db->prepare("SELECT id FROM strategy_variables WHERE strategy_id=?");
+        $existingStmt->execute([$strategyId]);
+        $existingIds = array_map('intval', array_column($existingStmt->fetchAll(), 'id'));
 
-        $insert = $this->db->prepare("INSERT INTO strategy_variables (strategy_id,label,input_type,options,sort_order) VALUES (?,?,?,?,?)");
+        $update = $this->db->prepare("UPDATE strategy_variables SET label=?, input_type=?, options=?, role=?, timeframe=?, criteria=?, sort_order=?, is_active=? WHERE id=? AND strategy_id=?");
+        $insert = $this->db->prepare("INSERT INTO strategy_variables (strategy_id,label,input_type,options,role,timeframe,criteria,sort_order,is_active) VALUES (?,?,?,?,?,?,?,?,?)");
+
+        $keepIds = [];
         $order = 0;
         foreach ($variables as $v) {
             $label = trim($v['label'] ?? '');
             if ($label === '') continue;
             $type = in_array($v['input_type'] ?? '', $allowedTypes, true) ? $v['input_type'] : 'checkbox';
             $options = $type === 'select' ? ($v['options'] ?? null) : null;
-            $insert->execute([$strategyId, $label, $type, $options, $order]);
+            $role = in_array($v['role'] ?? '', $allowedRoles, true) ? $v['role'] : 'gate';
+            $timeframe = trim($v['timeframe'] ?? '') ?: null;
+            $criteria = trim($v['criteria'] ?? '') ?: null;
+            $isActive = array_key_exists('is_active', $v) ? (int)!!$v['is_active'] : 1;
+            $id = validId($v['id'] ?? 0);
+
+            if ($id && in_array($id, $existingIds, true)) {
+                $update->execute([$label, $type, $options, $role, $timeframe, $criteria, $order, $isActive, $id, $strategyId]);
+                $keepIds[] = $id;
+            } else {
+                $insert->execute([$strategyId, $label, $type, $options, $role, $timeframe, $criteria, $order, $isActive]);
+                $keepIds[] = (int)$this->db->lastInsertId();
+            }
             $order++;
         }
+
+        $removedIds = array_diff($existingIds, $keepIds);
+        if ($removedIds) {
+            $checkTv = $this->db->prepare("SELECT COUNT(*) FROM trade_variables WHERE variable_id=?");
+            $deactivate = $this->db->prepare("UPDATE strategy_variables SET is_active=0 WHERE id=?");
+            $delete = $this->db->prepare("DELETE FROM strategy_variables WHERE id=?");
+            foreach ($removedIds as $rid) {
+                $checkTv->execute([$rid]);
+                if ($checkTv->fetchColumn() > 0) {
+                    $deactivate->execute([$rid]);
+                    continue;
+                }
+                try {
+                    $delete->execute([$rid]);
+                } catch (PDOException $e) {
+                    if ($this->isForeignKeyViolation($e)) {
+                        $deactivate->execute([$rid]);
+                    } else {
+                        throw $e;
+                    }
+                }
+            }
+        }
+
         jsonResponse(['success' => true]);
+    }
+
+    private function isForeignKeyViolation(PDOException $e) {
+        return ($e->errorInfo[1] ?? null) == 1451 || strpos($e->getMessage(), 'foreign key constraint') !== false;
     }
 
     /**

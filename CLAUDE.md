@@ -25,8 +25,8 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (git remote origin and `updater.php` both still say `acrobcrypto250/fsa-journal-updates` — that account was renamed to `frisoftltd`; GitHub redirects it, so it still works, but the hardcoded name in `updater.php` is stale) |
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
-| DB Name | `theittav_fundedcontrol` on Namecheap shared hosting (confirmed live 2026-09-13; this file previously said `theittav_journal` — stale) |
-| Current Version | v3.7.0 |
+| DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
+| Current Version | v3.8.0 |
 
 ### Tech Stack
 
@@ -159,7 +159,8 @@ onboarding_completed
 id, user_id, name, prop_firm, challenge_phase,
 starting_balance, current_balance, max_drawdown_pct,
 daily_loss_limit, risk_per_trade_pct, profit_target_pct,
-status (active/completed/failed), is_active (0/1), created_at
+status (active/completed/failed), is_active (0/1), created_at,
+default_strategy_id (added v3.5.0 — links to strategies.id)
 ```
 
 **trades**
@@ -168,7 +169,8 @@ id, user_id, challenge_id, trade_date, session, time_in, time_out,
 pair, direction, entry_price, stop_loss, take_profit, exit_price,
 lot_size, risk_amount, fees, pnl, net_pnl, r_multiple,
 result, confidence, exec_score, fib_level, fsa_rules,
-notes, screenshot
+notes, screenshot, screenshots (JSON, up to 4, added later — screenshot kept for back-compat),
+strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0)
 ```
 
 **pairs**
@@ -182,16 +184,54 @@ id, user_id, strategy_name, timeframe, market,
 rule1-rule5, test_date, pair, direction, r1-r5,
 result, fib_level, r_multiple, net_pnl, session, notes, created_at
 ```
+> Legacy sandbox, separate from the Strategy Lab (`strategies`/`strategy_variables` below). Do not merge.
+
+**strategies** (added v3.5.0)
+```sql
+id, user_id, name, is_active (0/1), created_at
+```
+
+**strategy_variables** (added v3.5.0; role/timeframe/criteria/is_active/created_at added v3.8.0)
+```sql
+id, strategy_id, label, input_type (checkbox/scale/select/text), options,
+role (gate/tag) DEFAULT 'gate', timeframe (4H/1H/15M or NULL), criteria (TEXT, NULL),
+sort_order, is_active (0/1) DEFAULT 1, created_at
+```
+> `role='gate'` = mandatory pass/fail, checked on the pre-trade checklist. `role='tag'` = observed-only,
+> captured on the trade form but not gated. Deactivate (`is_active=0`) instead of deleting a variable
+> that has any `trade_variables` rows — the FK below rejects the delete anyway.
+
+**trade_variables** (added v3.5.1; foreign keys added v3.8.0)
+```sql
+id, trade_id, variable_id, value (VARCHAR 255)
+FK: variable_id → strategy_variables(id) ON DELETE RESTRICT
+FK: trade_id → trades(id) ON DELETE CASCADE
+```
+> Before v3.8.0 this table had no foreign keys at all, which is how 95 answers across 19 trades got
+> silently orphaned (a delete-then-reinsert bug in the strategy variable editor deleted and recreated
+> variable ids 6–10 as 11–15). Fixed by migrations `2026_09_13_0003`–`0004`. See §11 for history.
+
+**ai_reviews** (added v3.6.0)
+```sql
+id, user_id, challenge_id, period_type (daily/weekly/monthly/quarterly/yearly),
+period_start, period_end, insights_json, metrics_json, created_at
+```
 
 **weekly_reviews**
 ```sql
 id, user_id, week_start, week_end, process_score, mindset_score,
 key_lesson, what_went_well, what_to_improve, rules_followed
 ```
+> Legacy manual review, superseded by `ai_reviews` for new usage but left untouched.
 
 **daily_limits**
 ```sql
 user_id, log_date, daily_pnl, trades_count
+```
+
+**schema_migrations** (added v3.7.0 — see §3A)
+```sql
+id, filename, checksum, applied_at, execution_ms, status (applied/failed/baselined), error_message
 ```
 
 ### Data Relationships
@@ -199,9 +239,15 @@ user_id, log_date, daily_pnl, trades_count
 ```
 users (1) ──→ (many) challenges
 challenges (1) ──→ (many) trades
+challenges (many) ──→ (1) strategies              [default_strategy_id]
+trades (many) ──→ (1) strategies                  [strategy_id]
+strategies (1) ──→ (many) strategy_variables
+strategy_variables (1) ──→ (many) trade_variables  [FK RESTRICT]
+trades (1) ──→ (many) trade_variables              [FK CASCADE]
 users (1) ──→ (many) pairs
 users (1) ──→ (many) strategy_tests
 users (1) ──→ (many) weekly_reviews
+users (1) ──→ (many) ai_reviews
 ```
 
 ### Challenge Scoping Rule
@@ -568,29 +614,21 @@ define('MEDIA_BASE_DIR', __DIR__ . '/../media/uploads/');
 ```
 > ⚠️ config.php is NEVER uploaded to GitHub. Fix must be applied manually in cPanel File Manager.
 
-### Bug 2: `strategies`, `strategy_variables`, `trade_variables` tables don't exist on live (confirmed 2026-09-13)
+### Bug 2 — RETRACTED (was: "strategies/strategy_variables/trade_variables missing on live")
 
-v3.5.0, v3.5.1, and v3.6.0 all shipped code assuming these tables exist (plus `trades.strategy_id`,
-`emotion_tag`, `setup_grade`, `note_saw`, `note_why`, `note_unsure` and
-`challenges.default_strategy_id`). The `db_migrations` in each version's `version.json` that would
-have created them were never actually applied on live. This is not a soft-degrade bug:
+The v3.7.0 release notes claimed these three tables were missing on live and that core trade
+logging had been fatally broken since v3.5.0. That check was run against `theittav_fundedcontrol`
+— **an abandoned copy of the database, not the live one.** The live database is
+`theittav_journal`, confirmed 2026-09-13 while scoping the v3.8.0 release. On `theittav_journal`,
+`strategies`, `strategy_variables`, `trade_variables`, `schema_migrations`, and `ai_reviews` all
+exist, `trades` already carries `strategy_id`/`emotion_tag`/`setup_grade`/`note_saw`/`note_why`/
+`note_unsure`, and the Strategy Lab is deployed and working. **There was no outage.** Treat the
+v3.7.0 release's "likely fatal since v3.5.0" claim as wrong — it was a bad-database-identity bug
+in the audit, not a bug in the product. See §3A for the DB name correction.
 
-- `TradeController::saveTrade()` (`includes/controllers/TradeController.php`) writes
-  `strategy_id`, `emotion_tag`, `setup_grade`, `note_saw`, `note_why`, `note_unsure` on **every**
-  `add_trade` / `update_trade` call, with no try/catch. PDO defaults to `ERRMODE_EXCEPTION` as of
-  PHP 8.1, so every trade save throws an uncaught `PDOException` — this is a fatal error, not a
-  degraded experience.
-- `TradeController::getAll()` queries `trade_variables` unconditionally — every `get_trades` call
-  (dashboard, trade list) fatals the same way.
-- `StrategyBuilderController` and `ReviewEngineController` query `strategies`, `strategy_variables`,
-  and `trade_variables` directly — every Strategy Lab and Review Engine action fatals too.
-
-In short: core trade logging has likely been fatally broken on live since v3.5.0
-(2026-08-12) — over a month as of this writing. This is release-2 scope (creating the three
-tables + the `trades`/`challenges` columns), but it changes that release's priority from "new
-feature" to "fix a live outage." See the migration runner in §3A — release 2 should ship these as
-tracked migrations, then use `migrate.php?mode=baseline` for the seven tables that already exist
-on live.
+The real, confirmed defect in this area is the strategy-variable orphaning bug fixed in v3.8.0
+(deleting and re-inserting the variable list on every edit detached 95 recorded answers from
+19 trades) — see the v3.8.0 changelog and migrations `2026_09_13_0003`–`0005`.
 
 ---
 
@@ -1166,8 +1204,8 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.7.0
-DB: theittav_fundedcontrol on Namecheap shared hosting
+Current Version: v3.8.0
+DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 
 GitHub Token: [paste token here]

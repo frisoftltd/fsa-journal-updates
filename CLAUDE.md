@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.9.4 |
+| Current Version | v3.10.0 |
 
 ### Tech Stack
 
@@ -79,6 +79,7 @@ fundedcontrol.com/
 │   ├── config.php                     ← ⛔ DB CREDENTIALS — NEVER IN GITHUB
 │   ├── api.php                        ← Thin API entry (14 lines max)
 │   ├── helpers.php                    ← Shared functions
+│   ├── emotion_states.php             ← Emotional state taxonomy (added v3.10.0)
 │   ├── router.php                     ← Action → controller routing
 │   │
 │   └── controllers/
@@ -177,6 +178,10 @@ strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3
 > explicit session as London). `NULL` means genuinely not recorded; do not treat it as London.
 > Existing pre-v3.9.0 rows were not touched — some of their `'London'` values are real, some are
 > silent defaults, and there's no way to tell which after the fact.
+>
+> `emotion_tag` is `VARCHAR(30) NULL`. As of v3.10.0 it stores one of nine research-grounded
+> state **codes** (never the label) — see "Emotional State Taxonomy" below for the full list,
+> sourcing, and how pre-v3.10.0 rows are handled.
 
 **pairs**
 ```sql
@@ -369,6 +374,101 @@ Two real fixes went into v3.9.3 regardless, independent of the phantom bug hunt:
   bar or cell reads as "real data, just deemphasized," which undersold how easily a low-n bucket's
   character can flip on a single trade (`0.618` moved from a flat 0% to ~33% on the strength of one
   legacy row).
+
+### Emotional State Taxonomy (added v3.10.0)
+
+`trades.emotion_tag` moved from an ungrounded 8-state set to nine states drawn from two sources:
+
+- **Mark Douglas, *Trading in the Zone*** — names four primary trading fears (being wrong,
+  losing money, missing out, leaving money on the table) as the source of most trading error,
+  plus a separate need for discipline against the euphoria/overconfidence that follows a winning
+  streak. The target state is not "calm" generally but a relaxed, carefree state produced by
+  having accepted the risk.
+- **Fenton-O'Creevy et al. (2011), *Journal of Organizational Behavior*** — traders using
+  antecedent-focused emotion regulation outperform those using response-focused strategies; the
+  best traders treat emotion as information rather than noise, which is the reasoning behind
+  giving every state a real explanation instead of a one-word label.
+
+| code | label | phase |
+|---|---|---|
+| `settled` | Settled | target state |
+| `impatient` | Impatient | pre-entry |
+| `hesitant` | Hesitant | pre-entry |
+| `chasing` | Chasing | pre-entry |
+| `hoping` | Hoping | in-trade |
+| `wanting_out` | Wanting out | in-trade |
+| `greedy` | Greedy | in-trade |
+| `invincible` | Invincible | post-outcome |
+| `vengeful` | Vengeful | post-outcome |
+
+Full descriptions live in `includes/emotion_states.php::emotionStates()` — this is the **single
+source of truth**. The trade form (`js/trades.js::renderEmotionGrid()`, data embedded by
+`index.php` as `window.EMOTION_STATES`/`window.LEGACY_EMOTION_LABELS`) and
+`ReviewEngineController` both read from it; nothing else hardcodes these codes, labels, or
+descriptions. Order matters (target → pre-entry → in-trade → post-outcome distortions) and is
+preserved wherever the list is rendered.
+
+**Codes are permanent, labels are not.** `trades.emotion_tag` stores the `code` column
+(`settled`, `impatient`, ...), never the display label — labels/descriptions can be reworded
+freely, a code must never change once shipped, or historical data becomes unreadable.
+
+**The trade form's emotion grid keeps the old tap-grid pattern** (pill buttons, no typing) but
+adds a non-destructive way to read a state's meaning before choosing it: each pill has a
+companion "ⓘ" button that shows the description in a panel below the grid without touching the
+selection at all — tapping ⓘ never writes to the hidden `emotion_tag` field or changes which pill
+is highlighted. Tapping the pill's own label selects it; tapping an already-selected pill's label
+again clears it, and there's also an explicit "✕ Clear selection" link, because an unanswered
+emotion must never default to anything (the same silent-default problem fixed for checkbox
+strategy variables in v3.9.4 — see below).
+
+**Legacy data — not rewritten.** The old 8-state set (`calm`, `itchy`, `fomo`, `revenge`,
+`bored`, `overconf`, `anxious`, `unsure`) is not 1:1 with the new nine (e.g. legacy `bored` and
+`itchy` both land conceptually near `impatient`, `anxious` and `unsure` both land near
+`hesitant`) — collapsing them into new codes would invent precision that was never recorded, so
+existing rows are untouched. `legacyEmotionLabels()` in the same file maps each retired code to a
+readable "(legacy)"-suffixed label, used by `emotionLabel()` (both a PHP function and a JS
+function of the same name in `trades.js`, reading the same embedded data) wherever a trade's
+emotion needs to render as text: the trade-view detail panel, and the edit form's legacy-value
+warning (shown when an existing trade's `emotion_tag` doesn't match any of the nine current
+codes — no pill lights up for it, so the form explicitly states what was recorded and warns that
+picking a new pill will replace it, rather than leaving the grid looking blank/unanswered).
+
+**Audit query — has not been run in this environment** (no live DB credentials here, by design).
+Run against `theittav_journal` before relying on the historical distribution for anything:
+```sql
+SELECT emotion_tag, COUNT(*) AS n FROM trades WHERE emotion_tag IS NOT NULL GROUP BY emotion_tag ORDER BY n DESC;
+```
+
+**`ReviewEngineController` hardcoded references, both fixed:**
+- `ruleEmotionOutcome()` groups by the raw `emotion_tag` value (already generic — no hardcoded
+  list, works unchanged on old or new codes) but rendered the raw code directly in insight prose;
+  now runs it through `emotionLabel()` so old and new codes both read as a name, not a code,
+  while the underlying grouping still keys on the exact stored string (an old and a new code
+  that feel similar, e.g. `itchy` and `impatient`, are never merged).
+- `ruleNegativeStateFrequency()` had a hardcoded `['itchy','fomo','revenge','bored']` "reactive
+  state" list. Extended to `['itchy','fomo','revenge','bored','impatient','chasing','vengeful']`
+  — both the retired codes and their nearest v3.10.0 equivalents, so the rule keeps working on a
+  mix of old and new rows. Deliberately does **not** include `hesitant`/`invincible` (the old set
+  excluded their predecessors `anxious`/`unsure`/`overconf` from this specific rule too — it
+  measures impulsive/undisciplined *entries*, not fear-driven hesitation or post-win-streak
+  bias) or `hoping`/`wanting_out`/`greedy` (in-trade/exit states with no equivalent in the old
+  set, and out of this rule's entry-timing scope). See the inline comment in
+  `ReviewEngineController.php::ruleNegativeStateFrequency()` for the full reasoning if this list
+  needs revisiting.
+
+**Design choice — PHP file, not a database table.** A DB table would let descriptions be edited
+without a release, but this is a fixed, citation-grounded taxonomy, not user content — a table
+would add CRUD/migration surface for something that isn't meant to change casually. A plain PHP
+file (`includes/emotion_states.php`, required directly by `index.php` for the trade form and by
+`ReviewEngineController.php` for insight text) keeps the taxonomy in version control next to the
+research citations that justify it, consistent with how fixed enumerations with metadata already
+work elsewhere in this codebase (e.g. `ReviewEngineController`'s `MIN_*` constants).
+
+**Not done in v3.10.0, by design:** the next release adds during-position and post-close
+journaling and will reuse this same grid at all three phases — that's why the labels/descriptions
+are phase-neutral rather than entry-framed like the old set ("waiting for setup", "scared to
+enter") was. No phase field exists yet; today's single capture point is still logged at
+trade-save time only.
 
 ---
 
@@ -887,6 +987,12 @@ wires a price-based calculator into the UI, it already has this validation; if n
 10. **Brand lives in CSS variables** — never hardcode colors
 11. **Always test after deploy** — dashboard, add trade, challenges, profile, calculator
 12. **Never edit updater.php** — it's battle-tested
+13. **When a change is agreed, implement it and commit, tag, push, and release in the same
+    turn — do not stop to ask for confirmation.** (Added v3.10.0.) Work has repeatedly sat
+    committed-in-appearance-only — discussed and reported on as if it shipped — while actually
+    still uncommitted in the working tree, once for multiple releases in a row. If the user asks
+    for a specific version bump, finish the whole release pipeline (commit → tag → push →
+    GitHub Release) before ending the turn, not just the code change.
 
 ---
 
@@ -1422,7 +1528,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.9.4
+Current Version: v3.10.0
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

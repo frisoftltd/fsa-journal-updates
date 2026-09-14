@@ -1,5 +1,6 @@
 <?php
 require_once 'includes/config.php';
+require_once 'includes/emotion_states.php';
 requireLogin();
 $u = currentUser();
 ?><!DOCTYPE html>
@@ -112,6 +113,10 @@ foreach ($modals as $m) {
 <div class="toast" id="toast"></div>
 
 <script>
+// Single source of truth for emotion codes/labels/descriptions lives in
+// includes/emotion_states.php — trades.js reads this, it never hardcodes the list.
+window.EMOTION_STATES = <?= json_encode(emotionStates()) ?>;
+window.LEGACY_EMOTION_LABELS = <?= json_encode(legacyEmotionLabels()) ?>;
 function filterTrades(q) {
     const f=allTrades.filter(t=>Object.values(t).some(v=>v&&String(v).toLowerCase().includes(q.toLowerCase())));
     renderTradesTable(f);

@@ -42,16 +42,12 @@
           <div id="strategy-vars-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px"></div>
 
           <label style="display:block;margin-top:12px">How am I feeling right now?</label>
-          <div id="emotion-grid" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px">
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="calm" onclick="selectEmotion('calm')">Calm — waiting for setup</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="itchy" onclick="selectEmotion('itchy')">Itchy — hard to wait</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="fomo" onclick="selectEmotion('fomo')">FOMO — moving without me</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="revenge" onclick="selectEmotion('revenge')">Revenge — make back a loss</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="bored" onclick="selectEmotion('bored')">Bored — forcing action</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="overconf" onclick="selectEmotion('overconf')">Overconfident — win streak</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="anxious" onclick="selectEmotion('anxious')">Anxious — scared to enter</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-value="unsure" onclick="selectEmotion('unsure')">Unsure — not convinced</button>
-          </div>
+          <!-- Pills render from window.EMOTION_STATES (includes/emotion_states.php via
+               index.php) — nothing here hardcodes the state list. -->
+          <div id="emotion-grid" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
+          <div id="emotion-description" style="display:none;margin-top:8px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text2);line-height:1.5"></div>
+          <div id="emotion-legacy-note" style="display:none;margin-top:6px;font-size:11px;color:var(--orange)"></div>
+          <button type="button" id="emotion-clear-btn" onclick="clearEmotion()" style="display:none;margin-top:6px;background:none;border:none;color:var(--text3);font-size:11px;cursor:pointer;padding:0;text-decoration:underline">✕ Clear selection</button>
           <input type="hidden" id="f-emotion_tag" name="emotion_tag">
 
           <label style="display:block;margin-top:12px">Setup Quality (grade the SETUP, not the outcome)</label>

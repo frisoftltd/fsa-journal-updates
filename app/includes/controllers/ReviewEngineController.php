@@ -6,6 +6,8 @@
  * Deterministic PHP rules over real trade data. No external API calls.
  * Leaves ReviewController / weekly_reviews (manual review) untouched.
  */
+require_once __DIR__ . '/../emotion_states.php';
+
 class ReviewEngineController {
     const MIN_RULE_ADHERENCE = 10;   // A1 good-check, each side
     const MIN_RULE_VOLUME    = 10;   // A1 watch-check, total tagged
@@ -614,23 +616,29 @@ class ReviewEngineController {
             if ($worstKey === null || $g['win_rate'] < $qualifying[$worstKey]['win_rate']) $worstKey = $key;
             if ($bestKey === null || $g['win_rate'] > $qualifying[$bestKey]['win_rate']) $bestKey = $key;
         }
+        // Groups are keyed by the raw emotion_tag code (old or new set, never mixed
+        // together — groupStats groups by exact string) so an old and new code that
+        // feel similar (e.g. legacy 'itchy' and current 'impatient') are never silently
+        // merged. emotionLabel() only affects how the code reads in the insight text.
         if ($worstKey !== null) {
             $w = $qualifying[$worstKey];
+            $worstLabel = emotionLabel($worstKey);
             if (($overall - $w['win_rate'] >= 15) && ($w['n'] / $totalTagged > 0.15)) {
                 $out[] = $this->insight('alert', 'psychology',
-                    "Trades tagged '$worstKey' are your most costly state.",
-                    "'$worstKey' wins {$w['win_rate']}% vs $overall% overall, across {$w['n']} trades.",
-                    "Add a rule: no entry while feeling '$worstKey' — walk away instead.",
+                    "Trades tagged '$worstLabel' are your most costly state.",
+                    "'$worstLabel' wins {$w['win_rate']}% vs $overall% overall, across {$w['n']} trades.",
+                    "Add a rule: no entry while feeling '$worstLabel' — walk away instead.",
                     $w['n'], self::MIN_EMOTION * 2);
             }
         }
         if ($bestKey !== null && $bestKey !== $worstKey) {
             $b = $qualifying[$bestKey];
+            $bestLabel = emotionLabel($bestKey);
             if ($b['win_rate'] - $overall >= 10) {
                 $out[] = $this->insight('good', 'psychology',
-                    "You perform best when '$bestKey'.",
-                    "'$bestKey' wins {$b['win_rate']}% vs $overall% overall, across {$b['n']} trades.",
-                    "Build a pre-trade routine that gets you into the '$bestKey' state before entry.",
+                    "You perform best when '$bestLabel'.",
+                    "'$bestLabel' wins {$b['win_rate']}% vs $overall% overall, across {$b['n']} trades.",
+                    "Build a pre-trade routine that gets you into the '$bestLabel' state before entry.",
                     $b['n'], self::MIN_EMOTION * 2);
             }
         }
@@ -640,13 +648,21 @@ class ReviewEngineController {
     private function ruleNegativeStateFrequency($closed) {
         $tagged = array_values(array_filter($closed, fn($t) => $t['emotion_tag'] !== null && $t['emotion_tag'] !== ''));
         if (!$tagged) return [];
-        $negative = ['itchy','fomo','revenge','bored'];
+        // "Reactive" here means an impulsive/undisciplined ENTRY, the same scope the
+        // original (pre-v3.10.0) rule measured — it deliberately excluded the old
+        // 'anxious'/'unsure' (fear-driven hesitation, opposite character) and 'overconf'
+        // (a separate concern), so their v3.10.0 successors ('hesitant', 'invincible')
+        // stay excluded here too. 'hoping'/'wanting_out'/'greedy' are in-trade/exit
+        // states with no entry-reactivity equivalent in the old set — out of scope for
+        // this rule, not silently folded in. Both the retired codes and their current
+        // equivalents are included so this keeps working on a mix of old and new rows.
+        $negative = ['itchy','fomo','revenge','bored', 'impatient','chasing','vengeful'];
         $negN = count(array_filter($tagged, fn($t) => in_array($t['emotion_tag'], $negative, true)));
         $pct = round($negN / count($tagged) * 100, 1);
         if ($pct > 40) {
             return [$this->insight('watch', 'psychology',
                 "$pct% of your entries come from a reactive state, not patience.",
-                "$negN of " . count($tagged) . " emotion-tagged trades were itchy, FOMO, revenge, or bored.",
+                "$negN of " . count($tagged) . " emotion-tagged trades were impatient, chasing, vengeful, or their legacy equivalents.",
                 'Pause and name the emotion before you click — if it\'s reactive, skip the trade.',
                 count($tagged), self::MIN_NEG_STATE)];
         }

@@ -1,14 +1,20 @@
 {
-    "current_version": "3.9.4",
+    "current_version": "3.10.0",
     "release_date": "2026-09-14",
     "changelog": [
-        "Fix: checkbox-type strategy variables on the trade form now have a blank/unanswered state — previously the field was a two-option Yes/No select with No pre-selected, so a tag the user never looked at (e.g. AVWAP aligned, liquidity sweep, tweezer present) was silently recorded as a confirmed No, corrupting tag-attribution analysis on the Leaderboard and Review Engine",
-        "Rename: the Strategy Lab's variable-type picker now labels this type 'Yes/No' instead of 'Checkbox', matching what it actually renders as (a three-state select, not an HTML checkbox) — the underlying input_type column value is unchanged ('checkbox'), only the display label changed",
-        "Note: this does not retroactively correct existing data — pre-v3.9.4 trade_variables rows with value='0' against a checkbox-type variable cannot be distinguished between a real 'No' and a silent default; see CLAUDE.md for the query to find affected rows and the caveat not to trust them as observations until reconciled"
+        "Replace: the 8-state emotion tap grid (never grounded in anything) is replaced by a 9-state taxonomy drawn from Mark Douglas's Trading in the Zone and Fenton-O'Creevy et al. (2011) — settled, impatient, hesitant, chasing, hoping, wanting_out, greedy, invincible, vengeful. Phase-neutral labels (not entry-framed like the old set) so the next release can reuse this grid during a position and at close, not just at entry",
+        "Add: tapping a pill's new 'ⓘ' button reveals its full description without selecting it — reading what a state means no longer requires committing to it. Selection is clearable (tap an already-selected pill again, or use the new explicit Clear link) — an unanswered emotion stores null, never a default",
+        "Add: includes/emotion_states.php is the single source of truth for these nine codes/labels/descriptions/order — the trade form and ReviewEngineController both read from it, nothing else hardcodes the list",
+        "Fix: ReviewEngineController's ruleNegativeStateFrequency() had a hardcoded old-set-only reactive-state list; now includes both the retired codes and their v3.10.0 equivalents so it keeps working on a mix of old and new trades. ruleEmotionOutcome()'s insight text now shows a readable label instead of the raw stored code",
+        "Note: existing trades.emotion_tag values from the old 8-state set are NOT rewritten — the sets aren't 1:1 and collapsing them would invent precision never recorded. A legacy lookup renders old codes with a readable '(legacy)' label everywhere a trade's emotion is shown, and the edit form warns before a legacy value would be overwritten by a new selection. Audit query for the existing distribution is in CLAUDE.md — not run in this environment (no live DB credentials here by design)",
+        "Process: added a standing rule to CLAUDE.md — an agreed change must be implemented and committed/tagged/pushed/released in the same turn, not left sitting uncommitted"
     ],
     "files": [
+        {"path": "includes/emotion_states.php", "critical": false},
+        {"path": "index.php", "critical": false},
+        {"path": "modals/trade-modal.php", "critical": false},
         {"path": "js/trades.js", "critical": false},
-        {"path": "js/strategies.js", "critical": false}
+        {"path": "includes/controllers/ReviewEngineController.php", "critical": false}
     ],
     "db_migrations": []
 }

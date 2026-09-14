@@ -121,6 +121,7 @@ function viewTrade(id) {
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">R Multiple</div><div style="font-family:var(--font-head);font-size:16px;color:${parseFloat(t.r_multiple||0)>=0?'var(--green)':'var(--red)'}">${t.r_multiple}R</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Session</div><div>${t.session||'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exec Score</div><div style="font-family:var(--font-head);font-size:16px;color:var(--gold)">${t.exec_score?t.exec_score+'/10':'—'}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Emotion</div><div>${t.emotion_tag?emotionLabel(t.emotion_tag):'—'}</div></div>
                 </div>
                 <div style="margin-top:12px;display:flex;gap:8px">
                     <button class="btn btn-ghost" style="flex:1" onclick="document.getElementById('view-trade-modal').classList.remove('open')">Close</button>
@@ -253,7 +254,7 @@ function openTradeModal(data=null) {
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
         if(data.time_in) { const d=data.time_in.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_in_date').value=parts[0]; document.getElementById('f-time_in_time').value=parts[1]?.substring(0,5)||''; }
         if(data.time_out) { const d=data.time_out.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_out_date').value=parts[0]; document.getElementById('f-time_out_time').value=parts[1]?.substring(0,5)||''; }
-        selectEmotion(data.emotion_tag||null);
+        renderEmotionGrid(data.emotion_tag||null);
         selectGrade(data.setup_grade||null);
         // Show existing screenshots
         const images = data.screenshots_data || [];
@@ -272,7 +273,7 @@ function openTradeModal(data=null) {
         document.getElementById('f-trade_date').value=today;
         document.getElementById('f-time_in_date').value=today;
         document.getElementById('f-time_out_date').value=today;
-        selectEmotion(null);
+        renderEmotionGrid(null);
         selectGrade(null);
     }
     document.getElementById('trade-modal').classList.add('open');
@@ -354,14 +355,93 @@ function collectTradeVariables(){
     return vars;
 }
 
-function selectEmotion(val){
-    document.getElementById('f-emotion_tag').value = val || '';
+// ── EMOTION GRID (9-state taxonomy, window.EMOTION_STATES) ──
+// Rendered fresh each time the modal opens rather than once at page load, so it always
+// starts from a clean, unselected grid the same way the rest of the form does.
+function renderEmotionGrid(selectedCode=null){
+    const grid = document.getElementById('emotion-grid');
+    const states = window.EMOTION_STATES || [];
+    grid.innerHTML = states.map(s=>`
+        <span style="display:inline-flex;align-items:stretch">
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-code="${s.code}" onclick="toggleEmotionSelect('${s.code}')" style="border-top-right-radius:0;border-bottom-right-radius:0;border-right:none">${s.label}</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-info-btn" data-code="${s.code}" onclick="previewEmotion('${s.code}')" title="What does '${s.label}' mean?" style="border-top-left-radius:0;border-bottom-left-radius:0;padding:0 9px;font-weight:700">ⓘ</button>
+        </span>
+    `).join('');
+
+    const known = states.some(s=>s.code===selectedCode);
+    // Preserve whatever was already stored (new code, legacy code, or nothing) until the
+    // user actively changes it — only a tap should ever change this value.
+    document.getElementById('f-emotion_tag').value = selectedCode || '';
+    highlightEmotionPill(selectedCode);
+    document.getElementById('emotion-description').style.display = 'none';
+
+    // A legacy (pre-v3.10.0) code won't match any pill above — surface it rather than
+    // let the grid look empty/unanswered, and warn before it gets silently overwritten.
+    const legacyNote = document.getElementById('emotion-legacy-note');
+    if (selectedCode && !known) {
+        const legacyLabel = (window.LEGACY_EMOTION_LABELS||{})[selectedCode] || selectedCode;
+        legacyNote.textContent = `Previously recorded: "${legacyLabel}" — a retired state, no longer selectable. Picking one below replaces it.`;
+        legacyNote.style.display = 'block';
+    } else {
+        legacyNote.style.display = 'none';
+    }
+    toggleEmotionClearBtn();
+}
+
+function highlightEmotionPill(code){
     document.querySelectorAll('.emotion-pill').forEach(b=>{
-        const active = !!val && b.dataset.value === val;
+        const active = !!code && b.dataset.code === code;
         b.style.background = active ? 'var(--blue)' : '';
         b.style.color = active ? '#fff' : '';
         b.style.borderColor = active ? 'var(--blue)' : '';
     });
+}
+
+// Tapping a pill's label selects it; tapping an already-selected pill's label again
+// clears it — the selection must be clearable, an unanswered emotion is not the same
+// as "settled" and must never default to anything.
+function toggleEmotionSelect(code){
+    const cur = document.getElementById('f-emotion_tag').value;
+    const next = cur === code ? '' : code;
+    document.getElementById('f-emotion_tag').value = next;
+    highlightEmotionPill(next);
+    document.getElementById('emotion-legacy-note').style.display = 'none';
+    if (next) previewEmotion(next); else document.getElementById('emotion-description').style.display = 'none';
+    toggleEmotionClearBtn();
+}
+
+function clearEmotion(){
+    document.getElementById('f-emotion_tag').value = '';
+    highlightEmotionPill(null);
+    document.getElementById('emotion-description').style.display = 'none';
+    document.getElementById('emotion-legacy-note').style.display = 'none';
+    toggleEmotionClearBtn();
+}
+
+function toggleEmotionClearBtn(){
+    const btn = document.getElementById('emotion-clear-btn');
+    if (btn) btn.style.display = document.getElementById('f-emotion_tag').value ? 'inline-block' : 'none';
+}
+
+// Reveals a state's description WITHOUT selecting it — tapping "ⓘ" never touches the
+// hidden field or the selected pill, so reading what a state means is fully non-committal.
+function previewEmotion(code){
+    const s = (window.EMOTION_STATES||[]).find(x=>x.code===code);
+    const panel = document.getElementById('emotion-description');
+    if (!s) { panel.style.display = 'none'; return; }
+    panel.innerHTML = `<strong style="color:var(--text)">${s.label}</strong><br>${s.description}`;
+    panel.style.display = 'block';
+}
+
+// Readable label for any emotion_tag value — current code, legacy code, or unrecognized.
+// Mirrors includes/emotion_states.php::emotionLabel(), reading the same embedded data
+// rather than a second hardcoded copy.
+function emotionLabel(code){
+    if (!code) return null;
+    const s = (window.EMOTION_STATES||[]).find(x=>x.code===code);
+    if (s) return s.label;
+    const legacy = (window.LEGACY_EMOTION_LABELS||{})[code];
+    return legacy || code;
 }
 
 function selectGrade(val){

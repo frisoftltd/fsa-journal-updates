@@ -3,6 +3,23 @@
  * KPIs, charts, calendar heatmap, hours heatmap
  */
 
+// ── PATTERNS ─────────────────────────────────────────────
+// Diagonal-hatch CanvasPattern for "not enough data yet" chart bars — Chart.js accepts a
+// CanvasPattern anywhere a backgroundColor is valid, so this needs no plugin.
+function hatchPattern(strokeColor) {
+    const c = document.createElement('canvas');
+    c.width = 8; c.height = 8;
+    const ctx = c.getContext('2d');
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, 8); ctx.lineTo(8, 0);
+    ctx.moveTo(-2, 2); ctx.lineTo(2, -2);
+    ctx.moveTo(6, 10); ctx.lineTo(10, 6);
+    ctx.stroke();
+    return ctx.createPattern(c, 'repeat');
+}
+
 // ── ALERTS ───────────────────────────────────────────────
 async function loadAlerts() {
     const alerts = await api('get_alerts');
@@ -89,22 +106,30 @@ async function loadDashboard() {
                 label:'Win Rate %',
                 data:fib.map(f=>f.trades>0?Math.round(f.wins/f.trades*100):0),
                 // Early-signal buckets (same conclusive/based_on_n convention as
-                // ReviewEngineController::insight(), rendered muted rather than as
-                // a fully confident bar) get a lighter fill than conclusive ones.
-                backgroundColor:fib.map(f=>f.conclusive?'rgba(124,58,237,0.7)':'rgba(124,58,237,0.25)'),
+                // ReviewEngineController::insight()) get a hatch pattern instead of a
+                // solid fill — a lighter shade of the same purple still reads as "real
+                // data, just dimmer"; a bucket whose character can flip on one trade
+                // needs to look visibly unlike a normal bar, not just paler.
+                backgroundColor:fib.map(f=>f.conclusive?'rgba(124,58,237,0.75)':hatchPattern('rgba(124,58,237,0.55)')),
+                borderColor:fib.map(f=>f.conclusive?'rgba(124,58,237,0.75)':'rgba(124,58,237,0.55)'),
+                borderWidth:fib.map(f=>f.conclusive?0:1),
                 borderRadius:4
             }]
         },
         options:{...co,plugins:{...co.plugins,tooltip:{callbacks:{label:ctx=>{
             const f=fib[ctx.dataIndex];
             const n=f.based_on_n ?? f.trades;
-            return `Win Rate: ${ctx.parsed.y}% (n=${n}${f.conclusive?'':', early signal'})`;
+            return `Win Rate: ${ctx.parsed.y}% (n=${n}${f.conclusive?'':', early signal — not yet conclusive'})`;
         }}}},scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>v+'%',font:{size:10}},max:100,grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
     const fibFootnote = document.getElementById('chart-fib-footnote');
     if (fibFootnote) {
         const anyEarly = fib.some(f=>!f.conclusive);
-        fibFootnote.textContent = anyEarly ? 'Lighter bars are early signal — fewer than 8 trades, not yet conclusive.' : '';
+        const cov = s.fib_coverage || {};
+        const lines = [];
+        if (anyEarly) lines.push('Hatched bars are early signal — fewer than 8 trades, not yet conclusive.');
+        if (cov.total) lines.push(`Recorded on ${cov.recorded} of ${cov.total} closed trades.`);
+        fibFootnote.textContent = lines.join(' ');
     }
 
     renderCalendar(s.calendar||[]);

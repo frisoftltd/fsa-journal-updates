@@ -1,17 +1,14 @@
 {
-    "current_version": "3.9.1",
+    "current_version": "3.9.3",
     "release_date": "2026-09-14",
     "changelog": [
-        "Fix: sidebar nav and the bottom balance/user block now share a single scroll region — on a short desktop viewport (confirmed at 1366x590, the reported real-world case) the v3.9.0 fix left nav scrollable in principle but squeezed to a sliver with no visible affordance while the balance card stayed pinned at fixed height; now everything scrolls together and nothing is unreachable, on both the desktop and mobile-drawer layout branches",
-        "Fix: Win Rate by Fib Level (dashboard chart) and By Fib Level (Statistics table) no longer render a bucket's win rate with full confidence when it's based on a handful of trades — buckets now carry based_on_n/conclusive same as ReviewEngineController's early-signal convention, low-n buckets are visually muted/marked '*' instead of looking as confident as a real sample, n is always shown",
-        "Investigated: the Fib breakdown's data source (trades.fib_level), closed-trades filter, and active-challenge scope were already correct as of v3.9.0 — the 0%/100% buckets were a real small-sample artifact, not a scoping or query bug. Confirmed live 2026-09-14: only 8 of 26 closed trades carry a fib_level (0.382 n=4/0%, 0.5 n=2/0%, 0.618 n=1/100%); a cross-join against trade_variables variable 14 never overlaps and would only take the chart from 7 to 8 usable trades, so reconciling the two sources was deliberately not attempted here (see CLAUDE.md)"
+        "Investigated: a report of getFibBreakdown() (v3.9.2) rendering every bucket at n=1 on live did not reproduce — the exact, unmodified controller was run against a real MariaDB instance seeded with data matching the report's own numbers, in three scenarios (single Fib variable, two strategies each with their own Fib Level variable, no Fib variable at all), and every one produced the correct merged result. git history also confirms v3.9.2 was never committed or deployed. See CLAUDE.md for the full writeup and the generated SQL provided for live comparison",
+        "Fix: a blank/unanswered trade_variables value is no longer its own chart/table bucket — it's now treated the same as having no answer at all and excluded, since a single blank trade rendering as a 100%-confident bar was the same misleading artifact the sample-size guard exists to prevent",
+        "Add: fib_coverage (trades with a recorded value vs. all closed trades in scope) returned from get_stats and shown as a caption line under the chart/table instead of as a bucket",
+        "Fix: non-conclusive (low-n) buckets now use a visibly distinct treatment instead of a subtly lighter shade — a diagonal-hatch pattern on the Dashboard chart bars, italic + a leading '≈' on the Statistics table cells — since a muted-but-solid bar still read as normal data, just deemphasized"
     ],
     "files": [
-        {"path": "index.php", "critical": false},
-        {"path": "css/style.css", "critical": false},
         {"path": "includes/controllers/StatsController.php", "critical": false},
-        {"path": "pages/dashboard.php", "critical": false},
-        {"path": "pages/stats.php", "critical": false},
         {"path": "js/dashboard.js", "critical": false},
         {"path": "js/stats.js", "critical": false}
     ],

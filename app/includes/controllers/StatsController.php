@@ -62,12 +62,9 @@ class StatsController {
 
         // Breakdowns — closed trades only, same convention as win_rate/avg_r above.
         $stats['by_session']   = $qa("SELECT session,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND session IS NOT NULL AND $closedFilter GROUP BY session", $p);
-        $stats['by_fib']       = $qa("SELECT fib_level,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND fib_level IS NOT NULL AND $closedFilter GROUP BY fib_level ORDER BY fib_level", $p);
-        foreach ($stats['by_fib'] as &$fibRow) {
-            $fibRow['based_on_n'] = (int)$fibRow['trades'];
-            $fibRow['conclusive'] = $fibRow['based_on_n'] >= self::MIN_BREAKDOWN_SAMPLE;
-        }
-        unset($fibRow);
+        $fib = $this->getFibBreakdown($where, $p, $closedFilter);
+        $stats['by_fib']       = $fib['buckets'];
+        $stats['fib_coverage'] = $fib['coverage'];
         $stats['by_pair']      = $qa("SELECT pair,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND pair IS NOT NULL AND $closedFilter GROUP BY pair", $p);
         $stats['by_direction'] = $qa("SELECT direction,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND direction IS NOT NULL AND $closedFilter GROUP BY direction", $p);
 
@@ -110,5 +107,95 @@ class StatsController {
             ? abs(min(0, floatval($ch['current_balance'] ?? $starting_bal) - $starting_bal)) / $starting_bal * 100 : 0;
 
         jsonResponse($stats);
+    }
+
+    /**
+     * "Win Rate by Fib Level" breakdown — sourced from trade_variables, not the legacy
+     * trades.fib_level column, since as of v3.9.2 the dynamic strategy system carries the
+     * real Fib answers (18 of 26 closed trades) while the legacy column only covers 8, and
+     * the two never overlap (confirmed live 2026-09-14, post the v3.8.0 remap — see
+     * CLAUDE.md for why the pre-remap v3.9.1 investigation got this wrong).
+     *
+     * The variable is resolved by label ("Fib Level"), not a hardcoded id — a strategy
+     * edit/rename must not silently break this the way v3.9.1 found trades.fib_level had.
+     * A user can have more than one strategy with its own Fib Level variable (different
+     * ids), so every matching id across all of this user's strategies is included. If none
+     * exists, the breakdown degrades to the legacy column alone rather than erroring.
+     *
+     * Per trade: the dynamic answer wins if a trade_variables row exists with a non-blank
+     * value; trades.fib_level is the fallback for trades with no dynamic answer at all,
+     * which is exactly the legacy-only trade set (confirmed non-overlapping). A recorded
+     * but blank answer is treated the same as no row at all — "asked, left blank" is
+     * absence of information, not a category, and must not render as its own bucket (a
+     * single blank trade rendering as a 100%-confident bar was exactly the artifact the
+     * sample-size guard exists to prevent, just via a different mechanism). Total coverage
+     * (trades that DID resolve to a value vs. all closed trades in scope) is returned
+     * separately so that can be stated as a line under the chart instead.
+     */
+    private function getFibBreakdown($where, $p, $closedFilter) {
+        $varStmt = $this->db->prepare(
+            "SELECT sv.id FROM strategy_variables sv
+             JOIN strategies s ON s.id = sv.strategy_id
+             WHERE s.user_id = ? AND LOWER(sv.label) = 'fib level'"
+        );
+        $varStmt->execute([$this->uid]);
+        $fibVarIds = array_map('intval', array_column($varStmt->fetchAll(), 'id'));
+
+        if ($fibVarIds) {
+            $ph = implode(',', array_fill(0, count($fibVarIds), '?'));
+            // NULLIF(tv.value,'') folds a blank-string answer into NULL so it's excluded by
+            // the same "IS NOT NULL" filter as a trade with no row at all — one filter, one
+            // meaning of absence, not two.
+            $fibExpr = "CASE WHEN tv.trade_id IS NOT NULL THEN NULLIF(tv.value,'') ELSE trades.fib_level END";
+            // GROUP BY / ORDER BY / the coverage query below all repeat this CASE rather
+            // than referencing the "fib_level" alias — that alias name collides with the
+            // real trades.fib_level column used inside the same CASE, and leaning on
+            // engine-specific alias-vs-column resolution there isn't worth the risk when
+            // repeating the expression is cheap and unambiguous everywhere.
+            $sql = "SELECT
+                        $fibExpr AS fib_level,
+                        COUNT(*) AS trades,
+                        SUM(CASE WHEN trades.result='Win' THEN 1 ELSE 0 END) AS wins,
+                        COALESCE(SUM(trades.net_pnl),0) AS pnl
+                    FROM trades
+                    LEFT JOIN trade_variables tv ON tv.trade_id = trades.id AND tv.variable_id IN ($ph)
+                    $where AND $closedFilter AND $fibExpr IS NOT NULL
+                    GROUP BY $fibExpr ORDER BY $fibExpr";
+            // Placeholder order must match the SQL text: the IN(...) in the JOIN clause
+            // is written before $where's placeholders, so fibVarIds goes first here too —
+            // PDO binds positionally, not by array key.
+            $params = array_merge($fibVarIds, $p);
+
+            $coverageSql = "SELECT COUNT(*) AS total, SUM(CASE WHEN $fibExpr IS NOT NULL THEN 1 ELSE 0 END) AS covered
+                             FROM trades
+                             LEFT JOIN trade_variables tv ON tv.trade_id = trades.id AND tv.variable_id IN ($ph)
+                             $where AND $closedFilter";
+            $covStmt = $this->db->prepare($coverageSql);
+            $covStmt->execute($params);
+            $cov = $covStmt->fetch();
+            $coverage = ['recorded' => (int)($cov['covered'] ?? 0), 'total' => (int)($cov['total'] ?? 0)];
+        } else {
+            $sql = "SELECT fib_level, COUNT(*) as trades, SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins, COALESCE(SUM(net_pnl),0) as pnl
+                    FROM trades $where AND fib_level IS NOT NULL AND $closedFilter
+                    GROUP BY fib_level ORDER BY fib_level";
+            $params = $p;
+
+            $covStmt = $this->db->prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN fib_level IS NOT NULL THEN 1 ELSE 0 END) AS covered FROM trades $where AND $closedFilter");
+            $covStmt->execute($p);
+            $cov = $covStmt->fetch();
+            $coverage = ['recorded' => (int)($cov['covered'] ?? 0), 'total' => (int)($cov['total'] ?? 0)];
+        }
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+
+        foreach ($rows as &$row) {
+            $row['based_on_n'] = (int)$row['trades'];
+            $row['conclusive'] = $row['based_on_n'] >= self::MIN_BREAKDOWN_SAMPLE;
+        }
+        unset($row);
+
+        return ['buckets' => $rows, 'coverage' => $coverage];
     }
 }

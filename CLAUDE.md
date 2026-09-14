@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.9.1 |
+| Current Version | v3.9.3 |
 
 ### Tech Stack
 
@@ -283,46 +283,92 @@ business pulling an average or a win rate in either direction just by existing u
 was fixed to match. If you add a new R-multiple or win-rate calculation anywhere, use the same
 filter rather than re-deriving the convention.
 
-### Fib Breakdown Is Hardcoded, Not Strategy-Driven (as of v3.9.1)
+### Fib Breakdown: Source History and the Still-Open Design Question (as of v3.9.2)
 
-`StatsController::getStats()`'s `by_fib` breakdown, rendered as the "Win Rate by Fib Level" chart
-on the Dashboard (`pages/dashboard.php`/`js/dashboard.js`) and the "By Fib Level" table on the
-Statistics page (`pages/stats.php`/`js/stats.js`), reads **`trades.fib_level`** — the legacy enum
-column populated by the old trade form, not the dynamic `strategy_variables`/`trade_variables`
-system. It is correctly scoped to the active challenge and closed trades only (same `$where` /
-`$closedFilter` as everything else in the controller), so it isn't a scoping bug — but it is a
-fixed-strategy assumption baked into a page that's otherwise generic. If Acrob renames or retires
-the "Fib Level" strategy variable, or runs a strategy that never had one, this breakdown goes
-stale or empty and nothing else on the page reflects that.
+`StatsController::getFibBreakdown()` (called from `getStats()` for the `by_fib` field, rendered
+as the "Win Rate by Fib Level" chart on the Dashboard and the "By Fib Level" table on the
+Statistics page) now reads **`trade_variables`** (the dynamic strategy system), resolving the
+"Fib Level" variable by label across all of the user's strategies rather than a hardcoded id, with
+`trades.fib_level` (the legacy enum column) used only as a per-trade fallback where no dynamic
+answer exists. Both the closed-trades filter and active-challenge scope are unchanged from
+v3.9.1/v3.9.0 — those were already verified correct; only the source of the Fib value itself
+changed. If no "Fib Level" variable exists for the user at all, this degrades to the legacy
+column alone rather than erroring or crashing.
 
-The generic version of this — one win-rate-per-value breakdown per `strategy_variables` row —
-already exists, just not on this page: `StrategyBuilderController::attributeVariables()` (used by
-the Strategy Leaderboard) does exactly this split, joining `trade_variables` to
-`strategy_variables`, gated at `MIN_SPLIT_TRADES` (8) per value. Reusing that pattern for the
-Statistics page is blocked on one real product question, not a coding problem: `trades.strategy_id`
-is chosen per-trade on the trade form, not fixed per-challenge (there's no `challenges.
-default_strategy_id`-driven single source of truth for "the" active strategy), so a challenge can
-have trades against more than one strategy and it isn't obvious which one's variables should
-drive the Statistics page breakdown. This needs a product decision before it's a Stats page
-change, not just an engineering one — see the v3.9.1 PR notes for the full writeup. Until decided,
-`by_fib` gets the same `based_on_n`/`conclusive` sample-size fields (§ReviewEngineController
-convention below) as a minimum fix, not a redesign.
+**v3.9.1 shipped this backwards, and here's the corrected history:**
 
-**Confirmed against live `theittav_journal`, 2026-09-14** (closed trades only): of 26 closed
-trades, only 8 carry a `trades.fib_level` value — `0.382` (n=4, 0% win), `0.5` (n=2, 0% win),
-`0.618` (n=1, 100% win); the other 18 closed trades have `fib_level IS NULL`. This is the small
-sample the v3.9.1 fix's `based_on_n`/`conclusive` guard was built for — the 100% bucket really is
-one trade.
+- **v3.9.1** (2026-09-14, before the v3.8.0 orphaned-variable remap had time to be reflected in
+  that investigation's own cross-join) checked whether `trades.fib_level` and `trade_variables`
+  variable 14 overlapped, found they didn't, and concluded switching to the dynamic source would
+  only take the chart from 7 usable trades to 8 — not worth it. **That cross-join was run against
+  a stale mental model of the remap's effect** — variable 14 has carried 21 rows (18 of them
+  closed trades) since migration `2026_09_13_0003` finished, not the tiny number the v3.9.1 note
+  implied.
+- **v3.9.2** (this release) corrected it: `trades.fib_level` covers only 8 of 26 closed trades;
+  `trade_variables` variable 14 covers **18** of 26. The real comparison was always 7 (usable,
+  conclusive-threshold) → **18**, not 7 → 8. The chart had been reading under a third of the
+  record, and — because the legacy-only sample happened to lose on all its `0.382`/`0.5` trades
+  while winning its one `0.618` trade — it was showing close to the *opposite* of what the full
+  data says: `0.382` is the best-performing level (12 dynamic trades, 58.3% win, +10.56R), not a
+  0% loser. **Lesson: re-verify a "not worth it" data-coverage conclusion after any migration that
+  touches the tables being compared, don't treat it as a one-time fact.**
+- The two sources still don't overlap on the same trade (confirmed both times), so the v3.9.2 fix
+  uses a `COALESCE`-style fallback — a trade's dynamic answer wins if a `trade_variables` row
+  exists at all (even a blank one, which is its own bucket, not silently dropped), otherwise
+  `trades.fib_level` fills the gap. This pulls in the legacy-only trades too, so the *final*
+  rendered bucket counts are somewhat higher than the pure variable-14 table above wherever a
+  legacy-only trade shares the same value (e.g. `0.618` picks up one additional legacy win,
+  softening its win rate from a flat 0% to a small positive) — expected and intentional, not a
+  bug, but worth knowing so the numbers on screen don't look like a mismatch against this note.
 
-**Two-sources-of-truth check, also run 2026-09-14:** cross-joining `trades.fib_level` against
-`trade_variables` for `strategy_variables` id 14 ("Fib Level") confirms the two never overlap on
-the same trade — a trade has a Fib value in the legacy column *or* the dynamic one, never both —
-and together they still only cover 8 of the 26 closed trades (reading both would take the chart
-from 7 usable trades to 8; not worth the join). **Deliberately not attempted in v3.9.1.** This is
-a symptom of the same unresolved legacy/dynamic duality noted throughout §3.3 of
-`docs/audits/fsa-spec-gap-2026-09-12.md` (`fsa_rules`, `confidence`, and now `fib_level` all have
-this shape) — flag it for whichever future release properly reconciles the two Fib-level sources,
-rather than patching this one chart in isolation.
+**The generic design question is still open, still Acrob's to decide, not attempted in v3.9.2:**
+one win-rate-per-value breakdown per active `strategy_variables` row instead of one hardcoded Fib
+chart. `StrategyBuilderController::attributeVariables()` (used by the Strategy Leaderboard) already
+does the generic version, gated at `MIN_SPLIT_TRADES` (8) per value. Blocked on `trades.strategy_id`
+being chosen per-trade rather than fixed per-challenge — there's no `challenges.
+default_strategy_id`-driven single source of truth for "the" active strategy when a challenge spans
+more than one. This is the third time a hardcoded single-variable breakdown has caused a real
+problem (legacy `fib_level` staleness in v3.9.1, then the source-selection bug just described in
+v3.9.2) — it should get resolved rather than deferred a fourth time, but it still needs Acrob's
+product call, not another engineering workaround.
+
+### v3.9.3: A "Wrong Numbers" Report That Didn't Reproduce, Plus Two Real Fixes
+
+A bug report came in describing `getFibBreakdown()` (the v3.9.2 code above) rendering every
+bucket at `n=1` on live, with `0.618` showing a false 100% win rate. Before touching any code,
+this was checked by **actually running the real, unmodified `StatsController.php` against a real
+MariaDB instance** (installed locally for this purpose — no live DB credentials exist in this
+environment by design, see §13 rule 4) seeded with data shaped exactly to the numbers in the bug report:
+26 closed trades, 18 with a `trade_variables` answer for the Fib variable (12/3/2/1 split across
+`0.382`/`0.5`/`0.618`/blank), 8 legacy-only via `trades.fib_level`, non-overlapping. **The code
+produced the correct merged result** (`0.382` n=16 ~43.8%, `0.5` n=5 0%, `0.618` n=3 ~33.3%) in
+every scenario tested — single Fib variable, two strategies each with their own Fib Level
+variable (to specifically rule out the id-collection concern the report raised), and a user with
+no Fib variable at all (the legacy-only fallback branch). None reproduced `n=1` per bucket.
+
+**Separately, `git log` confirms the v3.9.2 code was never committed or pushed** — it existed only
+in an uncommitted working tree from the prior session. So "the v3.9.2 rewrite shipped and produces
+wrong numbers on live" doesn't match either the code's actual behavior under test or the repo's
+own history. If a real production screen is showing `n=1` per bucket, the far more likely
+explanation is that live is still running pre-v3.9.2 code (or some other stale/cached state), not
+a logic bug in this method. **Lesson: verify deployment state before debugging a "wrong output"
+report** — a symptom that doesn't reproduce against the actual current source is itself a finding,
+worth checking before assuming the code is at fault. This is the same "report rather than resolve
+silently" principle as a data disagreement, applied to a deployment-state disagreement instead.
+
+Two real fixes went into v3.9.3 regardless, independent of the phantom bug hunt:
+- **Blank `trade_variables` answers are now excluded from the breakdown entirely** (`NULLIF(tv.
+  value,'')` folded into the same "no data" path as no-row-at-all), rather than rendering as their
+  own bucket — a recorded-but-empty answer is absence of information, and a single blank trade
+  showing a 100%-confident bar was the same misleading-single-trade artifact the sample-size guard
+  exists to prevent, just via a different mechanism. Coverage (`fib_coverage`: trades with a real
+  value vs. all closed trades in scope) is returned separately and shown as a caption line instead.
+- **Non-conclusive buckets now use a visibly distinct treatment**, not just a lighter shade of the
+  same color: a diagonal-hatch `CanvasPattern` fill on the Dashboard chart (`hatchPattern()` in
+  `js/dashboard.js`), and italic + a leading "≈" on the Statistics table — a muted-but-still-solid
+  bar or cell reads as "real data, just deemphasized," which undersold how easily a low-n bucket's
+  character can flip on a single trade (`0.618` moved from a flat 0% to ~33% on the strength of one
+  legacy row).
 
 ---
 
@@ -1327,7 +1373,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.9.1
+Current Version: v3.9.3
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

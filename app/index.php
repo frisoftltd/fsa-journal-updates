@@ -29,6 +29,13 @@ $u = currentUser();
       <p>Get Funded. Stay Funded.</p>
     </div>
   </div>
+  <!-- Nav and the pinned-looking bottom block share one scroll region (sidebar-scroll)
+       so that on a short viewport the balance card/footer never eat fixed space that
+       squeezes nav into an undiscoverable sliver — everything scrolls together and
+       nothing below the fold is unreachable. On a tall viewport where it all fits,
+       this is visually identical to the old separately-pinned layout (nothing to
+       scroll either way). -->
+  <div class="sidebar-scroll">
   <nav class="nav">
     <div class="nav-section">Main</div>
     <a href="#" data-page="dashboard" onclick="showPage('dashboard');return false;"><span class="icon">📊</span>Dashboard</a>
@@ -44,7 +51,7 @@ $u = currentUser();
     <a href="#" data-page="profile" onclick="showPage('profile');return false;"><span class="icon">👤</span>Profile</a>
     <a href="#" data-page="challenges" onclick="showPage('challenges');return false;"><span class="icon">🏆</span>Challenges</a>
     <a href="logout.php"><span class="icon">🚪</span>Logout</a>
-    <a href="updater.php" style="margin-top:auto;border-top:1px solid var(--border);color:var(--text3)" id="update-link"><span class="icon">🔄</span>Check Update <span id="update-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:auto"></span></a>
+    <a href="updater.php" style="border-top:1px solid var(--border);color:var(--text3)" id="update-link"><span class="icon">🔄</span>Check Update <span id="update-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:auto"></span></a>
   </nav>
   <div class="sidebar-bottom">
     <!-- Challenge Switcher -->
@@ -66,6 +73,7 @@ $u = currentUser();
         <div class="user-role" id="sidebar-prop"><?= htmlspecialchars($u['prop_firm'] ?? '') ?></div>
       </div>
     </div>
+  </div>
   </div>
 </aside>
 

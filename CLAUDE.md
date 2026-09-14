@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.9.0 |
+| Current Version | v3.9.1 |
 
 ### Tech Stack
 
@@ -283,6 +283,47 @@ business pulling an average or a win rate in either direction just by existing u
 was fixed to match. If you add a new R-multiple or win-rate calculation anywhere, use the same
 filter rather than re-deriving the convention.
 
+### Fib Breakdown Is Hardcoded, Not Strategy-Driven (as of v3.9.1)
+
+`StatsController::getStats()`'s `by_fib` breakdown, rendered as the "Win Rate by Fib Level" chart
+on the Dashboard (`pages/dashboard.php`/`js/dashboard.js`) and the "By Fib Level" table on the
+Statistics page (`pages/stats.php`/`js/stats.js`), reads **`trades.fib_level`** — the legacy enum
+column populated by the old trade form, not the dynamic `strategy_variables`/`trade_variables`
+system. It is correctly scoped to the active challenge and closed trades only (same `$where` /
+`$closedFilter` as everything else in the controller), so it isn't a scoping bug — but it is a
+fixed-strategy assumption baked into a page that's otherwise generic. If Acrob renames or retires
+the "Fib Level" strategy variable, or runs a strategy that never had one, this breakdown goes
+stale or empty and nothing else on the page reflects that.
+
+The generic version of this — one win-rate-per-value breakdown per `strategy_variables` row —
+already exists, just not on this page: `StrategyBuilderController::attributeVariables()` (used by
+the Strategy Leaderboard) does exactly this split, joining `trade_variables` to
+`strategy_variables`, gated at `MIN_SPLIT_TRADES` (8) per value. Reusing that pattern for the
+Statistics page is blocked on one real product question, not a coding problem: `trades.strategy_id`
+is chosen per-trade on the trade form, not fixed per-challenge (there's no `challenges.
+default_strategy_id`-driven single source of truth for "the" active strategy), so a challenge can
+have trades against more than one strategy and it isn't obvious which one's variables should
+drive the Statistics page breakdown. This needs a product decision before it's a Stats page
+change, not just an engineering one — see the v3.9.1 PR notes for the full writeup. Until decided,
+`by_fib` gets the same `based_on_n`/`conclusive` sample-size fields (§ReviewEngineController
+convention below) as a minimum fix, not a redesign.
+
+**Confirmed against live `theittav_journal`, 2026-09-14** (closed trades only): of 26 closed
+trades, only 8 carry a `trades.fib_level` value — `0.382` (n=4, 0% win), `0.5` (n=2, 0% win),
+`0.618` (n=1, 100% win); the other 18 closed trades have `fib_level IS NULL`. This is the small
+sample the v3.9.1 fix's `based_on_n`/`conclusive` guard was built for — the 100% bucket really is
+one trade.
+
+**Two-sources-of-truth check, also run 2026-09-14:** cross-joining `trades.fib_level` against
+`trade_variables` for `strategy_variables` id 14 ("Fib Level") confirms the two never overlap on
+the same trade — a trade has a Fib value in the legacy column *or* the dynamic one, never both —
+and together they still only cover 8 of the 26 closed trades (reading both would take the chart
+from 7 usable trades to 8; not worth the join). **Deliberately not attempted in v3.9.1.** This is
+a symptom of the same unresolved legacy/dynamic duality noted throughout §3.3 of
+`docs/audits/fsa-spec-gap-2026-09-12.md` (`fsa_rules`, `confidence`, and now `fib_level` all have
+this shape) — flag it for whichever future release properly reconciles the two Fib-level sources,
+rather than patching this one chart in isolation.
+
 ---
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
@@ -338,6 +379,29 @@ in `includes/config.php` (never in this repo — Acrob sets it by hand on the se
   live isn't re-run against it.
 
 Missing or wrong token → 403, logged via `error_log()`.
+
+### Operational Lessons From Running 0001–0006 Live (v3.9.1)
+
+Both of these cost real time getting migrations 0001–0006 applied to `theittav_journal` and are
+worth knowing before touching the runner again:
+
+1. **`mode=baseline` is only ever correct for a migration describing schema that already
+   exists.** It was run by mistake against 0004–0006 (which described *pending* changes, not
+   already-live ones), which falsely marked them applied with nothing actually run. Recovery was
+   manual: delete those rows from `schema_migrations`, then run `mode=run` for real. Baseline
+   trusts you completely — it does not check the live schema against the file, so a wrong call
+   here fails silently until something downstream (like a missing FK) surfaces it.
+2. **Migration `2026_09_13_0004_add_trade_variables_foreign_keys.sql` is not self-sufficient on
+   its own.** It failed on first run because five `trade_variables` rows referenced a `trade_id`
+   that no longer existed (an already-deleted trade), which the new `ON DELETE CASCADE` FK
+   rejected outright. Those five rows were deleted by hand before the FK would apply. If this
+   migration ever runs again on a fresh restore or a different environment, it will fail the same
+   way — the orphan cleanup (`DELETE FROM trade_variables WHERE trade_id NOT IN (SELECT id FROM
+   trades)`, run before the `ALTER TABLE`) belongs inside the migration file itself, not as tribal
+   knowledge. Not fixed retroactively here since 0004 already ran successfully on the only
+   environment that matters (`theittav_journal`) and migration files are checksum-locked once
+   applied — a follow-up migration should add the guard for any future environment, rather than
+   editing 0004 after the fact.
 
 ---
 
@@ -583,6 +647,29 @@ https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrain
 - Sidebar: the ONLY dark element — provides authority contrast
 - Green: ONLY for profit/wins — never decorative
 - Red: ONLY for loss/danger — never decorative
+
+### Standard Test Viewport for Sidebar/Layout Work (added v3.9.1)
+
+**1366 × 590** is Acrob's real laptop viewport (Windows, Chrome, tab bar + address bar +
+bookmarks bar + taskbar all present) and is the standard regression case for any sidebar or
+layout change from here on. It is **desktop-width, short-height** — the mobile drawer breakpoint
+(`@media(max-width:900px)`) does not engage at this width, so it exercises a completely different
+CSS branch than a narrow/short test does.
+
+The v3.9.0 sidebar fix was verified in headless Chrome at 768px/600px **heights** but at narrow
+widths, which only exercises the mobile drawer branch. That branch worked; the desktop-width
+branch at short heights did not, and shipped broken anyway because it was never actually tested —
+headless screenshots at a nominal height are not equivalent to the real machine, since headless
+has no tab bar/address bar/bookmarks bar/taskbar eating into the usable height. **Always test the
+literal pixel dimensions, not just "short" as a category, and always include desktop width.**
+
+When testing sidebar/layout changes, check every breakpoint that produces a materially different
+layout, not just one:
+- Desktop, short height (**1366 × 590** — the standard case)
+- Desktop, typical height (1366 × 768)
+- Desktop, tall / nothing should need to scroll (1920 × 1080)
+- Mobile drawer, narrow (375 × 600)
+- Just above/below the `900px` drawer breakpoint (900×590 drawer / 901×590 desktop)
 
 ---
 
@@ -1240,7 +1327,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.9.0
+Current Version: v3.9.1
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

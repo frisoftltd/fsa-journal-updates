@@ -1,24 +1,17 @@
 {
-    "current_version": "3.9.0",
-    "release_date": "2026-09-13",
+    "current_version": "3.9.1",
+    "release_date": "2026-09-14",
     "changelog": [
-        "Fix: sidebar nav is now independently scrollable on short viewports (768px/600px) — it was previously cut off with no way to reach the lower items",
-        "Fix: dashboard/stats Win Rate and Avg R no longer count Open trades in their denominator/average; a caption now discloses the active-challenge scope and any excluded open trades",
-        "Fix: the same closed-trades-only rule applied to the by-session/fib/pair/direction breakdown win% columns, for one consistent convention across the Statistics page",
-        "Fix: CalculatorController's calculate_risk endpoint now requires a direction and rejects a stop/target on the wrong side of entry instead of silently computing a plausible-looking R",
-        "Fix: trades.session no longer silently defaults to London when omitted — the column is now nullable with no default, and the trade form and Excel import both leave it unset rather than guessing",
-        "No retroactive changes to existing session values — we cannot know which historical London trades were genuine"
+        "Fix: sidebar nav and the bottom balance/user block now share a single scroll region — on a short desktop viewport (confirmed at 1366x590, the reported real-world case) the v3.9.0 fix left nav scrollable in principle but squeezed to a sliver with no visible affordance while the balance card stayed pinned at fixed height; now everything scrolls together and nothing is unreachable, on both the desktop and mobile-drawer layout branches",
+        "Fix: Win Rate by Fib Level (dashboard chart) and By Fib Level (Statistics table) no longer render a bucket's win rate with full confidence when it's based on a handful of trades — buckets now carry based_on_n/conclusive same as ReviewEngineController's early-signal convention, low-n buckets are visually muted/marked '*' instead of looking as confident as a real sample, n is always shown",
+        "Investigated: the Fib breakdown's data source (trades.fib_level), closed-trades filter, and active-challenge scope were already correct as of v3.9.0 — the 0%/100% buckets were a real small-sample artifact, not a scoping or query bug. Confirmed live 2026-09-14: only 8 of 26 closed trades carry a fib_level (0.382 n=4/0%, 0.5 n=2/0%, 0.618 n=1/100%); a cross-join against trade_variables variable 14 never overlaps and would only take the chart from 7 to 8 usable trades, so reconciling the two sources was deliberately not attempted here (see CLAUDE.md)"
     ],
     "files": [
-        {"path": "migrations/2026_09_13_0006_make_trades_session_nullable.sql", "critical": false},
+        {"path": "index.php", "critical": false},
         {"path": "css/style.css", "critical": false},
         {"path": "includes/controllers/StatsController.php", "critical": false},
-        {"path": "includes/controllers/CalculatorController.php", "critical": false},
-        {"path": "includes/controllers/ImportController.php", "critical": false},
-        {"path": "modals/trade-modal.php", "critical": false},
         {"path": "pages/dashboard.php", "critical": false},
         {"path": "pages/stats.php", "critical": false},
-        {"path": "js/app.js", "critical": false},
         {"path": "js/dashboard.js", "critical": false},
         {"path": "js/stats.js", "critical": false}
     ],

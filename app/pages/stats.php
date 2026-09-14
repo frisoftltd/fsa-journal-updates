@@ -54,6 +54,7 @@
       <div class="card-title">By Fib Level</div>
       <table><thead><tr><th>Level</th><th>Trades</th><th>Win%</th><th>Net P&amp;L</th></tr></thead>
       <tbody id="s-fib-tbody"></tbody></table>
+      <div id="s-fib-footnote" style="font-size:10px;color:var(--text3);margin-top:6px"></div>
     </div>
     <div class="card">
       <div class="card-title">By Pair</div>

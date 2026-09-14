@@ -83,9 +83,29 @@ async function loadDashboard() {
     const fib=s.by_fib||[];
     charts.barFib = new Chart(document.getElementById('chart-fib'),{
         type:'bar',
-        data:{labels:fib.map(f=>f.fib_level),datasets:[{label:'Win Rate %',data:fib.map(f=>f.trades>0?Math.round(f.wins/f.trades*100):0),backgroundColor:'rgba(124,58,237,0.7)',borderRadius:4}]},
-        options:{...co,scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>v+'%',font:{size:10}},max:100,grid:{color:'rgba(0,0,0,0.06)'}}}}
+        data:{
+            labels:fib.map(f=>`${f.fib_level} (n=${f.based_on_n ?? f.trades})`),
+            datasets:[{
+                label:'Win Rate %',
+                data:fib.map(f=>f.trades>0?Math.round(f.wins/f.trades*100):0),
+                // Early-signal buckets (same conclusive/based_on_n convention as
+                // ReviewEngineController::insight(), rendered muted rather than as
+                // a fully confident bar) get a lighter fill than conclusive ones.
+                backgroundColor:fib.map(f=>f.conclusive?'rgba(124,58,237,0.7)':'rgba(124,58,237,0.25)'),
+                borderRadius:4
+            }]
+        },
+        options:{...co,plugins:{...co.plugins,tooltip:{callbacks:{label:ctx=>{
+            const f=fib[ctx.dataIndex];
+            const n=f.based_on_n ?? f.trades;
+            return `Win Rate: ${ctx.parsed.y}% (n=${n}${f.conclusive?'':', early signal'})`;
+        }}}},scales:{x:{ticks:{color:'#6C7A8D',font:{size:10}},grid:{color:'rgba(0,0,0,0.06)'}},y:{ticks:{color:'#6C7A8D',callback:v=>v+'%',font:{size:10}},max:100,grid:{color:'rgba(0,0,0,0.06)'}}}}
     });
+    const fibFootnote = document.getElementById('chart-fib-footnote');
+    if (fibFootnote) {
+        const anyEarly = fib.some(f=>!f.conclusive);
+        fibFootnote.textContent = anyEarly ? 'Lighter bars are early signal — fewer than 8 trades, not yet conclusive.' : '';
+    }
 
     renderCalendar(s.calendar||[]);
     renderHoursHeatmap(s.by_hour||[]);

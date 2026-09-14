@@ -30,7 +30,7 @@
     <div class="card"><div class="card-title">P&amp;L Per Trade</div><div class="chart-wrap"><canvas id="chart-pnl"></canvas></div></div>
   </div>
   <div class="charts-grid">
-    <div class="card"><div class="card-title">Win Rate by Fib Level</div><div class="chart-wrap"><canvas id="chart-fib"></canvas></div></div>
+    <div class="card"><div class="card-title">Win Rate by Fib Level</div><div class="chart-wrap"><canvas id="chart-fib"></canvas></div><div id="chart-fib-footnote" style="font-size:10px;color:var(--text3);margin-top:6px"></div></div>
     <div class="card"><div class="card-title">P&amp;L by Session</div><div class="chart-wrap"><canvas id="chart-session"></canvas></div></div>
   </div>
   <div class="card" style="margin-bottom:14px">

@@ -5,6 +5,13 @@
  * Handles: get_stats — all stats scoped to active challenge
  */
 class StatsController {
+    // Same sample-size floor StrategyBuilderController::MIN_SPLIT_TRADES uses for its
+    // per-value win-rate splits — a bucket's win rate isn't shown as settled until it
+    // clears this. Fields below (conclusive/based_on_n) match the vocabulary already
+    // used by ReviewEngineController::insight() and rendered by js/review.js, rather
+    // than inventing a second "early signal" convention for the same concept.
+    const MIN_BREAKDOWN_SAMPLE = 8;
+
     private $db;
     private $uid;
 
@@ -56,6 +63,11 @@ class StatsController {
         // Breakdowns — closed trades only, same convention as win_rate/avg_r above.
         $stats['by_session']   = $qa("SELECT session,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND session IS NOT NULL AND $closedFilter GROUP BY session", $p);
         $stats['by_fib']       = $qa("SELECT fib_level,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND fib_level IS NOT NULL AND $closedFilter GROUP BY fib_level ORDER BY fib_level", $p);
+        foreach ($stats['by_fib'] as &$fibRow) {
+            $fibRow['based_on_n'] = (int)$fibRow['trades'];
+            $fibRow['conclusive'] = $fibRow['based_on_n'] >= self::MIN_BREAKDOWN_SAMPLE;
+        }
+        unset($fibRow);
         $stats['by_pair']      = $qa("SELECT pair,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND pair IS NOT NULL AND $closedFilter GROUP BY pair", $p);
         $stats['by_direction'] = $qa("SELECT direction,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND direction IS NOT NULL AND $closedFilter GROUP BY direction", $p);
 

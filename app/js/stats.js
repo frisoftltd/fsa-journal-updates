@@ -28,7 +28,18 @@ async function loadStats(){
     if(warn){warn.textContent=feePct>10?'⚠️ Fees eating >10% of gross P&L — review lot size':'✅ Fees acceptable';warn.style.color=feePct>10?'var(--red)':'var(--green)';}
     const tbodyFn=(id,rows)=>{const el=document.getElementById(id);if(el)el.innerHTML=rows||'<tr><td colspan="4" style="color:var(--text3)">No data</td></tr>';};
     tbodyFn('s-session-tbody',(s.by_session||[]).map(r=>`<tr><td>${r.session}</td><td>${r.trades}</td><td>${r.trades>0?fmtPct(r.wins/r.trades*100):'0%'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
-    tbodyFn('s-fib-tbody',(s.by_fib||[]).map(r=>`<tr><td style="color:var(--purple)">${r.fib_level}</td><td>${r.trades}</td><td>${r.trades>0?fmtPct(r.wins/r.trades*100):'0%'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
+    tbodyFn('s-fib-tbody',(s.by_fib||[]).map(r=>{
+        const wr = r.trades>0?fmtPct(r.wins/r.trades*100):'0%';
+        const winCell = r.conclusive
+            ? wr
+            : `<span style="color:var(--text3)" title="Early signal — based on ${r.based_on_n} trade${r.based_on_n===1?'':'s'}, not yet conclusive">${wr} *</span>`;
+        return `<tr><td style="color:var(--purple)">${r.fib_level}</td><td>${r.trades}</td><td>${winCell}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`;
+    }).join(''));
+    const fibFootnote = document.getElementById('s-fib-footnote');
+    if (fibFootnote) {
+        const anyEarly = (s.by_fib||[]).some(r=>!r.conclusive);
+        fibFootnote.textContent = anyEarly ? '* early signal — fewer than 8 trades, not yet conclusive' : '';
+    }
     tbodyFn('s-pair-tbody',(s.by_pair||[]).map(r=>`<tr><td style="font-weight:600">${r.pair}</td><td>${r.trades}</td><td>${r.trades>0?fmtPct(r.wins/r.trades*100):'0%'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
     tbodyFn('s-dir-tbody',(s.by_direction||[]).map(r=>`<tr><td>${r.direction==='Long'?'<span class="badge badge-long">Long</span>':'<span class="badge badge-short">Short</span>'}</td><td>${r.trades}</td><td>${r.trades>0?fmtPct(r.wins/r.trades*100):'0%'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
 }

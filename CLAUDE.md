@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.9.3 |
+| Current Version | v3.9.4 |
 
 ### Tech Stack
 
@@ -788,6 +788,55 @@ The real, confirmed defect in this area is the strategy-variable orphaning bug f
 (deleting and re-inserting the variable list on every edit detached 95 recorded answers from
 19 trades) — see the v3.8.0 changelog and migrations `2026_09_13_0003`–`0005`.
 
+### Fixed in v3.9.4: checkbox strategy variables had no "unanswered" state
+
+`renderStrategyVarFields()` (`js/trades.js`, trade-modal rendering of `strategy_variables`) has
+three type branches — `checkbox`, `scale`, `select` — plus an unconditional text-input fallback
+that also covers `text`. Before v3.9.4, `checkbox` rendered as a two-option `<select>` (`No`=`"0"`,
+`Yes`=`"1"`) with no blank/placeholder option, unlike `scale` and `select` which both have an
+explicit `<option value="">—</option>`. An untouched checkbox field therefore always submitted
+`"0"` — a trade the user never looked at recorded identically to one where they actively confirmed
+the tag was absent. This directly undermines any tag correlation drawn from `role='tag'` checkbox
+variables (e.g. AVWAP aligned / liquidity sweep / tweezer present), since their "No" bucket in
+`StrategyBuilderController::attributeVariables()` and `ReviewEngineController::
+ruleVariableAttribution()` was a mix of real "confirmed not present" and silent defaults, with no
+way to tell them apart after the fact.
+
+**Fixed:** the checkbox branch now has three states — blank (`""`, unanswered), `"0"` (No),
+`"1"` (Yes) — matching the scale/select pattern. No backend change was needed; `TradeController.
+php`'s existing `if ($value === '') $value = null;` already normalizes the new blank submission
+correctly.
+
+**This does not retroactively fix existing data.** Every `trade_variables` row with `value='0'`
+against a checkbox-type variable, recorded before this fix shipped, is indistinguishable between
+"user confirmed absent" and "user never touched the field" — **do not treat pre-v3.9.4 `'0'`
+values on checkbox variables as reliable observations** for any tag-attribution analysis (Review
+Engine insights, Leaderboard variable attribution, or otherwise) until this is reconciled by hand
+or the historical rows are otherwise qualified. To find the scope of affected rows:
+
+```sql
+SELECT sv.id AS variable_id, sv.label, COUNT(*) AS zero_count
+FROM trade_variables tv
+JOIN strategy_variables sv ON sv.id = tv.variable_id
+WHERE sv.input_type = 'checkbox' AND tv.value = '0'
+GROUP BY sv.id, sv.label;
+```
+Run live — this environment has no DB credentials (§13 rule 4), so the actual count has not been
+confirmed. There is no way to distinguish real "No" answers from silent defaults within this
+count; the query only bounds how many rows are in question, not how many are actually wrong.
+
+**Separately:** the Strategy Lab's variable-type picker (`js/strategies.js`) labeled this type
+"Checkbox," which never matched what it actually rendered as (a `<select>`, not an
+`<input type="checkbox">`) even before this fix, and still doesn't match now that it's a
+three-state select. Relabeled to "Yes/No" in v3.9.4 — the underlying `input_type` column value is
+still the string `'checkbox'` (unchanged, to avoid a migration and touching every `input_type ===
+'checkbox'` check across `TradeController`, `ReviewEngineController`, `StrategyBuilderController`);
+only the human-facing label changed. Also note: the dynamic pre-trade checklist popup
+(`openChecklist()`/`toggleCheck()` in `js/trades.js`) renders `role='gate'` variables as genuine
+`<input type="checkbox">` elements, visually distinct from the trade-modal's Yes/No `<select>` for
+the same `input_type`, but that popup never writes to `trade_variables` at all — cosmetically
+inconsistent, not a data-integrity concern.
+
 ### Note: `calculate_risk` / `CalculatorController.php` is not wired to the UI
 
 The Risk Calculator page (`pages/calculator.php`) calls `calcSimple()` (`js/calculator.js`), a
@@ -1373,7 +1422,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.9.3
+Current Version: v3.9.4
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

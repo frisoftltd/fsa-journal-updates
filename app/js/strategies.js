@@ -98,7 +98,7 @@ function renderVariableRows(){
         <div class="form-grid-2" style="gap:8px;align-items:end">
             <div class="form-group"><label>Label</label><input type="text" value="${(v.label||'').replace(/"/g,'&quot;')}" oninput="updateVarRow(${i},'label',this.value)" placeholder="e.g. Confirmed 4H trend"></div>
             <div class="form-group"><label>Type</label><select onchange="updateVarRow(${i},'input_type',this.value)">
-                <option value="checkbox" ${v.input_type==='checkbox'?'selected':''}>Checkbox</option>
+                <option value="checkbox" ${v.input_type==='checkbox'?'selected':''}>Yes/No</option>
                 <option value="scale" ${v.input_type==='scale'?'selected':''}>1–5 Scale</option>
                 <option value="select" ${v.input_type==='select'?'selected':''}>Dropdown</option>
                 <option value="text" ${v.input_type==='text'?'selected':''}>Short text</option>

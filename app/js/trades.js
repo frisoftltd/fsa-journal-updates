@@ -317,9 +317,13 @@ function renderStrategyVarFields(prefillMap=null){
         const val = prefillMap ? (prefillMap[v.id] ?? '') : '';
         const fieldId = `f-var-${v.id}`;
         if(v.input_type==='checkbox'){
+            // Three states, not two: unanswered must stay unanswered (blank, same as
+            // scale/select below) rather than silently default to "No" — a tag the user
+            // never looked at is not the same observation as one they confirmed absent.
             return `<div class="form-group"><label>${v.label}</label>
                 <select id="${fieldId}" data-var-id="${v.id}">
-                    <option value="0" ${val!=='1'?'selected':''}>No</option>
+                    <option value="" ${val!=='0'&&val!=='1'?'selected':''}>—</option>
+                    <option value="0" ${val==='0'?'selected':''}>No</option>
                     <option value="1" ${val==='1'?'selected':''}>Yes</option>
                 </select></div>`;
         }

@@ -1,16 +1,14 @@
 {
-    "current_version": "3.9.3",
+    "current_version": "3.9.4",
     "release_date": "2026-09-14",
     "changelog": [
-        "Investigated: a report of getFibBreakdown() (v3.9.2) rendering every bucket at n=1 on live did not reproduce — the exact, unmodified controller was run against a real MariaDB instance seeded with data matching the report's own numbers, in three scenarios (single Fib variable, two strategies each with their own Fib Level variable, no Fib variable at all), and every one produced the correct merged result. git history also confirms v3.9.2 was never committed or deployed. See CLAUDE.md for the full writeup and the generated SQL provided for live comparison",
-        "Fix: a blank/unanswered trade_variables value is no longer its own chart/table bucket — it's now treated the same as having no answer at all and excluded, since a single blank trade rendering as a 100%-confident bar was the same misleading artifact the sample-size guard exists to prevent",
-        "Add: fib_coverage (trades with a recorded value vs. all closed trades in scope) returned from get_stats and shown as a caption line under the chart/table instead of as a bucket",
-        "Fix: non-conclusive (low-n) buckets now use a visibly distinct treatment instead of a subtly lighter shade — a diagonal-hatch pattern on the Dashboard chart bars, italic + a leading '≈' on the Statistics table cells — since a muted-but-solid bar still read as normal data, just deemphasized"
+        "Fix: checkbox-type strategy variables on the trade form now have a blank/unanswered state — previously the field was a two-option Yes/No select with No pre-selected, so a tag the user never looked at (e.g. AVWAP aligned, liquidity sweep, tweezer present) was silently recorded as a confirmed No, corrupting tag-attribution analysis on the Leaderboard and Review Engine",
+        "Rename: the Strategy Lab's variable-type picker now labels this type 'Yes/No' instead of 'Checkbox', matching what it actually renders as (a three-state select, not an HTML checkbox) — the underlying input_type column value is unchanged ('checkbox'), only the display label changed",
+        "Note: this does not retroactively correct existing data — pre-v3.9.4 trade_variables rows with value='0' against a checkbox-type variable cannot be distinguished between a real 'No' and a silent default; see CLAUDE.md for the query to find affected rows and the caveat not to trust them as observations until reconciled"
     ],
     "files": [
-        {"path": "includes/controllers/StatsController.php", "critical": false},
-        {"path": "js/dashboard.js", "critical": false},
-        {"path": "js/stats.js", "critical": false}
+        {"path": "js/trades.js", "critical": false},
+        {"path": "js/strategies.js", "critical": false}
     ],
     "db_migrations": []
 }

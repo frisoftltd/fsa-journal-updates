@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.11.0 |
+| Current Version | v3.11.1 |
 
 ### Tech Stack
 
@@ -595,6 +595,39 @@ journal content (e.g. correlating `good_process` against outcome, or in-trade `a
 win rate), symmetrical with how `ruleEmotionOutcome()`/`ruleVariableAttribution()` already work
 over `emotion_tag`/`trade_variables`, but that's new rule-writing, not part of this release.
 
+#### v3.11.1: Charset Bug + a Missing Table Fataled the Whole Trade List
+
+Two bugs found shortly after v3.11.0 shipped, both fixed the same day:
+
+1. **`2026_09_15_0001_create_trade_journal.sql` omitted `DEFAULT CHARSET=utf8mb4 COLLATE=
+   utf8mb4_general_ci`** on both `CREATE TABLE` statements — the one thing every other table in
+   this schema specifies explicitly (see `2026_09_13_0001` for the correct precedent). Both tables
+   fell back to the server default, `latin1_swedish_ci` on live, not utf8mb4. Reproduced locally
+   by starting a MariaDB instance with a latin1 server default and running the exact shipped
+   migration against it — it recreates the bug precisely. Fixed by
+   `2026_09_15_0002_fix_trade_journal_charset.sql`, a plain `ALTER TABLE ... CONVERT TO CHARACTER
+   SET utf8mb4 COLLATE utf8mb4_general_ci` on both tables (safe because both were still empty —
+   this is a conversion, not a data migration). `2026_09_15_0001` itself was not edited; it had
+   already run and migration files are checksum-locked once applied — this is a correction
+   migration, not a rewrite of history. Verified the fix empirically: reproduced the bug against a
+   real DB, ran the fix migration, confirmed every column (including the `phase` ENUM) came back
+   `utf8mb4_general_ci` and both foreign keys survived the conversion untouched. **Checklist item
+   added to §3A "Adding a migration" so this specific mistake doesn't recur.**
+2. **`TradeController::getAll()` had no defense against `trade_journal` being unavailable** — a
+   missing or broken table (mid-deploy, migration not yet applied, or the charset bug above before
+   it was fixed) threw an uncaught `PDOException` from inside the per-trade loop, which fataled
+   the *entire* `get_trades` response — not just the journal portion, the whole Trade Log page,
+   over data that's ancillary to a trade's core fields. Fixed by wrapping the `trade_journal`/
+   `trade_journal_actions` queries in a try/catch: the failure is detected once (not re-attempted
+   per trade — that would just repeat a query already known to fail), and every trade in the
+   response falls back to `trade_journal: []` rather than taking the request down. Verified
+   against a real DB with the table absent entirely: `getAll()` now returns successfully with an
+   empty `trade_journal` on every trade; with the table present and populated, behavior is
+   unchanged (confirmed no regression). `trade_variables` has the same theoretical exposure
+   (`getAll()` has no equivalent guard around it) but was not touched here — not what was reported,
+   and that table has shipped and been stable since v3.5.1, unlike `trade_journal` which was still
+   fresh enough to hit this exact failure mode in practice.
+
 ---
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
@@ -630,12 +663,20 @@ date. Example: `2026_09_20_0001_add_default_strategy_id_to_challenges.sql`.
 ### Adding a migration
 
 1. Write the `.sql` file in `app/migrations/` — plain SQL, statements separated by `;`, no PHP.
-2. Add its path to `version.json`'s `"files"` array (`{"path": "migrations/...sql", "critical": false}`) —
+2. **Every `CREATE TABLE` must specify `ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=
+   utf8mb4_general_ci` explicitly.** Every other table in this schema uses it. Without it, a new
+   table silently falls back to the server/schema default — `latin1_swedish_ci` on live, not
+   utf8mb4 — and any non-Latin1 character (emoji, curly quotes from a pasted note, non-English
+   text) written to it is mangled or rejected instead of stored correctly. This exact mistake
+   shipped in `2026_09_15_0001_create_trade_journal.sql` (v3.11.0) and needed a follow-up
+   `CONVERT TO CHARACTER SET` migration (`2026_09_15_0002`) to fix, since it wasn't caught before
+   both new tables were live. Check this before every `CREATE TABLE`, not after.
+3. Add its path to `version.json`'s `"files"` array (`{"path": "migrations/...sql", "critical": false}`) —
    if it's not in the manifest, `updater.php` will never deploy it to the server, full stop.
-3. Bump `current_version`, commit, push, tag, release.
-4. **Export the database before running `?mode=run` on live.** DDL can't be rolled back — a
+4. Bump `current_version`, commit, push, tag, release.
+5. **Export the database before running `?mode=run` on live.** DDL can't be rolled back — a
    backup is the only undo.
-5. Deploy via the normal updater workflow (Acrob runs `updater.php`), then hit
+6. Deploy via the normal updater workflow (Acrob runs `updater.php`), then hit
    `migrate.php?mode=run&token=...` to apply it.
 
 ### Running it
@@ -1653,7 +1694,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.11.0
+Current Version: v3.11.1
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

@@ -1,24 +1,14 @@
 {
-    "current_version": "3.11.0",
+    "current_version": "3.11.1",
     "release_date": "2026-09-15",
     "changelog": [
-        "Replace: the trade form's old single pre-entry section (setup grade + one emotion + three justification-prompt textareas) is replaced by a three-phase trade journal — pre-entry, during-position (optional), and post-close — nine questions total, only three free text, grounded in Mark Douglas and Fenton-O'Creevy et al. (2011)",
-        "Add: trade_journal / trade_journal_actions tables (migration 2026_09_15_0001), one journal row per trade per phase, with its own created_at/updated_at — an edit never touches created_at, and retrospective self-report timing is exactly what this is for",
-        "Add: the during-position phase has no 'skipped' marker by design — an absent row means the trader never returned to the chart mid-trade, which is itself the signal, not a gap to flag",
-        "Add: includes/journal_taxonomy.php is the single source of truth for the during-phase multi-select actions and the post-close exit-type codes, same pattern as emotion_states.php — codes stored, never labels",
-        "Move: the strategy selector now sits near the top of the trade form (right after Pair), since it determines which gate/tag variables render below it",
-        "Fix: trades.note_saw/note_why/note_unsure and emotion_tag are no longer written by the form but the columns and their historical content are kept — nothing is migrated or rewritten. Historical trades still render the old notes under their original question wording, and the new Trade Journal block, wherever a trade's detail view is opened",
-        "Note: the separate pre-trade checklist popup (gate variables only, shown before the trade modal opens) still uses the challenge's single default strategy rather than a per-trade choice — a known, deliberately out-of-scope gap for this release, documented in CLAUDE.md",
-        "Note: ReviewEngineController does not yet read trade_journal — this release is capture only, analysis is a future release"
+        "Fix: 2026_09_15_0001 (v3.11.0) created trade_journal and trade_journal_actions without the utf8mb4/utf8mb4_general_ci charset every other table in this schema uses — both fell back to the server default (latin1_swedish_ci on live), which would mangle or reject non-Latin1 characters. Migration 2026_09_15_0002 converts both tables; safe because both were still empty. Reproduced and verified the fix against a real database, including confirming both foreign keys survive the conversion",
+        "Fix: TradeController::getAll() had no defense against trade_journal being unavailable — a missing or broken table threw an uncaught exception that fataled the entire trade list, not just the journal portion. The journal queries are now wrapped defensively (tried once per request, not once per trade) and fall back to an empty trade_journal per trade instead of taking get_trades down",
+        "Process: added a migration-writing checklist item to CLAUDE.md — every CREATE TABLE must specify DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci explicitly, so this specific mistake doesn't recur"
     ],
     "files": [
-        {"path": "migrations/2026_09_15_0001_create_trade_journal.sql", "critical": false},
-        {"path": "includes/journal_taxonomy.php", "critical": false},
-        {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "index.php", "critical": false},
-        {"path": "modals/trade-modal.php", "critical": false},
-        {"path": "js/trades.js", "critical": false},
-        {"path": "css/style.css", "critical": false}
+        {"path": "migrations/2026_09_15_0002_fix_trade_journal_charset.sql", "critical": false},
+        {"path": "includes/controllers/TradeController.php", "critical": false}
     ],
     "db_migrations": []
 }

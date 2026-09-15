@@ -34,8 +34,21 @@ class TradeController {
         // trade_journal: same embed-per-trade pattern as trade_variables above, not a
         // separate API call — the trade form needs this the moment it opens, same as
         // strategy variable answers do.
-        $tj = $this->db->prepare("SELECT id, phase, emotion_code, note, exit_type, good_process, created_at, updated_at FROM trade_journal WHERE trade_id=?");
-        $tja = $this->db->prepare("SELECT action_code FROM trade_journal_actions WHERE journal_id=?");
+        //
+        // Deliberately defensive: a missing/broken trade_journal table (migration not
+        // yet applied, mid-deploy, etc.) must not take the whole Trade Log down with it.
+        // A trade's core fields are far more load-bearing than its journal — degrade to
+        // an empty trade_journal per trade rather than let get_trades fatal entirely.
+        // Tried once, not once per trade: if it fails, every remaining trade in this
+        // request just gets [] without repeating a query already known to fail.
+        $journalAvailable = true;
+        try {
+            $tj = $this->db->prepare("SELECT id, phase, emotion_code, note, exit_type, good_process, created_at, updated_at FROM trade_journal WHERE trade_id=?");
+            $tja = $this->db->prepare("SELECT action_code FROM trade_journal_actions WHERE journal_id=?");
+        } catch (PDOException $e) {
+            $journalAvailable = false;
+        }
+
         foreach ($trades as &$t) {
             if (!empty($t['screenshots'])) {
                 $t['screenshots_data'] = json_decode($t['screenshots'], true) ?: [];
@@ -48,16 +61,23 @@ class TradeController {
             $tv->execute([$t['id']]);
             $t['trade_variables'] = $tv->fetchAll();
 
-            $tj->execute([$t['id']]);
-            $journal = $tj->fetchAll();
-            foreach ($journal as &$j) {
-                if ($j['phase'] === 'during') {
-                    $tja->execute([$j['id']]);
-                    $j['actions'] = array_column($tja->fetchAll(), 'action_code');
+            $t['trade_journal'] = [];
+            if ($journalAvailable) {
+                try {
+                    $tj->execute([$t['id']]);
+                    $journal = $tj->fetchAll();
+                    foreach ($journal as &$j) {
+                        if ($j['phase'] === 'during') {
+                            $tja->execute([$j['id']]);
+                            $j['actions'] = array_column($tja->fetchAll(), 'action_code');
+                        }
+                    }
+                    unset($j);
+                    $t['trade_journal'] = $journal;
+                } catch (PDOException $e) {
+                    $journalAvailable = false;
                 }
             }
-            unset($j);
-            $t['trade_journal'] = $journal;
         }
         jsonResponse($trades);
     }

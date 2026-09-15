@@ -5,6 +5,8 @@
  * All trades scoped to active challenge.
  * Supports up to 4 screenshots per trade with labels.
  */
+require_once __DIR__ . '/../journal_taxonomy.php';
+
 class TradeController {
     private $db;
     private $uid;
@@ -29,6 +31,11 @@ class TradeController {
 
         // Parse screenshots JSON for frontend
         $tv = $this->db->prepare("SELECT variable_id, value FROM trade_variables WHERE trade_id=?");
+        // trade_journal: same embed-per-trade pattern as trade_variables above, not a
+        // separate API call — the trade form needs this the moment it opens, same as
+        // strategy variable answers do.
+        $tj = $this->db->prepare("SELECT id, phase, emotion_code, note, exit_type, good_process, created_at, updated_at FROM trade_journal WHERE trade_id=?");
+        $tja = $this->db->prepare("SELECT action_code FROM trade_journal_actions WHERE journal_id=?");
         foreach ($trades as &$t) {
             if (!empty($t['screenshots'])) {
                 $t['screenshots_data'] = json_decode($t['screenshots'], true) ?: [];
@@ -40,6 +47,17 @@ class TradeController {
             }
             $tv->execute([$t['id']]);
             $t['trade_variables'] = $tv->fetchAll();
+
+            $tj->execute([$t['id']]);
+            $journal = $tj->fetchAll();
+            foreach ($journal as &$j) {
+                if ($j['phase'] === 'during') {
+                    $tja->execute([$j['id']]);
+                    $j['actions'] = array_column($tja->fetchAll(), 'action_code');
+                }
+            }
+            unset($j);
+            $t['trade_journal'] = $journal;
         }
         jsonResponse($trades);
     }
@@ -143,12 +161,76 @@ class TradeController {
             }
         }
 
+        $this->saveJournal($finalTradeId, $d['trade_journal'] ?? null);
+
         // Update daily limits
         $dl_date = $d['trade_date'] ?? date('Y-m-d');
         $this->db->prepare("INSERT INTO daily_limits (user_id,log_date,daily_pnl,trades_count) VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE daily_pnl=daily_pnl+?,trades_count=trades_count+1")
             ->execute([$this->uid, $dl_date, round($net, 4), round($net, 4)]);
 
         jsonResponse(['success' => true, 'id' => $finalTradeId]);
+    }
+
+    /**
+     * Three-phase trade journal (v3.11.0): one row per trade per phase, upserted here in
+     * the same request as the trade itself — same bundled-save pattern as trade_variables
+     * above, so a new trade's journal entry can use the just-created trade id without a
+     * second round trip.
+     *
+     * A phase with nothing answered is deleted rather than left as a stale empty row —
+     * the ABSENCE of a 'during' row is the signal that the trader never returned to the
+     * chart mid-trade; a phase must never be marked "skipped" instead.
+     *
+     * created_at is never touched here: it's excluded from the ON DUPLICATE KEY UPDATE
+     * clause below, so MariaDB leaves it as originally set. updated_at needs no code at
+     * all — its own ON UPDATE CURRENT_TIMESTAMP in the schema refreshes it automatically
+     * whenever this UPDATE path actually runs.
+     */
+    private function saveJournal($tradeId, $entries) {
+        if (is_string($entries)) $entries = json_decode($entries, true) ?: [];
+        if (!is_array($entries)) return;
+
+        $validPhases = ['pre_entry', 'during', 'post_close'];
+        $validActionCodes = array_column(journalActions(), 'code');
+
+        $upsert = $this->db->prepare(
+            "INSERT INTO trade_journal (trade_id, phase, emotion_code, note, exit_type, good_process)
+             VALUES (?,?,?,?,?,?)
+             ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id), emotion_code=VALUES(emotion_code), note=VALUES(note), exit_type=VALUES(exit_type), good_process=VALUES(good_process)"
+        );
+        $deleteEmpty = $this->db->prepare("DELETE FROM trade_journal WHERE trade_id=? AND phase=?");
+        $deleteActions = $this->db->prepare("DELETE FROM trade_journal_actions WHERE journal_id=?");
+        $insertAction = $this->db->prepare("INSERT INTO trade_journal_actions (journal_id, action_code) VALUES (?,?)");
+
+        foreach ($entries as $entry) {
+            if (!is_array($entry)) continue;
+            $phase = $entry['phase'] ?? '';
+            if (!in_array($phase, $validPhases, true)) continue;
+
+            $emotionCode = trim((string)($entry['emotion_code'] ?? '')) ?: null;
+            $note = trim((string)($entry['note'] ?? '')) ?: null;
+            $exitType = $phase === 'post_close' ? (trim((string)($entry['exit_type'] ?? '')) ?: null) : null;
+            $goodProcessRaw = $entry['good_process'] ?? null;
+            $goodProcess = ($phase === 'post_close' && $goodProcessRaw !== null && $goodProcessRaw !== '')
+                ? (int)!!$goodProcessRaw : null;
+            $actions = ($phase === 'during' && is_array($entry['actions'] ?? null))
+                ? array_values(array_unique(array_intersect($entry['actions'], $validActionCodes)))
+                : [];
+
+            $hasContent = $emotionCode !== null || $note !== null || $exitType !== null || $goodProcess !== null || !empty($actions);
+            if (!$hasContent) {
+                $deleteEmpty->execute([$tradeId, $phase]);
+                continue;
+            }
+
+            $upsert->execute([$tradeId, $phase, $emotionCode, $note, $exitType, $goodProcess]);
+            $journalId = $this->db->lastInsertId();
+
+            if ($phase === 'during') {
+                $deleteActions->execute([$journalId]);
+                foreach ($actions as $code) $insertAction->execute([$journalId, $code]);
+            }
+        }
     }
 
     /**

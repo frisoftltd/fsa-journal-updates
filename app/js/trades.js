@@ -121,7 +121,7 @@ function viewTrade(id) {
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">R Multiple</div><div style="font-family:var(--font-head);font-size:16px;color:${parseFloat(t.r_multiple||0)>=0?'var(--green)':'var(--red)'}">${t.r_multiple}R</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Session</div><div>${t.session||'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exec Score</div><div style="font-family:var(--font-head);font-size:16px;color:var(--gold)">${t.exec_score?t.exec_score+'/10':'—'}</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Emotion</div><div>${t.emotion_tag?emotionLabel(t.emotion_tag):'—'}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Emotion</div><div>${t.emotion_tag?emotionLabel(t.emotion_tag):(t.trade_journal?.find(j=>j.phase==='pre_entry')?.emotion_code?emotionLabel(t.trade_journal.find(j=>j.phase==='pre_entry').emotion_code):'—')}</div></div>
                 </div>
                 <div style="margin-top:12px;display:flex;gap:8px">
                     <button class="btn btn-ghost" style="flex:1" onclick="document.getElementById('view-trade-modal').classList.remove('open')">Close</button>
@@ -129,6 +129,18 @@ function viewTrade(id) {
                 </div>
             </div>
         </div>
+        ${(t.note_saw||t.note_why||t.note_unsure)?`
+        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Legacy Pre-Trade Notes</div>
+            ${t.note_saw?`<div style="margin-top:6px;font-size:12px;color:var(--text2)"><strong style="color:var(--text3)">What did I see?</strong><br>${t.note_saw}</div>`:''}
+            ${t.note_why?`<div style="margin-top:6px;font-size:12px;color:var(--text2)"><strong style="color:var(--text3)">Why enter now?</strong><br>${t.note_why}</div>`:''}
+            ${t.note_unsure?`<div style="margin-top:6px;font-size:12px;color:var(--text2)"><strong style="color:var(--text3)">What am I unsure about?</strong><br>${t.note_unsure}</div>`:''}
+        </div>` : ''}
+        ${t.trade_journal && t.trade_journal.length ? `
+        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Trade Journal</div>
+            ${renderJournalView(t.trade_journal)}
+        </div>` : ''}
     `;
     document.getElementById('view-trade-title').textContent = `Trade #${t.id} — ${t.pair} ${t.direction} — ${t.trade_date}`;
     document.getElementById('view-trade-modal').classList.add('open');
@@ -244,17 +256,14 @@ function openTradeModal(data=null) {
         const prev = document.getElementById('preview-' + i);
         if (prev) prev.innerHTML = '';
     }
-    // Collapse Strategy & Psychology section by default
-    document.getElementById('strategy-section-body').style.display='none';
-    document.getElementById('strategy-section-chevron').textContent='▸';
     document.getElementById('strategy-vars-fields').innerHTML='';
     populateStrategySelect(data);
+    initJournalSections(data);
     if(data){
-        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes','note_saw','note_why','note_unsure'];
+        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes'];
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
         if(data.time_in) { const d=data.time_in.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_in_date').value=parts[0]; document.getElementById('f-time_in_time').value=parts[1]?.substring(0,5)||''; }
         if(data.time_out) { const d=data.time_out.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_out_date').value=parts[0]; document.getElementById('f-time_out_time').value=parts[1]?.substring(0,5)||''; }
-        renderEmotionGrid(data.emotion_tag||null);
         selectGrade(data.setup_grade||null);
         // Show existing screenshots
         const images = data.screenshots_data || [];
@@ -273,16 +282,15 @@ function openTradeModal(data=null) {
         document.getElementById('f-trade_date').value=today;
         document.getElementById('f-time_in_date').value=today;
         document.getElementById('f-time_out_date').value=today;
-        renderEmotionGrid(null);
         selectGrade(null);
     }
     document.getElementById('trade-modal').classList.add('open');
 }
 
-// ── STRATEGY & PSYCHOLOGY SECTION ────────────────────────
-function toggleStrategySection(){
-    const body = document.getElementById('strategy-section-body');
-    const chevron = document.getElementById('strategy-section-chevron');
+// ── TRADE JOURNAL SECTIONS (collapse/reveal) ─────────────
+function toggleJournalSection(phase){
+    const body = document.getElementById('journal-body-'+phase);
+    const chevron = document.getElementById('journal-chevron-'+phase);
     const open = body.style.display !== 'none';
     body.style.display = open ? 'none' : 'block';
     chevron.textContent = open ? '▸' : '▾';
@@ -355,29 +363,95 @@ function collectTradeVariables(){
     return vars;
 }
 
-// ── EMOTION GRID (9-state taxonomy, window.EMOTION_STATES) ──
-// Rendered fresh each time the modal opens rather than once at page load, so it always
-// starts from a clean, unselected grid the same way the rest of the form does.
-function renderEmotionGrid(selectedCode=null){
-    const grid = document.getElementById('emotion-grid');
+// ── TRADE JOURNAL (v3.11.0) ──────────────────────────────
+// Three phases (pre_entry/during/post_close), each with its own emotion grid instance
+// (same window.EMOTION_STATES taxonomy, reused per phase rather than one global field —
+// the emotion at entry, mid-trade, and at close are three different data points). Answers
+// live in window._journalState rather than per-field hidden inputs, since the whole
+// section is collected as one JSON blob (collectTradeJournal()) for the save request, not
+// read back out of the form generically the way trade_date/pair/etc. are.
+const JOURNAL_PHASES = ['pre_entry', 'during', 'post_close'];
+
+function resetJournalState(){
+    window._journalState = {
+        pre_entry:  { emotion_code: null },
+        during:     { emotion_code: null, actions: [] },
+        post_close: { emotion_code: null, exit_type: null, good_process: null },
+    };
+}
+
+// Called once per modal open. A brand-new trade only shows Pre-Entry — During/Post-Close
+// don't apply yet, since the trade has no "during" or "after" until it exists — while
+// editing an existing trade reveals all three (collapsed, prefilled from data.trade_journal
+// if present). Nothing here ever marks a phase "skipped"; the During header is simply
+// absent for a new trade because that phase hasn't happened yet, not hidden as a choice.
+function initJournalSections(data){
+    resetJournalState();
+    JOURNAL_PHASES.forEach(phase=>{
+        const body = document.getElementById('journal-body-'+phase);
+        if (body) { body.style.display = 'none'; }
+        const chevron = document.getElementById('journal-chevron-'+phase);
+        if (chevron) chevron.textContent = '▸';
+    });
+    document.getElementById('journal-header-during').style.display = data ? 'flex' : 'none';
+    document.getElementById('journal-header-post_close').style.display = data ? 'flex' : 'none';
+
+    const byPhase = {};
+    (data?.trade_journal || []).forEach(j => byPhase[j.phase] = j);
+
+    renderEmotionGrid('pre_entry', byPhase.pre_entry?.emotion_code || null);
+    document.getElementById('f-journal-note-pre_entry').value = byPhase.pre_entry?.note || '';
+
+    renderActionsGrid(byPhase.during?.actions || []);
+    renderEmotionGrid('during', byPhase.during?.emotion_code || null);
+    document.getElementById('f-journal-note-during').value = byPhase.during?.note || '';
+
+    renderExitTypeSelect(byPhase.post_close?.exit_type || null);
+    renderEmotionGrid('post_close', byPhase.post_close?.emotion_code || null);
+    document.querySelectorAll('.good-process-pill').forEach(b=>{ b.style.background=''; b.style.color=''; b.style.borderColor=''; });
+    window._journalState.post_close.good_process = null;
+    const gp = byPhase.post_close?.good_process;
+    if (gp === 1 || gp === '1') toggleGoodProcess(1);
+    else if (gp === 0 || gp === '0') toggleGoodProcess(0);
+    document.getElementById('f-journal-note-post_close').value = byPhase.post_close?.note || '';
+}
+
+// Reads window._journalState plus the three free-text fields into the payload shape
+// TradeController::saveJournal() expects. A phase with nothing filled in still gets
+// submitted (as all-null/empty) — the backend deletes any existing row for an
+// all-empty phase rather than the frontend deciding what "empty" means twice.
+function collectTradeJournal(){
+    const s = window._journalState;
+    return [
+        { phase: 'pre_entry',  emotion_code: s.pre_entry.emotion_code,  note: document.getElementById('f-journal-note-pre_entry')?.value || '' },
+        { phase: 'during',     emotion_code: s.during.emotion_code,     note: document.getElementById('f-journal-note-during')?.value || '', actions: s.during.actions || [] },
+        { phase: 'post_close', emotion_code: s.post_close.emotion_code, note: document.getElementById('f-journal-note-post_close')?.value || '', exit_type: s.post_close.exit_type, good_process: s.post_close.good_process },
+    ];
+}
+
+function renderEmotionGrid(phase, selectedCode=null){
+    const grid = document.getElementById('emotion-grid-'+phase);
+    if (!grid) return;
     const states = window.EMOTION_STATES || [];
     grid.innerHTML = states.map(s=>`
         <span style="display:inline-flex;align-items:stretch">
-            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-code="${s.code}" onclick="toggleEmotionSelect('${s.code}')" style="border-top-right-radius:0;border-bottom-right-radius:0;border-right:none">${s.label}</button>
-            <button type="button" class="btn btn-ghost btn-sm emotion-info-btn" data-code="${s.code}" onclick="previewEmotion('${s.code}')" title="What does '${s.label}' mean?" style="border-top-left-radius:0;border-bottom-left-radius:0;padding:0 9px;font-weight:700">ⓘ</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-code="${s.code}" onclick="toggleEmotionSelect('${phase}','${s.code}')" style="border-top-right-radius:0;border-bottom-right-radius:0;border-right:none">${s.label}</button>
+            <button type="button" class="btn btn-ghost btn-sm emotion-info-btn" data-code="${s.code}" onclick="previewEmotion('${phase}','${s.code}')" title="What does '${s.label}' mean?" style="border-top-left-radius:0;border-bottom-left-radius:0;padding:0 9px;font-weight:700">ⓘ</button>
         </span>
     `).join('');
 
     const known = states.some(s=>s.code===selectedCode);
     // Preserve whatever was already stored (new code, legacy code, or nothing) until the
     // user actively changes it — only a tap should ever change this value.
-    document.getElementById('f-emotion_tag').value = selectedCode || '';
-    highlightEmotionPill(selectedCode);
-    document.getElementById('emotion-description').style.display = 'none';
+    window._journalState[phase].emotion_code = selectedCode || null;
+    highlightEmotionPill(phase, selectedCode);
+    document.getElementById('emotion-description-'+phase).style.display = 'none';
 
-    // A legacy (pre-v3.10.0) code won't match any pill above — surface it rather than
-    // let the grid look empty/unanswered, and warn before it gets silently overwritten.
-    const legacyNote = document.getElementById('emotion-legacy-note');
+    // A legacy (pre-v3.10.0, single-field) code won't match any pill above — surface it
+    // rather than let the grid look empty/unanswered, and warn before it gets silently
+    // overwritten. This can only appear on the pre_entry grid, since legacy trades only
+    // ever had one emotion_tag value and no phase concept.
+    const legacyNote = document.getElementById('emotion-legacy-note-'+phase);
     if (selectedCode && !known) {
         const legacyLabel = (window.LEGACY_EMOTION_LABELS||{})[selectedCode] || selectedCode;
         legacyNote.textContent = `Previously recorded: "${legacyLabel}" — a retired state, no longer selectable. Picking one below replaces it.`;
@@ -385,11 +459,11 @@ function renderEmotionGrid(selectedCode=null){
     } else {
         legacyNote.style.display = 'none';
     }
-    toggleEmotionClearBtn();
+    toggleEmotionClearBtn(phase);
 }
 
-function highlightEmotionPill(code){
-    document.querySelectorAll('.emotion-pill').forEach(b=>{
+function highlightEmotionPill(phase, code){
+    document.querySelectorAll('#emotion-grid-'+phase+' .emotion-pill').forEach(b=>{
         const active = !!code && b.dataset.code === code;
         b.style.background = active ? 'var(--blue)' : '';
         b.style.color = active ? '#fff' : '';
@@ -400,48 +474,136 @@ function highlightEmotionPill(code){
 // Tapping a pill's label selects it; tapping an already-selected pill's label again
 // clears it — the selection must be clearable, an unanswered emotion is not the same
 // as "settled" and must never default to anything.
-function toggleEmotionSelect(code){
-    const cur = document.getElementById('f-emotion_tag').value;
-    const next = cur === code ? '' : code;
-    document.getElementById('f-emotion_tag').value = next;
-    highlightEmotionPill(next);
-    document.getElementById('emotion-legacy-note').style.display = 'none';
-    if (next) previewEmotion(next); else document.getElementById('emotion-description').style.display = 'none';
-    toggleEmotionClearBtn();
+function toggleEmotionSelect(phase, code){
+    const cur = window._journalState[phase].emotion_code;
+    const next = cur === code ? null : code;
+    window._journalState[phase].emotion_code = next;
+    highlightEmotionPill(phase, next);
+    document.getElementById('emotion-legacy-note-'+phase).style.display = 'none';
+    if (next) previewEmotion(phase, next); else document.getElementById('emotion-description-'+phase).style.display = 'none';
+    toggleEmotionClearBtn(phase);
 }
 
-function clearEmotion(){
-    document.getElementById('f-emotion_tag').value = '';
-    highlightEmotionPill(null);
-    document.getElementById('emotion-description').style.display = 'none';
-    document.getElementById('emotion-legacy-note').style.display = 'none';
-    toggleEmotionClearBtn();
+function clearEmotion(phase){
+    window._journalState[phase].emotion_code = null;
+    highlightEmotionPill(phase, null);
+    document.getElementById('emotion-description-'+phase).style.display = 'none';
+    document.getElementById('emotion-legacy-note-'+phase).style.display = 'none';
+    toggleEmotionClearBtn(phase);
 }
 
-function toggleEmotionClearBtn(){
-    const btn = document.getElementById('emotion-clear-btn');
-    if (btn) btn.style.display = document.getElementById('f-emotion_tag').value ? 'inline-block' : 'none';
+function toggleEmotionClearBtn(phase){
+    const btn = document.getElementById('emotion-clear-btn-'+phase);
+    if (btn) btn.style.display = window._journalState[phase].emotion_code ? 'inline-block' : 'none';
 }
 
 // Reveals a state's description WITHOUT selecting it — tapping "ⓘ" never touches the
 // hidden field or the selected pill, so reading what a state means is fully non-committal.
-function previewEmotion(code){
+function previewEmotion(phase, code){
     const s = (window.EMOTION_STATES||[]).find(x=>x.code===code);
-    const panel = document.getElementById('emotion-description');
+    const panel = document.getElementById('emotion-description-'+phase);
     if (!s) { panel.style.display = 'none'; return; }
     panel.innerHTML = `<strong style="color:var(--text)">${s.label}</strong><br>${s.description}`;
     panel.style.display = 'block';
 }
 
-// Readable label for any emotion_tag value — current code, legacy code, or unrecognized.
-// Mirrors includes/emotion_states.php::emotionLabel(), reading the same embedded data
-// rather than a second hardcoded copy.
+// Readable label for any emotion_tag/emotion_code value — current code, legacy code, or
+// unrecognized. Mirrors includes/emotion_states.php::emotionLabel(), reading the same
+// embedded data rather than a second hardcoded copy.
 function emotionLabel(code){
     if (!code) return null;
     const s = (window.EMOTION_STATES||[]).find(x=>x.code===code);
     if (s) return s.label;
     const legacy = (window.LEGACY_EMOTION_LABELS||{})[code];
     return legacy || code;
+}
+
+// Mirrors includes/journal_taxonomy.php's journalActionLabel()/journalExitTypeLabel().
+function journalActionLabel(code){
+    const a = (window.JOURNAL_ACTIONS||[]).find(x=>x.code===code);
+    return a ? a.label : code;
+}
+function journalExitTypeLabel(code){
+    if (!code) return null;
+    const t = (window.JOURNAL_EXIT_TYPES||[]).find(x=>x.code===code);
+    return t ? t.label : code;
+}
+
+const JOURNAL_PHASE_LABELS = { pre_entry: 'Pre-Entry', during: 'During Open Position', post_close: 'After Close' };
+
+// Read-only rendering of a trade's journal rows for viewTrade() — same phase order as
+// the form, skips phases with no row (a missing 'during' row is the expected common case,
+// not an error to explain away).
+function renderJournalView(journalRows){
+    const rows = (journalRows || []).slice().sort((a,b) => JOURNAL_PHASES.indexOf(a.phase) - JOURNAL_PHASES.indexOf(b.phase));
+    if (!rows.length) return '';
+    return rows.map(j => {
+        const parts = [];
+        if (j.emotion_code) parts.push(`<strong>Feeling:</strong> ${emotionLabel(j.emotion_code)}`);
+        if (j.phase === 'during' && j.actions && j.actions.length) parts.push(`<strong>Actions:</strong> ${j.actions.map(journalActionLabel).join(', ')}`);
+        if (j.phase === 'post_close' && j.exit_type) parts.push(`<strong>Exit:</strong> ${journalExitTypeLabel(j.exit_type)}`);
+        if (j.phase === 'post_close' && (j.good_process === 1 || j.good_process === '1' || j.good_process === 0 || j.good_process === '0')) {
+            parts.push(`<strong>Good process:</strong> ${(j.good_process==1||j.good_process=='1') ? 'Yes' : 'No'}`);
+        }
+        if (j.note) parts.push(`<em>${j.note}</em>`);
+        const when = j.created_at ? new Date(j.created_at.replace(' ','T')).toLocaleString() : '';
+        return `<div style="margin-top:8px;padding:10px 12px;background:var(--bg3);border-radius:8px;font-size:12px;color:var(--text2);line-height:1.6">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">${JOURNAL_PHASE_LABELS[j.phase]||j.phase}${when?` · ${when}`:''}</div>
+            ${parts.join('<br>')}
+        </div>`;
+    }).join('');
+}
+
+// ── Q4: "What have I done since entry?" — multi-select, during phase only ──
+function renderActionsGrid(selectedCodes=[]){
+    const grid = document.getElementById('actions-grid');
+    if (!grid) return;
+    const actions = window.JOURNAL_ACTIONS || [];
+    grid.innerHTML = actions.map(a=>`<button type="button" class="btn btn-ghost btn-sm action-pill" data-code="${a.code}" onclick="toggleAction('${a.code}')">${a.label}</button>`).join('');
+    window._journalState.during.actions = [...selectedCodes];
+    highlightActionPills();
+}
+
+function highlightActionPills(){
+    const selected = window._journalState.during.actions || [];
+    document.querySelectorAll('.action-pill').forEach(b=>{
+        const active = selected.includes(b.dataset.code);
+        b.style.background = active ? 'var(--blue)' : '';
+        b.style.color = active ? '#fff' : '';
+        b.style.borderColor = active ? 'var(--blue)' : '';
+    });
+}
+
+function toggleAction(code){
+    const list = window._journalState.during.actions || (window._journalState.during.actions = []);
+    const idx = list.indexOf(code);
+    if (idx === -1) list.push(code); else list.splice(idx, 1);
+    highlightActionPills();
+}
+
+// ── Q7: "How did it end?" — single select, post_close phase only ──
+function renderExitTypeSelect(selectedCode=null){
+    const sel = document.getElementById('f-exit_type');
+    if (!sel) return;
+    const types = window.JOURNAL_EXIT_TYPES || [];
+    sel.innerHTML = '<option value="">— not recorded —</option>' + types.map(t=>`<option value="${t.code}" ${selectedCode===t.code?'selected':''}>${t.label}</option>`).join('');
+    window._journalState.post_close.exit_type = selectedCode || null;
+    sel.onchange = () => { window._journalState.post_close.exit_type = sel.value || null; };
+}
+
+// ── Q9: "Was this good process, regardless of outcome?" — Yes/No, post_close only ──
+// Same clearable-toggle pattern as emotion/grade pills: tapping the already-selected
+// answer clears it, since this is optional and must not default to anything either.
+function toggleGoodProcess(val){
+    const cur = window._journalState.post_close.good_process;
+    const next = cur === val ? null : val;
+    window._journalState.post_close.good_process = next;
+    document.querySelectorAll('.good-process-pill').forEach(b=>{
+        const active = next !== null && parseInt(b.dataset.value, 10) === next;
+        b.style.background = active ? 'var(--blue)' : '';
+        b.style.color = active ? '#fff' : '';
+        b.style.borderColor = active ? 'var(--blue)' : '';
+    });
 }
 
 function selectGrade(val){
@@ -527,15 +689,20 @@ async function saveTrade() {
             if (t && t.screenshots) fd.set('existing_screenshots', t.screenshots);
         }
         fd.set('trade_variables', JSON.stringify(collectTradeVariables()));
+        fd.set('trade_journal', JSON.stringify(collectTradeJournal()));
         const resp = await fetch(`${API}?action=${id?'update_trade':'add_trade'}`,{method:'POST',body:fd});
         r = await resp.json();
     } else {
         // Use JSON for speed (no files)
+        // emotion_tag/note_saw/note_why/note_unsure are deliberately not read here — the
+        // three-phase trade_journal below replaced them on the form (the columns still
+        // exist for historical trades, just nothing writes to them anymore).
         const data = {};
-        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
+        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes','strategy_id','setup_grade'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
         data.time_in=tin_d&&tin_t?tin_d+' '+tin_t+':00':null;
         data.time_out=tout_d&&tout_t?tout_d+' '+tout_t+':00':null;
         data.trade_variables = collectTradeVariables();
+        data.trade_journal = collectTradeJournal();
         if(id) {
             data.id=id;
             const t = allTrades.find(t => t.id == id);

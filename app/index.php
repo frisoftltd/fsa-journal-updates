@@ -1,6 +1,7 @@
 <?php
 require_once 'includes/config.php';
 require_once 'includes/emotion_states.php';
+require_once 'includes/journal_taxonomy.php';
 requireLogin();
 $u = currentUser();
 ?><!DOCTYPE html>
@@ -117,6 +118,10 @@ foreach ($modals as $m) {
 // includes/emotion_states.php — trades.js reads this, it never hardcodes the list.
 window.EMOTION_STATES = <?= json_encode(emotionStates()) ?>;
 window.LEGACY_EMOTION_LABELS = <?= json_encode(legacyEmotionLabels()) ?>;
+// Same single-source-of-truth pattern for the trade journal's other enumerated answers —
+// includes/journal_taxonomy.php, never hardcoded in trades.js.
+window.JOURNAL_ACTIONS = <?= json_encode(journalActions()) ?>;
+window.JOURNAL_EXIT_TYPES = <?= json_encode(journalExitTypes()) ?>;
 function filterTrades(q) {
     const f=allTrades.filter(t=>Object.values(t).some(v=>v&&String(v).toLowerCase().includes(q.toLowerCase())));
     renderTradesTable(f);

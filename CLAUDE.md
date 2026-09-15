@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.10.0 |
+| Current Version | v3.11.0 |
 
 ### Tech Stack
 
@@ -80,6 +80,7 @@ fundedcontrol.com/
 │   ├── api.php                        ← Thin API entry (14 lines max)
 │   ├── helpers.php                    ← Shared functions
 │   ├── emotion_states.php             ← Emotional state taxonomy (added v3.10.0)
+│   ├── journal_taxonomy.php           ← Trade journal action/exit-type codes (added v3.11.0)
 │   ├── router.php                     ← Action → controller routing
 │   │
 │   └── controllers/
@@ -220,6 +221,31 @@ FK: trade_id → trades(id) ON DELETE CASCADE
 > Before v3.8.0 this table had no foreign keys at all, which is how 95 answers across 19 trades got
 > silently orphaned (a delete-then-reinsert bug in the strategy variable editor deleted and recreated
 > variable ids 6–10 as 11–15). Fixed by migrations `2026_09_13_0003`–`0004`. See §11 for history.
+
+**trade_journal** (added v3.11.0 — see "Three-Phase Trade Journal" below for full design)
+```sql
+id, trade_id, phase (pre_entry/during/post_close),
+emotion_code, note, exit_type, good_process,
+created_at, updated_at
+UNIQUE KEY (trade_id, phase)
+FK: trade_id → trades(id) ON DELETE CASCADE
+```
+> One row per trade per phase, never more. `emotion_code` is shared across all three
+> phases (the nine `emotion_states.php` codes, not journal-specific). `exit_type` and
+> `good_process` are only ever populated on the `post_close` row. `updated_at` has no
+> `DEFAULT` — it stays `NULL` until the first edit, so `NULL` means "never edited since
+> creation," not "unknown."
+
+**trade_journal_actions** (added v3.11.0)
+```sql
+id, journal_id, action_code
+UNIQUE KEY (journal_id, action_code)
+FK: journal_id → trade_journal(id) ON DELETE CASCADE
+```
+> Multi-select answer to "What have I done since entry?" (the `during`-phase row only) —
+> one row per selected action, same EAV shape as `trade_variables` rather than a
+> delimited-string or bitmask column, for consistency with the pattern this codebase
+> already uses. `action_code` values come from `includes/journal_taxonomy.php`.
 
 **ai_reviews** (added v3.6.0)
 ```sql
@@ -469,6 +495,105 @@ journaling and will reuse this same grid at all three phases — that's why the 
 are phase-neutral rather than entry-framed like the old set ("waiting for setup", "scared to
 enter") was. No phase field exists yet; today's single capture point is still logged at
 trade-save time only.
+
+### Three-Phase Trade Journal (added v3.11.0)
+
+Replaces the old single pre-entry section (setup grade + one emotion + three prose questions —
+`note_saw`/`note_why`/`note_unsure`) with nine questions across three phases, stored in
+`trade_journal`/`trade_journal_actions` (schema above). Only three of the nine are free text, one
+per phase — nine prose fields per trade would not get filled, and a half-filled journal is worse
+than a short one.
+
+**Why the old three prose fields were replaced, not just supplemented:** "What did I see?" and
+"Why enter now?" collected the same answer, and both re-recorded what the gate/tag variables
+already capture structurally. Worse, all three were justification prompts asked at the moment the
+trade decision was already made — they invite writing the version that makes the trade look
+reasonable after the fact, not a check before it. Q3 ("What would have to happen for me to be
+wrong?") replaces all three: it's hard to rationalize, and it forces the invalidation condition
+into view before attachment to the trade forms.
+
+**The three phases:**
+
+| Phase | Questions | Realistically filled? |
+|---|---|---|
+| `pre_entry` | Q1 emotion, Q2 setup grade (unchanged `trades.setup_grade`), Q3 free text | Yes — this is what the old form asked, just reworked |
+| `during` | Q4 multi-select actions, Q5 emotion, Q6 free text | **Optional, often empty — expected** |
+| `post_close` | Q7 exit type, Q8 emotion, Q9 good-process Yes/No + optional line | Yes |
+
+**The during-position phase being empty is itself data, not a gap.** It means the trader didn't
+return to the chart mid-trade. There is deliberately **no "skipped" marker or button** — the
+absence of a `during` row for a trade already carries that meaning, combined with `trades.
+time_in`/`time_out`. Adding a marker would be recording the same fact twice, once as an absence
+and once as an explicit flag, with no way to keep them from disagreeing. The form does not
+prompt, nag, or validate this phase as required — `TradeController::saveJournal()` simply deletes
+any existing `during` row if every field in it comes back empty, rather than leaving a stale
+empty row or inventing a status value for "nothing to say."
+
+**Timestamps are load-bearing, not decoration.** Fenton-O'Creevy et al. (2011) — the same paper
+behind the v3.10.0 emotion taxonomy — finds retrospective self-report of emotion is unreliable
+because the affective system is focused on the present, not the past. An entry written while a
+trade was live is different data from the same words typed at close; nothing downstream can tell
+them apart unless the write time is recorded. `created_at`/`updated_at` are set at the database
+level (`DEFAULT CURRENT_TIMESTAMP` / `ON UPDATE CURRENT_TIMESTAMP`), and `TradeController::
+saveJournal()`'s `INSERT ... ON DUPLICATE KEY UPDATE` deliberately excludes `created_at` from the
+`UPDATE` clause so an edit can never touch it — this needed no application-level enforcement, just
+not naming that column in the update list.
+
+**Codes, never labels — extended to this table.** `trade_journal.emotion_code` stores an
+`emotion_states.php` code; `trade_journal.exit_type` and `trade_journal_actions.action_code`
+store codes from the new `includes/journal_taxonomy.php` (`journalActions()`/
+`journalExitTypes()`). Same rule as the emotion taxonomy: labels can be reworded freely, codes
+must never change once shipped. `journal_taxonomy.php` deliberately does *not* duplicate the
+emotion states — those stay in `emotion_states.php` and are shared across all three phases,
+because they're human states, not journal-specific or strategy-specific data.
+
+**Strategy linkage — deliberately not duplicated.** Journal rows reference only `trade_id`;
+`trades.strategy_id` is the single source of truth for which strategy a trade (and by extension
+its journal entries) belongs to. Duplicating `strategy_id` onto `trade_journal` was considered and
+rejected — the trade's own `strategy_id` can change after the fact (currently unrestricted), and a
+duplicated copy would either drift from it or require every edit path to keep both in sync for no
+benefit; the journal simply follows whatever the trade currently points to.
+
+**The strategy selector moved to the top of the trade form** (`modals/trade-modal.php`, right
+after Pair) because it determines which gate/tag variables `renderStrategyVarFields()` renders
+just below it — that rendering logic itself is unchanged from v3.9.4/v3.10.0, only its position
+in the form moved. **Known, deliberately out-of-scope gap:** the separate pre-trade checklist
+popup (`openChecklist()` in `js/trades.js`, shown *before* the trade modal opens, gate variables
+only) still derives its gate list from `challenges.default_strategy_id`, not from any per-trade
+selection — there is no strategy choice available yet at the point that popup renders. For a user
+running more than one strategy, that popup will show the wrong strategy's gates whenever the
+active challenge's default doesn't match the strategy they're about to log. Fixing this needs the
+checklist popup to gain its own strategy selector (or to move after the trade form's strategy
+choice, or reference something other than the challenge default) — not attempted here, since this
+release's scope was the journal itself and the trade-form's own variable rendering already
+correctly follows per-trade strategy selection.
+
+**Historical data — not touched.** `trades.note_saw`/`note_why`/`note_unsure` and `emotion_tag`
+are no longer written by the form but the columns are kept; their content is never migrated into
+`trade_journal` — they answered different questions than the current three, and moving them would
+misattribute old answers to new questions that didn't exist when they were written. `js/trades.js:
+viewTrade()` renders them under their original question wording (`"What did I see?"`, `"Why enter
+now?"`, `"What am I unsure about?"`) in a "Legacy Pre-Trade Notes" block whenever any of the three
+are present, alongside a "Trade Journal" block for `trade_journal` rows when they exist — a trade
+has one or the other, not both, depending on when it was logged.
+
+**Audit query for the old field set, not run in this environment** (no live DB credentials here,
+by design): existing usage of `note_saw`/`note_why`/`note_unsure`/`emotion_tag` can be checked
+with
+```sql
+SELECT COUNT(*) AS total,
+       SUM(note_saw IS NOT NULL AND note_saw<>'') AS has_note_saw,
+       SUM(note_why IS NOT NULL AND note_why<>'') AS has_note_why,
+       SUM(note_unsure IS NOT NULL AND note_unsure<>'') AS has_note_unsure,
+       SUM(emotion_tag IS NOT NULL AND emotion_tag<>'') AS has_emotion_tag
+FROM trades;
+```
+
+**Not attempted in v3.11.0:** `ReviewEngineController` does not yet read `trade_journal` for
+anything — this release is capture only. The natural next step is behavioral-review rules over
+journal content (e.g. correlating `good_process` against outcome, or in-trade `actions` against
+win rate), symmetrical with how `ruleEmotionOutcome()`/`ruleVariableAttribution()` already work
+over `emotion_tag`/`trade_variables`, but that's new rule-writing, not part of this release.
 
 ---
 
@@ -1528,7 +1653,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.10.0
+Current Version: v3.11.0
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

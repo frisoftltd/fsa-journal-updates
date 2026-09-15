@@ -1,20 +1,24 @@
 {
-    "current_version": "3.10.0",
-    "release_date": "2026-09-14",
+    "current_version": "3.11.0",
+    "release_date": "2026-09-15",
     "changelog": [
-        "Replace: the 8-state emotion tap grid (never grounded in anything) is replaced by a 9-state taxonomy drawn from Mark Douglas's Trading in the Zone and Fenton-O'Creevy et al. (2011) — settled, impatient, hesitant, chasing, hoping, wanting_out, greedy, invincible, vengeful. Phase-neutral labels (not entry-framed like the old set) so the next release can reuse this grid during a position and at close, not just at entry",
-        "Add: tapping a pill's new 'ⓘ' button reveals its full description without selecting it — reading what a state means no longer requires committing to it. Selection is clearable (tap an already-selected pill again, or use the new explicit Clear link) — an unanswered emotion stores null, never a default",
-        "Add: includes/emotion_states.php is the single source of truth for these nine codes/labels/descriptions/order — the trade form and ReviewEngineController both read from it, nothing else hardcodes the list",
-        "Fix: ReviewEngineController's ruleNegativeStateFrequency() had a hardcoded old-set-only reactive-state list; now includes both the retired codes and their v3.10.0 equivalents so it keeps working on a mix of old and new trades. ruleEmotionOutcome()'s insight text now shows a readable label instead of the raw stored code",
-        "Note: existing trades.emotion_tag values from the old 8-state set are NOT rewritten — the sets aren't 1:1 and collapsing them would invent precision never recorded. A legacy lookup renders old codes with a readable '(legacy)' label everywhere a trade's emotion is shown, and the edit form warns before a legacy value would be overwritten by a new selection. Audit query for the existing distribution is in CLAUDE.md — not run in this environment (no live DB credentials here by design)",
-        "Process: added a standing rule to CLAUDE.md — an agreed change must be implemented and committed/tagged/pushed/released in the same turn, not left sitting uncommitted"
+        "Replace: the trade form's old single pre-entry section (setup grade + one emotion + three justification-prompt textareas) is replaced by a three-phase trade journal — pre-entry, during-position (optional), and post-close — nine questions total, only three free text, grounded in Mark Douglas and Fenton-O'Creevy et al. (2011)",
+        "Add: trade_journal / trade_journal_actions tables (migration 2026_09_15_0001), one journal row per trade per phase, with its own created_at/updated_at — an edit never touches created_at, and retrospective self-report timing is exactly what this is for",
+        "Add: the during-position phase has no 'skipped' marker by design — an absent row means the trader never returned to the chart mid-trade, which is itself the signal, not a gap to flag",
+        "Add: includes/journal_taxonomy.php is the single source of truth for the during-phase multi-select actions and the post-close exit-type codes, same pattern as emotion_states.php — codes stored, never labels",
+        "Move: the strategy selector now sits near the top of the trade form (right after Pair), since it determines which gate/tag variables render below it",
+        "Fix: trades.note_saw/note_why/note_unsure and emotion_tag are no longer written by the form but the columns and their historical content are kept — nothing is migrated or rewritten. Historical trades still render the old notes under their original question wording, and the new Trade Journal block, wherever a trade's detail view is opened",
+        "Note: the separate pre-trade checklist popup (gate variables only, shown before the trade modal opens) still uses the challenge's single default strategy rather than a per-trade choice — a known, deliberately out-of-scope gap for this release, documented in CLAUDE.md",
+        "Note: ReviewEngineController does not yet read trade_journal — this release is capture only, analysis is a future release"
     ],
     "files": [
-        {"path": "includes/emotion_states.php", "critical": false},
+        {"path": "migrations/2026_09_15_0001_create_trade_journal.sql", "critical": false},
+        {"path": "includes/journal_taxonomy.php", "critical": false},
+        {"path": "includes/controllers/TradeController.php", "critical": false},
         {"path": "index.php", "critical": false},
         {"path": "modals/trade-modal.php", "critical": false},
         {"path": "js/trades.js", "critical": false},
-        {"path": "includes/controllers/ReviewEngineController.php", "critical": false}
+        {"path": "css/style.css", "critical": false}
     ],
     "db_migrations": []
 }

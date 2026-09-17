@@ -9,7 +9,9 @@
       <div class="form-group"><label>Prop Firm</label><input type="text" id="ch-prop_firm" placeholder="e.g. BitFunded, FTMO, MyForexFunds"></div>
       <div class="form-group"><label>Phase</label><select id="ch-challenge_phase"><option>Phase 1</option><option>Phase 2</option><option>Funded</option><option>Free Trial</option><option>Personal</option></select></div>
       <div class="form-group"><label>Starting Balance ($)</label><input type="number" step="0.01" id="ch-starting_balance" value="10000"></div>
-      <div class="form-group"><label>Current Balance ($)</label><input type="number" step="0.01" id="ch-current_balance" value="10000"></div>
+      <!-- Current Balance is no longer a form input (v3.13.0) — it's always derived from
+           starting_balance + realised net P&L, never hand-entered, so editing it here
+           could never have done anything but drift out of sync with the real number. -->
       <div class="form-group"><label>Max Drawdown (%)</label><input type="number" step="0.1" id="ch-max_drawdown_pct" value="10"></div>
       <div class="form-group"><label>Daily Loss Limit ($)</label><input type="number" step="0.01" id="ch-daily_loss_limit" value="500"></div>
       <div class="form-group"><label>Risk Per Trade (%)</label><input type="number" step="0.01" id="ch-risk_per_trade_pct" value="0.5"></div>

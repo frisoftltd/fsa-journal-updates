@@ -1,14 +1,26 @@
 {
-    "current_version": "3.12.3",
+    "current_version": "3.13.0",
     "release_date": "2026-09-17",
     "changelog": [
-        "Confirmed: v3.12.2's corrected 2026_09_17_0002 applied successfully on live. The challenge is now at 59 trades / 23W / 36L / sum(pnl) -120.08 for the Bitfunded Altcoin challenge, exactly the target end state",
-        "Fix: on that run, 0002's idempotent INSERT for CSV row n=1 (ZECUSDT Long) found the ZEC duplicate already present from the original 2026-09-17 run and correctly skipped re-inserting it, so no second duplicate was created — but that also meant only one ZECUSDT row existed in the window 2026_09_17_0003 checks, not the two its pre-flight guard required, so 0003 failed a precondition that was no longer true rather than finding real data trouble",
-        "Fix: 2026_09_17_0003 rewritten to detect which of two states is actually live rather than assuming the original incident's exact shape. One ZECUSDT row in the window: asserts it's really id 79 with Bitfunded's own figures and source='import' (confirmed true on live), then does nothing further. Two rows: repairs the keeper (identified by having trade_variables attached, not by a hardcoded id) and deletes the empty duplicate, as before. Zero or more than two: fails loudly rather than guessing. Same +/-5 minute tolerance audit and final state assertions as before either way",
-        "No data changes in this release — 2026_09_17_0002 already reached the correct end state on live; this release only makes 0003 a safe no-op against that state instead of a guard failure, so migrate.php stops blocking the queue for future migrations"
+        "Fix: challenges.starting_balance for the Bitfunded Altcoin challenge (id 6) was 9,274.00 — the account's equity on 2026-08-10 when the record was created, not the real 10,000.00 every Bitfunded account starts at. The v3.12.0 import extended the journal back to inception (2026-06-21), so the baseline had been wrong for five weeks of real trading history. Corrected to 10,000.00",
+        "Data: backfilled fees on 41 of 59 rows for challenge 6 from the account's transaction log (Bitfunded's Position History, the v3.12.0 import's source, doesn't publish per-position fees). Matched on (challenge_id, pair, direction, time_in), not trade id. Funding fees (net 6.6369) are not attributable to a single trade and are applied once as challenges.funding_adjustment instead of split across rows. Fees now exceed trading losses on this account ($144.75 total cost vs $120.07 trading loss) — win rate falls from 39.0% to 33.9% net of fees, and net_pnl (not pnl) is the correct basis for any performance figure",
+        "Fix: challenges.current_balance dropped — it was a stored column nothing ever recalculated, which is what let the starting_balance error above go unnoticed for five weeks (the dashboard balance card read $9,108.98 against a real $9,735.18, and drawdown showed 0.0% against a real ~2.6%). Balance is now always derived (starting_balance + realised net P&L - funding_adjustment) via the new helpers.php::enrichChallenge(), applied everywhere a challenge row reaches a controller response: getActiveChallenge(), ChallengeController::getAll(), and both challenge fetches in ReviewEngineController. dashboard.js's sidebar balance also had an independent double-counting bug (account_balance + net_pnl, adding realised P&L a second time on top of an already-correct balance) — fixed to just display the derived value",
+        "Schema: added challenges.funding_adjustment, profit_target_amt, max_loss_amt for prop firms (Bitfunded included) that state challenge criteria as currency amounts per stage rather than percentages. profit_target_pct / max_drawdown_pct are kept, not replaced, but enrichChallenge() now overrides them with an amount-derived percentage whenever an amount is on file, so AlertController and ReviewEngineController::ruleDrawdownProximity() read the correct figure without their own amount-vs-percent branch",
+        "Schema: challenges converted from MyISAM/latin1 to InnoDB/utf8mb4 — the only table left on the old engine, and the reason trades.challenge_id never had a foreign key. FK added in a separate, deliberately-last migration with its own orphan-check guard, so an orphaned challenge_id on a given environment is reported rather than forced past or allowed to block the schema/data fixes ahead of it",
+        "Scope: challenge 6 (Bitfunded Altcoin) only. Challenges 4 (TradeFi) and 5 (BTC) have the same starting_balance and missing-fees defects and are not fixed here — the derivation/amount-preference code is shared and applies to them too, but no migration in this release writes to their rows"
     ],
     "files": [
-        {"path": "migrations/2026_09_17_0003_fix_bitfunded_zec_duplicate.sql", "critical": false}
+        {"path": "migrations/2026_09_17_0004_challenges_innodb_utf8mb4_and_criteria_columns.sql", "critical": false},
+        {"path": "migrations/2026_09_17_0005_bitfunded_altcoin_fees_and_baseline.sql", "critical": false},
+        {"path": "migrations/2026_09_17_0006_add_trades_challenge_fk.sql", "critical": false},
+        {"path": "includes/helpers.php", "critical": false},
+        {"path": "includes/controllers/ChallengeController.php", "critical": false},
+        {"path": "includes/controllers/ProfileController.php", "critical": false},
+        {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
+        {"path": "includes/controllers/AlertController.php", "critical": false},
+        {"path": "js/challenges.js", "critical": false},
+        {"path": "js/dashboard.js", "critical": false},
+        {"path": "modals/challenge-modal.php", "critical": false}
     ],
     "db_migrations": []
 }

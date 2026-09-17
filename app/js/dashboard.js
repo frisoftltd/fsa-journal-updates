@@ -43,7 +43,12 @@ async function loadDashboard() {
     set('kpi-r',fmtR(s.avg_r),parseFloat(s.avg_r)>=0?'green':'red');
     set('kpi-pf',parseFloat(s.profit_factor).toFixed(2),'orange');
 
-    const bal = parseFloat(u.account_balance||10000)+parseFloat(s.net_pnl||0);
+    // u.account_balance is already the fully-derived current balance (starting_balance +
+    // realised net P&L - funding_adjustment, computed server-side in
+    // helpers.php::enrichChallenge()) — adding s.net_pnl again here used to double-count
+    // every closed trade's result on top of an already-correct number (part of the
+    // $626 dashboard error described in CLAUDE.md v3.13.0).
+    const bal = parseFloat(u.account_balance||10000);
     document.getElementById('sidebar-balance').textContent = '$'+bal.toFixed(2);
 
     const ddPct = Math.min(100, parseFloat(s.dd_pct||0));

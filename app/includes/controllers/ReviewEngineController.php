@@ -77,6 +77,7 @@ class ReviewEngineController {
             $cs->execute([$challengeId, $this->uid]);
             $challenge = $cs->fetch();
             if (!$challenge) jsonError('Challenge not found');
+            $challenge = enrichChallenge($this->db, $challenge);
         }
 
         $trades = $this->fetchTrades($challengeId, $periodStart, $periodEnd);
@@ -192,10 +193,10 @@ class ReviewEngineController {
     }
 
     private function userChallengeMap() {
-        $s = $this->db->prepare("SELECT id,name,daily_loss_limit,risk_per_trade_pct,starting_balance,current_balance,max_drawdown_pct FROM challenges WHERE user_id=?");
+        $s = $this->db->prepare("SELECT id,name,daily_loss_limit,risk_per_trade_pct,starting_balance,funding_adjustment,max_drawdown_pct,max_loss_amt,profit_target_amt FROM challenges WHERE user_id=?");
         $s->execute([$this->uid]);
         $map = [];
-        foreach ($s->fetchAll() as $c) $map[$c['id']] = $c;
+        foreach ($s->fetchAll() as $c) $map[$c['id']] = enrichChallenge($this->db, $c);
         return $map;
     }
 

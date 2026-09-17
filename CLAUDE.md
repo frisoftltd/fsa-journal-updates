@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.12.3 |
+| Current Version | v3.13.0 |
 
 ### Tech Stack
 
@@ -159,11 +159,40 @@ onboarding_completed
 **challenges** (added v2.3.0)
 ```sql
 id, user_id, name, prop_firm, challenge_phase,
-starting_balance, current_balance, max_drawdown_pct,
+starting_balance, max_drawdown_pct,
 daily_loss_limit, risk_per_trade_pct, profit_target_pct,
 status (active/completed/failed), is_active (0/1), created_at,
-default_strategy_id (added v3.5.0 — links to strategies.id)
+default_strategy_id (added v3.5.0 — links to strategies.id),
+funding_adjustment, profit_target_amt, max_loss_amt (added v3.13.0)
 ```
+> `current_balance` was **dropped** in v3.13.0 — it was a stored column nothing ever
+> recalculated, and it drifted silently for five weeks on the Bitfunded Altcoin challenge
+> (see the v3.13.0 section below). Balance is now always
+> derived: `starting_balance + SUM(net_pnl for closed trades) - funding_adjustment`,
+> computed by `helpers.php::enrichChallenge()` and returned under the same
+> `current_balance` key so existing API consumers (JS included) needed no contract
+> change. Never add a query that reads `challenges.current_balance` — the column doesn't
+> exist; call `enrichChallenge()`/`enrichChallenges()` on whatever you fetched instead.
+>
+> `funding_adjustment` (`DECIMAL(12,4) NOT NULL DEFAULT 0.0000`) holds costs that are real
+> but not attributable to a single trade (this account's net funding fees) — a
+> challenge-level line item, subtracted once in the derivation above, never per-row.
+>
+> `profit_target_amt` / `max_loss_amt` (`DECIMAL(12,2) NULL`) hold a prop firm's stated
+> criteria as currency amounts, for firms (Bitfunded included) that state them per stage
+> rather than as a percentage. `profit_target_pct` / `max_drawdown_pct` are **not**
+> removed and remain authoritative for challenges where only a percentage was ever given
+> — but wherever an amount is on file, `enrichChallenge()` overrides the pct field with
+> the amount expressed as a percentage of `starting_balance`, so every consumer of those
+> two columns (dashboard label, `AlertController`, `ReviewEngineController::
+> ruleDrawdownProximity()`) gets the amount-derived figure without needing its own
+> amount-vs-percent branch.
+>
+> `challenges` was MyISAM/latin1 until v3.13.0 — the only table on this schema left on the
+> old engine, and the reason `trades.challenge_id` had no foreign key (MyISAM can't be an
+> FK parent). Converted to InnoDB/utf8mb4 and the FK added in the same release; see the
+> v3.13.0 section below for what happens if that FK can't be added cleanly on a given
+> environment.
 
 **trades**
 ```sql
@@ -800,6 +829,83 @@ no-ops in the already-fixed branch (their `WHERE` clauses require `@already_fixe
 this file is now safe to leave in the migration queue indefinitely and safe to re-run on a
 fresh environment where the original bug could still reproduce (0002's dedup precision itself
 was not changed — only its post-verify guard was, in v3.12.2).
+
+### v3.13.0: Fees, a Five-Week-Stale Baseline, and a Stored Balance That Could Never Have Been Caught
+
+Three defects on the Bitfunded Altcoin challenge (id 6), all traceable to the same root
+cause: a number that should have been computed was instead typed in once and left alone.
+
+**1. `starting_balance` was 9,274.00, not the real 10,000.00 every Bitfunded account
+starts at.** That figure was the account's live equity on 2026-08-10, the day this
+challenge record was created — accurate for a journal that only held forward-looking
+data from that point on. The v3.12.0 import extended the journal back to inception
+(2026-06-21), so from that release forward the challenge was scoped against a baseline
+that undercounted five weeks of real trading by exactly the amount already lost before
+the record existed. Corrected to 10,000.00 by `2026_09_17_0005`.
+
+**2. Fees were 0 on 41 of the 59 rows.** Bitfunded's Position History (the source for the
+v3.12.0 import) doesn't publish per-position fees; the account's transaction log does, and
+every fee timestamp in it matches a position's open or close time to the second. Backfilled
+from `bitfunded-altcoin-fees.csv`, matched on `(challenge_id, pair, direction, time_in)` —
+not trade id, which by this point had been reassigned across three prior migrations and
+was not something a new one should trust blind (the same lesson `2026_09_17_0003` already
+had to learn once). Funding fees (a net 6.6369) are **not** split across trades — the
+transaction log labels them `USDT`, not by symbol, and several dates have multiple funding
+entries sharing one timestamp while positions overlap in time, so attributing them to a
+specific trade would mean guessing. Applied once as `challenges.funding_adjustment`
+instead.
+
+**Fees exceed trading losses on this account: $144.75 in total cost (138.12 in trade fees
++ 6.64 funding) against $120.07 of trading loss.** After fees, win rate falls from 39.0%
+to 33.9% and three winning trades become losers. Any performance figure computed from
+`pnl` instead of `net_pnl` — expectancy, profit factor, anything the review engine
+reports — overstates the edge on this account. `net_pnl`, not `pnl`, is the correct basis
+for all of those; this was already the convention everywhere in this codebase (`pnl` is
+never summed for a performance claim, `net_pnl` always is) but is worth stating plainly
+now that the gap between the two is this large.
+
+**3. `challenges.current_balance` was a stored column nothing ever recalculated — this is
+what let #1 persist unnoticed for five weeks.** It fed the dashboard balance card
+directly, so the card read $9,108.98 against a real $9,735.18 (a $626 error), and it fed
+the drawdown calculation, so the drawdown bar showed 0.0% against a real ~2.6%. The
+sidebar's own JS made this worse independently: `dashboard.js` computed
+`account_balance + net_pnl`, adding the challenge's total realised P&L a second time on
+top of a balance that (once correct) already includes it. **Dropped, not kept-and-rewritten**
+(`2026_09_17_0004`) — every consumer now derives balance on the fly via
+`helpers.php::enrichChallenge()` (see the `challenges` table note above), so there is no
+longer a column for anything to silently drift out of sync with, and the dashboard's
+double-count is fixed by simply not having a second number to add.
+**General lesson: prefer a value derived from trades over one stored on the challenge row
+for anything that can be computed from trades** — a stored figure only stays correct as
+long as every future code path that could change its inputs remembers to update it, and
+this one didn't, for five weeks, on the one number that measures distance to account
+failure.
+
+**Prop firm criteria as amounts, not just percentages:** Bitfunded states Stage 1/2/3
+targets as currency amounts that differ by stage ($800 profit target / $1,000 max loss for
+Stage 1; different figures for Stage 2; no profit target for a funded account) — not as
+percentages of starting balance that happen to be stable across stages. `profit_target_amt`
+/ `max_loss_amt` (`2026_09_17_0004`) hold those amounts; `profit_target_pct` /
+`max_drawdown_pct` are kept, not replaced, since plenty of other prop firms genuinely state
+their criteria as percentages — but wherever an amount is on file, `enrichChallenge()`
+treats it as the source of truth and overrides the pct field with the amount expressed as
+a percentage of `starting_balance`, rather than trusting a percentage that was never the
+firm's actual rule to begin with.
+
+**Engine/charset:** `challenges` had been MyISAM/latin1 since before this schema had a
+migration history — the only table on the old engine, and the reason `trades.challenge_id`
+never had a foreign key (a MyISAM table can't be an FK parent). Converted to InnoDB/utf8mb4
+in `2026_09_17_0004`; the FK itself is added by a separate, deliberately-last file
+(`2026_09_17_0006`) with its own orphan-check guard, so that if an orphaned
+`trades.challenge_id` value exists on a given environment, that fact is reported (the guard
+names exactly what to query to find it) rather than the constraint being forced past it or
+the schema/data fixes in the earlier files being blocked by it.
+
+Scope: this release only touches challenge 6. Challenges 4 (TradeFi) and 5 (BTC) have the
+same `starting_balance` and missing-fees defects and are not fixed here — the derivation
+and amount-preference logic that shipped in this release is shared code and applies to
+them too (as it should — it's a general bug fix, not something that should special-case
+challenge 6), but no migration in this release writes to their rows.
 
 ---
 

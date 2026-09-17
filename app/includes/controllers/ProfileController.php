@@ -79,12 +79,16 @@ class ProfileController {
 
         $ch = getActiveChallenge();
         if ($ch) {
-            $this->db->prepare("UPDATE challenges SET prop_firm=?, challenge_phase=?, starting_balance=?, current_balance=?, max_drawdown_pct=?, daily_loss_limit=?, risk_per_trade_pct=? WHERE id=? AND user_id=?")
+            // account_balance is no longer accepted here — current_balance was dropped in
+            // 2026_09_17_0004 and is now always derived from trades (see
+            // helpers.php::enrichChallenge()). A value submitted for it is silently
+            // ignored rather than written anywhere, the same way a legacy client
+            // submitting a field this API no longer has would be.
+            $this->db->prepare("UPDATE challenges SET prop_firm=?, challenge_phase=?, starting_balance=?, max_drawdown_pct=?, daily_loss_limit=?, risk_per_trade_pct=? WHERE id=? AND user_id=?")
                 ->execute([
                     $d['prop_firm'] ?? $ch['prop_firm'],
                     $d['challenge_phase'] ?? $ch['challenge_phase'],
                     num($d['starting_balance'] ?? $ch['starting_balance']),
-                    num($d['account_balance'] ?? $ch['current_balance']),
                     num($d['max_drawdown_pct'] ?? $ch['max_drawdown_pct']),
                     num($d['daily_loss_limit'] ?? $ch['daily_loss_limit']),
                     num($d['risk_per_trade_pct'] ?? $ch['risk_per_trade_pct']),

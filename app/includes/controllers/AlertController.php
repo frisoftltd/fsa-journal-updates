@@ -26,6 +26,10 @@ class AlertController {
         $stmt2->execute([$this->uid, $chId]);
         $tc = intval($stmt2->fetchColumn());
 
+        // $ch already comes from getActiveChallenge(), which derives current_balance and
+        // (when max_loss_amt is on file, as it now is for Bitfunded Altcoin) an
+        // amount-based max_drawdown_pct — see helpers.php::enrichChallenge(). Reading
+        // these two columns here needs no further amount-preference logic of its own.
         $starting_bal = floatval($ch['starting_balance'] ?? 10000);
         $daily_limit  = floatval($ch['daily_loss_limit'] ?? 500);
         $max_dd_pct   = floatval($ch['max_drawdown_pct'] ?? 10);

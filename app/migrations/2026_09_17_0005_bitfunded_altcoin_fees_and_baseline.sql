@@ -48,9 +48,13 @@ INSERT INTO _bf_fee_guard_pre (ok) VALUES (
     -- proceed blind. -120.08 confirmed against live, not the fees CSV's own -120.07
     -- (see the note above).
     AND ROUND((SELECT SUM(pnl) FROM trades WHERE challenge_id = 6), 2) = -120.08
-    -- trade 80 must still be in its known-stale, hand-typed state before the timestamp
-    -- fix below runs -- see the note above the fix itself.
-    AND (SELECT COUNT(*) FROM trades WHERE id = 80 AND challenge_id = 6 AND pair = 'BNBUSDT' AND direction = 'Long' AND time_in = '2026-09-14 06:08:00') = 1
+    -- Identity check only, not a state check: confirm trade 80 is still the row it's
+    -- supposed to be, without requiring it to still be at its pre-fix timestamp. A guard
+    -- that requires the un-fixed state can only ever pass once -- the timestamp UPDATE
+    -- below has no time_in condition in its own WHERE clause and is already idempotent
+    -- (safe to re-run whether trade 80 is still stale or already corrected), so this
+    -- guard shouldn't be stricter than the statement it's guarding.
+    AND (SELECT COUNT(*) FROM trades WHERE id = 80 AND challenge_id = 6 AND pair = 'BNBUSDT' AND direction = 'Long') = 1
 );
 DROP TEMPORARY TABLE _bf_fee_guard_pre;
 
@@ -434,11 +438,19 @@ UPDATE trades SET
 WHERE challenge_id = 6 AND pair = 'BNBUSDT' AND direction = 'Long' AND time_in = '2026-09-14 06:08:19';
 
 
--- Post-verify: matches the §6 verification list this file was written against, corrected
--- for the one-cent gap noted above. -258.1959 = -120.08 - 138.1159. The resulting derived
--- balance (10000 - 258.1959 - 6.6369 = 9735.1672) is one cent off Bitfunded's own reported
--- 9735.1772 -- documented in CLAUDE.md v3.13.2 as a residual, not forced to match by
--- adjusting funding_adjustment or any fee to paper over it.
+-- Post-verify: matches the §6 verification list this file was written against.
+-- SUM(net_pnl) is -258.1909, not the -258.1959 (-120.08 - 138.1159) an earlier version of
+-- this guard asserted. The gap is real precision, not an error: trade 80's pnl is stored
+-- at 4-decimal precision (-98.6850, from TradeController::saveTrade()'s round($pnl,4) on
+-- manual entry) rather than the 2-decimal -98.68 bitfunded-altcoin-fees.csv displays, so
+-- `net_pnl = pnl - 3.8669` above correctly evaluates to -102.5519, not -102.5469 -- a
+-- 0.0050 difference that was never visible in any 2-decimal source this migration was
+-- written against. This is the same class of gap as the -120.07/-120.08 one in
+-- v3.13.2 (a rounded reference figure vs. the fuller-precision stored value) and is
+-- resolved the same way: trust the stored columns, not the CSV's display precision. The
+-- resulting derived balance is 10000 - 258.1909 - 6.6369 = 9735.1722 -- 0.0050 off
+-- Bitfunded's own reported 9735.1772, documented in CLAUDE.md as a residual, not forced
+-- to match by adjusting funding_adjustment or any fee.
 CREATE TEMPORARY TABLE _bf_fee_guard_post (ok TINYINT NOT NULL CHECK (ok = 1));
 INSERT INTO _bf_fee_guard_post (ok) VALUES (
     (SELECT starting_balance FROM challenges WHERE id = 6) = 10000.00
@@ -448,7 +460,7 @@ INSERT INTO _bf_fee_guard_post (ok) VALUES (
     AND (SELECT daily_loss_limit FROM challenges WHERE id = 6) = 500.00
     AND (SELECT COUNT(*) FROM trades WHERE challenge_id = 6) = 59
     AND ROUND((SELECT SUM(fees) FROM trades WHERE challenge_id = 6), 4) = 138.1159
-    AND ROUND((SELECT SUM(net_pnl) FROM trades WHERE challenge_id = 6), 4) = -258.1959
+    AND ROUND((SELECT SUM(net_pnl) FROM trades WHERE challenge_id = 6), 4) = -258.1909
     -- pnl itself must be exactly unchanged by this file -- only fees/net_pnl move.
     AND ROUND((SELECT SUM(pnl) FROM trades WHERE challenge_id = 6), 2) = -120.08
     AND (SELECT COUNT(*) FROM trade_variables) = 135

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.13.3 |
+| Current Version | v3.13.4 |
 
 ### Tech Stack
 
@@ -1015,16 +1015,63 @@ Fixed in `2026_09_17_0005` by correcting trade 80's `time_in`/`time_out` to Bitf
 own values *before* the fee `UPDATE`s run, rather than special-casing that one `UPDATE`'s
 `WHERE` clause to also accept the stale timestamp — trade 80 should carry Bitfunded's own
 time regardless, and once corrected the existing match key finds it like every other row.
-A pre-flight guard condition was added asserting trade 80's known-stale state before the
-fix runs, matching the pattern already used for the rest of the file. The post-flight
-targets (`fees` 138.1159, `net_pnl` -258.1959, `pnl` -120.08, 59 trades, `trade_variables`
-135) are unchanged from v3.13.2 — this was always what they should have been; the gap was
-in whether the fee `UPDATE`s could find every row, not in what values they'd apply once
-they did.
+A pre-flight guard condition was added at the time asserting trade 80's known-stale state
+before the fix runs. **That guard condition was itself wrong — see v3.13.4 below, which
+also corrects the `net_pnl` figure this section originally reported (`-258.1959`, superseded
+by `-258.1909`).**
 
 **Trade 80 is now the last row in this challenge with no remaining hand-typed timestamp
 discrepancy against Bitfunded's own record.** Nothing else in challenge 6 is known to carry
 one as of this release.
+
+### v3.13.4: A Guard That Can Only Pass Once, and a Half-Cent of Real Precision
+
+Two independent problems, found together because v3.13.3's data work actually succeeded on
+live (trade 80 corrected to `06:08:19`, fee `3.8669`, `SUM(fees)` exactly `138.1159`) but
+the file still reported `failed`.
+
+**1. The pre-flight guard blocked its own successful result.** `2026_09_17_0005`'s
+pre-flight guard asserted trade 80 was still at its pre-fix timestamp
+(`time_in = '2026-09-14 06:08:00'`) before allowing the fix to run. That's backwards for a
+guard meant to protect a *retryable* file: the first run legitimately found trade 80 stale,
+passed, and fixed it — then failed later at the post-flight check (problem 2, below) and got
+marked `failed` as a whole file. On retry, `migrate.php` reruns the entire file from the
+top, including the pre-flight guard — which now finds trade 80 *already* fixed and rejects
+that as if it were drift, even though the timestamp-correction `UPDATE` two statements later
+has no `time_in` condition in its own `WHERE` clause and would have re-applied harmlessly
+either way. **This is the fourth time in this release chain a guard encoded "hasn't been
+fixed yet" instead of "is in a state I can safely proceed from,"** and the fourth time it
+blocked a legitimate retry (see v3.12.1/v3.12.2, v3.12.3, v3.13.1 for the first three, each
+a variation on the same mistake). Fixed by narrowing the guard to an identity check — trade
+80 is still `BNBUSDT`/`Long` under challenge 6 — dropping the timestamp condition entirely,
+since nothing downstream needs it to hold.
+
+**General rule, worth stating plainly since it's recurred four times: a pre-flight guard in
+a retryable migration must accept every state the file itself can legitimately leave
+things in, not just the state before it has ever run.** If a guard can only pass once, it
+will eventually block a real retry — write it to check identity/integrity preconditions
+that remain true regardless of whether the fix already happened, not "this hasn't been
+touched yet."
+
+**2. `SUM(net_pnl)` is `-258.1909`, not the `-258.1959` (`-120.08 - 138.1159`) the post-flight
+guard asserted.** Real precision, not an error: `TradeController::saveTrade()` stores `pnl`
+at 4-decimal precision (`round($pnl, 4)`) for a manually-entered trade, and trade 80's is
+`-98.6850` — not the `-98.68` `bitfunded-altcoin-fees.csv` displays at 2 decimals.
+`net_pnl = pnl - 3.8669` (2026_09_17_0005's own formula, unchanged since v3.13.2 — see that
+section for why it references the column rather than a literal) correctly evaluates to
+`-102.5519` from the real stored value, not `-102.5469` from the CSV's rounded one. Same
+class of gap as the `-120.07`/`-120.08` difference in v3.13.2 — a display-rounded reference
+figure disagreeing with the fuller-precision value actually in the database — resolved the
+same way: **trust the stored column, correct the guard, not the data.** Derived balance is
+therefore `10000 - 258.1909 - 6.6369 = 9735.1722` — 0.0050 off Bitfunded's own reported
+`9735.1772` (a smaller residual than v3.13.2's `9735.1672` estimate, not a coincidence:
+using trade 80's real precision moved the derived figure closer to Bitfunded's, which
+presumably also computes from full-precision values internally). Documented as a residual,
+not forced to match.
+
+No other statements in `2026_09_17_0005` changed. `2026_09_17_0006`'s own guard (checking
+for orphaned `trades.challenge_id`, not for "hasn't run yet") was already correctly
+written and needed no change — it was only ever blocked by `0005` sorting first.
 
 ---
 

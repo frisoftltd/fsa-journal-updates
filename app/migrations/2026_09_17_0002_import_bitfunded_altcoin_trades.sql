@@ -1159,17 +1159,30 @@ WHERE NOT EXISTS (
 -- above already ran (no wrapping transaction once DDL — the guard tables above — is
 -- present in this file) -- treat a failure here as "stop and inspect the data by
 -- hand", not as "nothing happened", same convention as migration 2026_09_13_0003.
+--
+-- EDITED after the first live run (still status='failed' in schema_migrations at the
+-- time of this edit, so not checksum-locked — see CLAUDE.md §3A, "a previously failed
+-- migration is retryable, content may have been fixed"). The original version of this
+-- guard checked an exact COUNT(*)=58 / SUM(pnl) / win-loss split over every row for
+-- this user+challenge, which broke the instant a legitimate trade was logged after
+-- this file was written (trade 80, BNBUSDT 2026-09-14 — not a Bitfunded CSV row, no
+-- fault of this migration) pushed the honest total to 59/60. This guard's job is "did
+-- the 58 Bitfunded positions land correctly", not "is the challenge's total row count
+-- frozen at what it was on the day this was written" — so every check below is scoped
+-- to source='import' (set only by the UPDATE/INSERT statements above, in this file),
+-- which is exactly the 58-row set this migration is actually responsible for and is
+-- unaffected by any other legitimate row sharing the same user/challenge. The
+-- duplicate-freedom check that used to live here was removed for the same reason: at
+-- least one legitimate near-duplicate (trade 79 vs CSV row n=1, see
+-- 2026_09_17_0003_fix_bitfunded_zec_duplicate.sql) can exist between this file
+-- finishing and that one running, and it is not this file's job to resolve it — 0003's
+-- own guard is where the whole-challenge, post-fix duplicate-free state is verified.
 CREATE TEMPORARY TABLE _bf_guard_post (ok TINYINT NOT NULL CHECK (ok = 1));
 INSERT INTO _bf_guard_post (ok) VALUES (
-    (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id) = 58
-    AND (SELECT COUNT(*) FROM (
-            SELECT pair, direction, time_in FROM trades
-            WHERE user_id = @user_id AND challenge_id = @challenge_id
-            GROUP BY pair, direction, time_in HAVING COUNT(*) > 1
-         ) dupes) = 0
-    AND ROUND((SELECT SUM(pnl) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id), 2) = -21.39
-    AND (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id AND result = 'Win') = 23
-    AND (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id AND result = 'Loss') = 35
+    (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id AND source = 'import') = 58
+    AND ROUND((SELECT SUM(pnl) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id AND source = 'import'), 2) = -21.39
+    AND (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id AND source = 'import' AND result = 'Win') = 23
+    AND (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id AND source = 'import' AND result = 'Loss') = 35
     AND (SELECT result FROM trades WHERE id = 77) = 'Win'
     AND (SELECT trade_date FROM trades WHERE id = 59) = '2026-08-13'
 );

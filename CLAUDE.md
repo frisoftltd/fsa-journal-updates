@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.12.1 |
+| Current Version | v3.12.2 |
 
 ### Tech Stack
 
@@ -714,16 +714,21 @@ had two more rows than the 2026-09-16 snapshot the §2 id mapping was built from
   hand-typed timestamp and Bitfunded's own was enough to defeat it, so 0002 inserted a
   *second* row for the same position instead of recognizing trade 79 as the existing one.
 
-Fixed by `2026_09_17_0003_fix_bitfunded_zec_duplicate.sql`: updates trade 79 to Bitfunded's
-own price/time/pnl for CSV row n=1 (same treatment the original 17 matched rows got),
-deletes the row 0002 inserted (confirmed empty of `trade_variables` before deletion — trade
-79's 9 rows are the ones that matter and were never touched), and re-scans the whole
-challenge with a 5-minute tolerance window instead of an exact timestamp to confirm no
-second undiscovered near-duplicate exists. `2026_09_17_0002` itself was not edited (checksum-
-locked, per §3A) — instead `0003` records it directly in `schema_migrations` as `applied`
-(mirroring `migrate.php`'s own `recordMigration()` upsert), since its data changes were
-correct and retrying it would fail the same `COUNT(*)=58` check forever now that the
-challenge legitimately holds 59 rows.
+`2026_09_17_0003_fix_bitfunded_zec_duplicate.sql` was written to fix this: update trade 79 to
+Bitfunded's own price/time/pnl for CSV row n=1 (same treatment the original 17 matched rows
+got), delete the row 0002 inserted (confirmed empty of `trade_variables` before deletion —
+trade 79's 9 rows are the ones that matter and were never touched), and re-scan the whole
+challenge with a 5-minute tolerance window instead of an exact timestamp to confirm no second
+undiscovered near-duplicate exists.
+
+**The v3.12.1 release as shipped did not actually apply this fix — see v3.12.2 below.** It
+left `2026_09_17_0002` itself unedited on the (wrong) assumption that an already-`failed`
+migration is checksum-locked the same way an `applied` one is, and instead tried to mark 0002
+`applied` in `schema_migrations` directly from inside `0003`. That doesn't work:
+`migrate.php` stops at the first failure in filename order, `0002` sorts before `0003`, and
+`0002`'s own guard (`COUNT(*)=58` over the whole challenge) can never pass again now that
+trade 80 legitimately exists — so `0003` was never reached, on live or in principle. See
+v3.12.2 for the corrected fix and why editing `0002` was safe to do.
 
 **Checklist addition for any future bulk-import migration that dedupes against existing
 rows:** match on `(pair, direction)` plus a tolerance window on `time_in` (this codebase now
@@ -731,6 +736,41 @@ uses ±5 minutes), never an exact timestamp equality. A broker's own execution t
 whatever a trader hand-typed for the same fill routinely differ by single-digit seconds to a
 few minutes — exact equality will silently let a real duplicate through rather than catching
 it, and the failure mode is a phantom extra trade with no error, not a loud one.
+
+### v3.12.2: The Retry-Blocking Bug, Fixed Correctly — Failed Migrations Aren't Checksum-Locked
+
+v3.12.1 tried to route around 0002's now-permanently-failing guard by writing a manual
+`schema_migrations` row from inside `0003`. That was the wrong move twice over, not just
+once: it couldn't work mechanically (0003 is never reached — see v3.12.1 above), and even if
+filename order hadn't blocked it, a hardcoded checksum written from a different file would
+have gone stale the moment 0002's content changed for any reason, silently corrupting the
+tracking row and permanently blocking every migration after it behind a false checksum
+mismatch (`migrate.php` treats any `applied`/`baselined` row whose checksum no longer matches
+the file on disk as `blocked` and runs nothing further, for any file, until it's resolved).
+
+The actual fix: **`migrate.php`'s checksum lock only applies to `applied`/`baselined` rows.**
+A `status='failed'` row is *designed* to be retried after a fix — `migrate.php` sends it
+straight back to `$pending` with no checksum check at all (see the `if ($row['status'] ===
+'failed')` branch in `migrate.php`). `2026_09_17_0002` was still `failed` on live, so editing
+it directly was not a violation of the checksum-lock convention — it was the convention
+working as designed. Corrected in place: its post-verify guard now scopes every check to
+`source = 'import'` (the exact 58 rows this migration is responsible for) instead of the
+whole challenge's row count, so a legitimate trade logged after the fact can never trip it
+again. The 41 inserts and 17 updates were already correct and are untouched. `0003` no longer
+writes to `schema_migrations` at all — once 0002's corrected guard lets it pass on the next
+`mode=run`, `migrate.php`'s own `recordMigration()` marks it `applied` with the real checksum
+of the edited file, in normal filename order, no renaming or manual tracking-table surgery
+needed.
+
+**Distinguishing the two "don't edit a migration" rules in this codebase, since this release
+came from conflating them:** (1) a `failed` migration is retryable/editable by design — fixing
+it and letting the runner retry is the intended recovery path, used already by `0002` here and
+described generally in §3A. (2) an `applied`/`baselined` migration is checksum-locked — *that*
+rule is what `2026_09_13_0004`'s history (§3A "Operational Lessons") and this file's own
+`2026_09_17_0002` fix both had to respect. Confusing which state a given migration is actually
+in — checking `schema_migrations.status` rather than assuming from a filename or how recently
+a release shipped — is the mistake to avoid; v3.12.1 assumed (2) applied to a migration that
+was actually in state (1).
 
 ---
 

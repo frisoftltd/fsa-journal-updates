@@ -6,7 +6,8 @@
 --     snapshot §2's mapping was built from. It isn't part of the 58-position Bitfunded
 --     CSV (which ends 2026-09-13) and needs no action — it just pushes the challenge's
 --     total row count from 58 to 59 and its loss count from 35 to 36, which is exactly
---     why 0002's guard (hardcoded at COUNT(*)=58) tripped even though nothing was wrong.
+--     why 0002's original guard (hardcoded at COUNT(*)=58 over every row for the
+--     challenge) tripped even though nothing was wrong.
 --   - Trade 79 (ZECUSDT Long, entered manually as 2026-09-13 06:05:00, pnl already -95.79)
 --     is the SAME closed position as CSV row n=1 (Bitfunded's own time_in: 2026-09-13
 --     06:05:09) — also logged after the snapshot, so it was never in the §2 id mapping
@@ -15,10 +16,23 @@
 --     timestamp and Bitfunded's own defeated that check, so 0002 inserted a *second* row
 --     for this same position instead of recognizing trade 79 as already covering it.
 --
--- Net effect before this file: 60 rows for the challenge (59 real positions + 1
--- duplicate), trade 79 still carrying its original hand-typed time_in/prices, and
--- 2026_09_17_0002 marked 'failed' in schema_migrations even though its data changes were
--- correct and must not be re-attempted (see the recovery note near the bottom).
+-- First attempt at a fix (shipped as v3.12.1) tried to mark 0002 'applied' directly from
+-- inside this file. That does not work: migrate.php stops at the first failure in
+-- filename order, 0002 sorts before this file, and 0002's own guard would keep failing
+-- every run (it checked an exact whole-challenge COUNT(*)=58, which can never be true
+-- again now that trade 80 legitimately exists) — so this file was never reached.
+-- Corrected approach, shipped together in this release: 0002 itself was edited (it was
+-- still status='failed' on live at the time, not checksum-locked — see CLAUDE.md §3A, "a
+-- previously failed migration is retryable, content may have been fixed") so its guard is
+-- scoped to source='import' instead of every row for the challenge. That makes 0002 pass
+-- on its own merits, in its own file, in normal filename order, no renaming or manual
+-- schema_migrations surgery required. This file no longer needs to (and must not) touch
+-- schema_migrations itself — once 0002 legitimately passes, migrate.php's own
+-- recordMigration() records it 'applied' with the correct checksum of the edited file;
+-- writing a second, independent INSERT here with a hardcoded checksum would only be
+-- correct for one exact byte-for-byte version of 0002 and would corrupt the tracking row
+-- (and permanently block every later migration behind a false checksum mismatch) the
+-- moment that assumption drifted.
 --
 -- This file: updates trade 79 to Bitfunded's own figures for CSV row n=1 (same treatment
 -- as the original 17 matched rows got in 0002) and deletes the extra row 0002 inserted,
@@ -102,29 +116,9 @@ INSERT INTO _bf_dup_audit (ok) VALUES (
 );
 DROP TEMPORARY TABLE _bf_dup_audit;
 
--- Recovery: mark 2026_09_17_0002 as applied instead of failed. Its data changes were
--- correct — only its own COUNT(*)=58 guard was stale, tripped by trade 80 (a legitimate
--- row it never claimed to account for) — so it must not be allowed to run a second time;
--- retrying it would re-run all 41 INSERTs (harmless, each is already idempotent) and all
--- 17 UPDATEs (harmless, idempotent by id) but its final guard would still fail forever now
--- that the challenge legitimately has 59 rows, not 58. Same INSERT ... ON DUPLICATE KEY
--- UPDATE shape migrate.php's own recordMigration() uses, so this is indistinguishable from
--- a normal successful run once applied. The checksum below is the sha256 of the exact file
--- already deployed and applied on 2026-09-17 — 2026_09_17_0002 itself is not edited by
--- this file or any other, per the checksum-lock convention in CLAUDE.md §3A.
-INSERT INTO schema_migrations (filename, checksum, execution_ms, status, error_message)
-VALUES (
-    '2026_09_17_0002_import_bitfunded_altcoin_trades.sql',
-    '7025c415e1a933b6032e5ba170ab8805947a5365f9e33171fcab6e0dc7b7ec21',
-    NULL, 'applied', NULL
-)
-ON DUPLICATE KEY UPDATE
-    checksum = VALUES(checksum),
-    applied_at = CURRENT_TIMESTAMP,
-    status = VALUES(status),
-    error_message = VALUES(error_message);
-
--- Post-verify: expected end state per the incident report.
+-- Post-verify: expected end state per the incident report. (No schema_migrations write
+-- here — see the header note. 0002 records its own 'applied' status the normal way, via
+-- migrate.php's recordMigration(), once its corrected guard lets it pass.)
 CREATE TEMPORARY TABLE _bf_dup_guard_post (ok TINYINT NOT NULL CHECK (ok = 1));
 INSERT INTO _bf_dup_guard_post (ok) VALUES (
     (SELECT COUNT(*) FROM trades WHERE user_id = @user_id AND challenge_id = @challenge_id) = 59
@@ -134,10 +128,5 @@ INSERT INTO _bf_dup_guard_post (ok) VALUES (
     AND (SELECT COUNT(*) FROM trade_variables WHERE trade_id = 79) = 9
     AND NOT EXISTS (SELECT 1 FROM trades WHERE id = @dup_id)
     AND (SELECT entry_price FROM trades WHERE id = 79) = 1135.75
-    AND (
-        SELECT status FROM schema_migrations
-        WHERE filename = '2026_09_17_0002_import_bitfunded_altcoin_trades.sql'
-        AND checksum = '7025c415e1a933b6032e5ba170ab8805947a5365f9e33171fcab6e0dc7b7ec21'
-    ) = 'applied'
 );
 DROP TEMPORARY TABLE _bf_dup_guard_post;

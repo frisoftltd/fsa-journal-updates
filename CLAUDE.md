@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.12.2 |
+| Current Version | v3.12.3 |
 
 ### Tech Stack
 
@@ -771,6 +771,35 @@ rule is what `2026_09_13_0004`'s history (§3A "Operational Lessons") and this f
 in — checking `schema_migrations.status` rather than assuming from a filename or how recently
 a release shipped — is the mistake to avoid; v3.12.1 assumed (2) applied to a migration that
 was actually in state (1).
+
+### v3.12.3: 0002 Landed Clean — 0003's Own Precondition Was the Last Thing Still Wrong
+
+The v3.12.2 fix worked: the corrected `2026_09_17_0002` applied successfully, and the
+Bitfunded Altcoin challenge reached its exact target state — 59 trades, 23W/36L,
+`sum(pnl) = -120.08`. On that run, 0002's idempotent `INSERT ... WHERE NOT EXISTS` for CSV
+row n=1 (ZECUSDT Long) found the duplicate row already sitting there from the very first
+2026-09-17 attempt and correctly skipped re-inserting it — no second duplicate was created.
+That's also exactly why `0003` then failed: its pre-flight guard hardcoded an expectation of
+**two** ZECUSDT rows in the 06:00:09–06:10:09 window (the shape of the original incident,
+observed once), and lived reality now had **one**. The guard did its job — it stopped rather
+than mutating anything against a precondition that no longer held — but the file had nothing
+left to do and needed to say so instead of failing.
+
+Note for the record: `0002`'s own 17-id `UPDATE` list (49, 51, 54, 57, 58, 59, 60, 62, 63, 65,
+66, 71, 72, 73, 74, 77, 78) has never included id 79, so the exact mechanism by which id 79
+ended up holding Bitfunded's own figures with `source='import'` on this run is not fully
+reconstructable from the migration files alone — it's recorded here as an observed fact
+reported directly off live, not a re-derivation. `0003` was rewritten accordingly to *detect*
+which of two states is actually live rather than assume the original incident's exact shape
+forever: one ZECUSDT row in the window and it already asserts as id 79 with Bitfunded's
+figures and `source='import'` → confirms that specific claim and does nothing further; two
+rows → repairs whichever one actually has the 9 `trade_variables` (attribute-based, not
+`id=79`-hardcoded, since that assumption already proved fragile once) and deletes the other;
+anything else → fails loudly rather than guessing. Both the `UPDATE` and `DELETE` become true
+no-ops in the already-fixed branch (their `WHERE` clauses require `@already_fixed = 0`), so
+this file is now safe to leave in the migration queue indefinitely and safe to re-run on a
+fresh environment where the original bug could still reproduce (0002's dedup precision itself
+was not changed — only its post-verify guard was, in v3.12.2).
 
 ---
 

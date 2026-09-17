@@ -121,6 +121,17 @@ DELETE FROM trades WHERE id = @dup_id AND @already_fixed = 0;
 -- let this one slip past 0002's exact-timestamp check. Zero expected either way (already
 -- fixed, or just fixed above); a nonzero result means at least one more undiscovered case
 -- and this file stops rather than papering over it.
+-- EDITED after a live run flagged a false positive (still status='failed' at the time,
+-- so — same as 2026_09_17_0002's own history — retryable/editable, not checksum-locked;
+-- see CLAUDE.md §3A). Trades 87/88 (BTCUSDT Long, entries at 2026-08-20 11:42:45 and
+-- 11:47:10, four and a half minutes apart) are two genuine, independent re-entries, both
+-- present in Bitfunded's own Position History — not a duplicate. Time proximity alone
+-- cannot tell a rapid re-entry from a duplicate; the v3.12.1 briefing that specified a
+-- plain +/-5 minute window on (pair, direction) was wrong about that, and is corrected
+-- here and in CLAUDE.md's migration checklist. A true duplicate (the ZEC case this file
+-- exists to fix) shares not just pair/direction/time proximity but the exact same
+-- entry_price and pnl — because it's the same execution recorded twice, not two
+-- different trades that happen to be close in time. Both conditions are now required.
 CREATE TEMPORARY TABLE _bf_dup_audit (ok TINYINT NOT NULL CHECK (ok = 1));
 INSERT INTO _bf_dup_audit (ok) VALUES (
     (
@@ -128,6 +139,7 @@ INSERT INTO _bf_dup_audit (ok) VALUES (
         JOIN trades b ON b.user_id = a.user_id AND b.challenge_id = a.challenge_id
             AND b.pair = a.pair AND b.direction = a.direction AND b.id <> a.id
             AND ABS(TIMESTAMPDIFF(SECOND, a.time_in, b.time_in)) <= 300
+            AND b.entry_price = a.entry_price AND b.pnl = a.pnl
         WHERE a.user_id = @user_id AND a.challenge_id = @challenge_id
     ) = 0
 );

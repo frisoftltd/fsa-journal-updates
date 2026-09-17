@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.13.0 |
+| Current Version | v3.13.1 |
 
 ### Tech Stack
 
@@ -747,8 +747,9 @@ had two more rows than the 2026-09-16 snapshot the §2 id mapping was built from
 Bitfunded's own price/time/pnl for CSV row n=1 (same treatment the original 17 matched rows
 got), delete the row 0002 inserted (confirmed empty of `trade_variables` before deletion —
 trade 79's 9 rows are the ones that matter and were never touched), and re-scan the whole
-challenge with a 5-minute tolerance window instead of an exact timestamp to confirm no second
-undiscovered near-duplicate exists.
+challenge for undiscovered near-duplicates. (The scan's own matching rule needed a second
+correction after this release shipped — see v3.13.1 below; time proximity alone isn't
+sufficient and the version below describes what actually ships.)
 
 **The v3.12.1 release as shipped did not actually apply this fix — see v3.12.2 below.** It
 left `2026_09_17_0002` itself unedited on the (wrong) assumption that an already-`failed`
@@ -760,11 +761,14 @@ trade 80 legitimately exists — so `0003` was never reached, on live or in prin
 v3.12.2 for the corrected fix and why editing `0002` was safe to do.
 
 **Checklist addition for any future bulk-import migration that dedupes against existing
-rows:** match on `(pair, direction)` plus a tolerance window on `time_in` (this codebase now
-uses ±5 minutes), never an exact timestamp equality. A broker's own execution timestamp and
-whatever a trader hand-typed for the same fill routinely differ by single-digit seconds to a
-few minutes — exact equality will silently let a real duplicate through rather than catching
-it, and the failure mode is a phantom extra trade with no error, not a loud one.
+rows:** never match on an exact `time_in` equality alone — a broker's own execution
+timestamp and whatever a trader hand-typed for the same fill routinely differ by
+single-digit seconds to a few minutes, and exact equality silently lets a real duplicate
+through rather than catching it (the failure mode is a phantom extra trade with no error,
+not a loud one). **A `(pair, direction)` + time-proximity window on its own is not
+sufficient either** — see v3.13.1 below for why plain time proximity produced its own
+false positive, and what a genuine duplicate actually needs to share to be told apart from
+a fast, legitimate re-entry.
 
 ### v3.12.2: The Retry-Blocking Bug, Fixed Correctly — Failed Migrations Aren't Checksum-Locked
 
@@ -906,6 +910,44 @@ same `starting_balance` and missing-fees defects and are not fixed here — the 
 and amount-preference logic that shipped in this release is shared code and applies to
 them too (as it should — it's a general bug fix, not something that should special-case
 challenge 6), but no migration in this release writes to their rows.
+
+### v3.13.1: Time Proximity Alone Can't Tell a Duplicate From a Fast Re-Entry
+
+`2026_09_17_0003`'s tolerance audit (added in v3.12.1, the fix that actually shipped in
+v3.12.2/v3.12.3) flagged a false positive on live: trades 87 and 88, both `BTCUSDT Long`,
+entered at `2026-08-20 11:42:45` and `11:47:10` — four and a half minutes apart, well
+inside the `±5 minute` window the audit was checking. Both are genuine, independent
+positions, both present in Bitfunded's own Position History (CSV rows n=16 and n=17 from
+the original 58-position import) — not a duplicate. The audit did exactly what it was
+written to do; **what it was written to check for was wrong.** Time proximity on its own
+cannot distinguish a duplicate (the same execution recorded twice) from a legitimate rapid
+re-entry (two different executions that happen to be close together) — and a trader
+re-entering within minutes of closing, or even opening a second position on the same pair
+in the same direction shortly after the first, is an entirely ordinary thing to do, not an
+edge case.
+
+**What actually distinguishes a duplicate:** a true duplicate — the ZEC case `0003` exists
+to fix — shares not just `(pair, direction)` and time proximity but the **exact same
+`entry_price` and `pnl`**, because it's one real execution that got written to two rows,
+not two different trades that happen to share a symbol and a nearby timestamp. The audit
+now requires all four: `pair`, `direction`, `time_in` within the window, **and**
+`entry_price` **and** `pnl` matching exactly. Trades 87/88 have different `entry_price`
+(71962.10 vs 71968.30) and different `pnl` (+0.74 vs -0.43) — the corrected audit does not
+flag them.
+
+`2026_09_17_0003` was still `status='failed'` on live at the time of this fix (this exact
+false positive is what failed it), so per the same rule v3.12.2 already established —
+editing a `failed` migration is the retry path the runner is built for, not a violation of
+the checksum-lock convention — the fix was made directly in the file rather than routed
+around it. Its state-detection design from v3.12.3 (one ZEC row already correct → no-op;
+two → repair) is unchanged; only the trailing audit's matching rule was wrong.
+
+**Checklist correction:** the v3.12.1 entry above ("match on `(pair, direction)` plus a
+tolerance window on `time_in`") is superseded — that rule alone produces false positives
+on any account that re-enters a pair quickly, which is normal trading, not an anomaly. A
+duplicate-detection check for a bulk-import migration needs `(pair, direction)` +
+time-window **and** `entry_price` **and** `pnl` matching before it's safe to treat two rows
+as the same execution.
 
 ---
 

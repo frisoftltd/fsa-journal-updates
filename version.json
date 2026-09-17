@@ -1,26 +1,14 @@
 {
-    "current_version": "3.13.0",
+    "current_version": "3.13.1",
     "release_date": "2026-09-17",
     "changelog": [
-        "Fix: challenges.starting_balance for the Bitfunded Altcoin challenge (id 6) was 9,274.00 — the account's equity on 2026-08-10 when the record was created, not the real 10,000.00 every Bitfunded account starts at. The v3.12.0 import extended the journal back to inception (2026-06-21), so the baseline had been wrong for five weeks of real trading history. Corrected to 10,000.00",
-        "Data: backfilled fees on 41 of 59 rows for challenge 6 from the account's transaction log (Bitfunded's Position History, the v3.12.0 import's source, doesn't publish per-position fees). Matched on (challenge_id, pair, direction, time_in), not trade id. Funding fees (net 6.6369) are not attributable to a single trade and are applied once as challenges.funding_adjustment instead of split across rows. Fees now exceed trading losses on this account ($144.75 total cost vs $120.07 trading loss) — win rate falls from 39.0% to 33.9% net of fees, and net_pnl (not pnl) is the correct basis for any performance figure",
-        "Fix: challenges.current_balance dropped — it was a stored column nothing ever recalculated, which is what let the starting_balance error above go unnoticed for five weeks (the dashboard balance card read $9,108.98 against a real $9,735.18, and drawdown showed 0.0% against a real ~2.6%). Balance is now always derived (starting_balance + realised net P&L - funding_adjustment) via the new helpers.php::enrichChallenge(), applied everywhere a challenge row reaches a controller response: getActiveChallenge(), ChallengeController::getAll(), and both challenge fetches in ReviewEngineController. dashboard.js's sidebar balance also had an independent double-counting bug (account_balance + net_pnl, adding realised P&L a second time on top of an already-correct balance) — fixed to just display the derived value",
-        "Schema: added challenges.funding_adjustment, profit_target_amt, max_loss_amt for prop firms (Bitfunded included) that state challenge criteria as currency amounts per stage rather than percentages. profit_target_pct / max_drawdown_pct are kept, not replaced, but enrichChallenge() now overrides them with an amount-derived percentage whenever an amount is on file, so AlertController and ReviewEngineController::ruleDrawdownProximity() read the correct figure without their own amount-vs-percent branch",
-        "Schema: challenges converted from MyISAM/latin1 to InnoDB/utf8mb4 — the only table left on the old engine, and the reason trades.challenge_id never had a foreign key. FK added in a separate, deliberately-last migration with its own orphan-check guard, so an orphaned challenge_id on a given environment is reported rather than forced past or allowed to block the schema/data fixes ahead of it",
-        "Scope: challenge 6 (Bitfunded Altcoin) only. Challenges 4 (TradeFi) and 5 (BTC) have the same starting_balance and missing-fees defects and are not fixed here — the derivation/amount-preference code is shared and applies to them too, but no migration in this release writes to their rows"
+        "Fix: 2026_09_17_0003's tolerance audit (added v3.12.1) false-positived on live, flagging trades 87/88 (BTCUSDT Long, entries at 2026-08-20 11:42:45 and 11:47:10, 4.5 minutes apart) as a possible duplicate. Both are genuine, independent positions present in Bitfunded's own Position History -- not a duplicate. Time proximity on (pair, direction) alone cannot distinguish a duplicate (one execution recorded twice) from a legitimate fast re-entry (two different executions close together) -- ordinary trading behavior, not an anomaly",
+        "Fix: the audit now also requires entry_price and pnl to match exactly before treating two rows as the same execution -- what an actual duplicate shares that a re-entry doesn't. Trades 87/88 have different entry_price (71962.10 vs 71968.30) and different pnl (+0.74 vs -0.43); the corrected audit does not flag them. 0003's state-detection design from v3.12.3 (one ZEC row already correct -> no-op; two -> repair) is unchanged -- only the trailing audit's matching rule was wrong",
+        "Edited 2026_09_17_0003 directly rather than routing around it -- it was still status='failed' on live (this exact false positive is what failed it), so per the rule v3.12.2 established, this is the retry path the runner is built for, not a checksum-lock violation",
+        "CLAUDE.md: corrected the v3.12.1 migration checklist entry, which documented the wrong heuristic (time proximity alone). A duplicate-detection check now needs (pair, direction) + a time window + entry_price + pnl all matching"
     ],
     "files": [
-        {"path": "migrations/2026_09_17_0004_challenges_innodb_utf8mb4_and_criteria_columns.sql", "critical": false},
-        {"path": "migrations/2026_09_17_0005_bitfunded_altcoin_fees_and_baseline.sql", "critical": false},
-        {"path": "migrations/2026_09_17_0006_add_trades_challenge_fk.sql", "critical": false},
-        {"path": "includes/helpers.php", "critical": false},
-        {"path": "includes/controllers/ChallengeController.php", "critical": false},
-        {"path": "includes/controllers/ProfileController.php", "critical": false},
-        {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
-        {"path": "includes/controllers/AlertController.php", "critical": false},
-        {"path": "js/challenges.js", "critical": false},
-        {"path": "js/dashboard.js", "critical": false},
-        {"path": "modals/challenge-modal.php", "critical": false}
+        {"path": "migrations/2026_09_17_0003_fix_bitfunded_zec_duplicate.sql", "critical": false}
     ],
     "db_migrations": []
 }

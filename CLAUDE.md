@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.13.2 |
+| Current Version | v3.13.3 |
 
 ### Tech Stack
 
@@ -990,6 +990,41 @@ not guaranteed to equal the same figure derived by summing the underlying rows d
 even when both derivations are individually "correct."** Prefer summing the rows — it's
 the one with no intermediate rounding step to introduce drift — and don't force two
 independently-rounded totals to reconcile to the cent; document the residual instead.
+
+### v3.13.3: A Fourth Hand-Typed Timestamp, Same Pattern as the ZEC Duplicate
+
+After v3.13.2, live's `SUM(fees)` for challenge 6 was **138.0490** against the expected
+**138.1159** — a **0.0669** gap. Cause: trade 80 (BNBUSDT, manually logged, the same
+post-snapshot trade discussed in v3.12.1) carried a hand-typed `time_in` of
+`2026-09-14 06:08:00`, while Bitfunded's own record is `06:08:19`. `2026_09_17_0005`'s fee
+`UPDATE` for this row matches on `(challenge_id, pair, direction, time_in)` — same as
+every other row, deliberately, per the v3.13.0 design — and a 19-second gap was enough to
+miss it. The `UPDATE` matched zero rows, silently, no error: trade 80's fee stayed at
+whatever had been hand-entered before (3.80) instead of Bitfunded's 3.8669. All other 58
+rows matched the CSV exactly.
+
+This is the fourth time an off-by-seconds hand-typed timestamp has caused a problem on this
+account (trade 59's `trade_date`/`time_in` mismatch and trade 77's stuck `Open` status in
+the original v3.12.0 import; the ZEC duplicate in v3.12.1–v3.13.1; now this). **Every one of
+them was a silent miss, not a loud error** — an `INSERT ... WHERE NOT EXISTS` that
+wrongly proceeds, or an `UPDATE ... WHERE` that matches zero rows, neither one raises
+anything migrate.php's runner can see. A guard has to be written to look for exactly this
+shape of problem; nothing catches it by accident.
+
+Fixed in `2026_09_17_0005` by correcting trade 80's `time_in`/`time_out` to Bitfunded's
+own values *before* the fee `UPDATE`s run, rather than special-casing that one `UPDATE`'s
+`WHERE` clause to also accept the stale timestamp — trade 80 should carry Bitfunded's own
+time regardless, and once corrected the existing match key finds it like every other row.
+A pre-flight guard condition was added asserting trade 80's known-stale state before the
+fix runs, matching the pattern already used for the rest of the file. The post-flight
+targets (`fees` 138.1159, `net_pnl` -258.1959, `pnl` -120.08, 59 trades, `trade_variables`
+135) are unchanged from v3.13.2 — this was always what they should have been; the gap was
+in whether the fee `UPDATE`s could find every row, not in what values they'd apply once
+they did.
+
+**Trade 80 is now the last row in this challenge with no remaining hand-typed timestamp
+discrepancy against Bitfunded's own record.** Nothing else in challenge 6 is known to carry
+one as of this release.
 
 ---
 

@@ -48,6 +48,9 @@ INSERT INTO _bf_fee_guard_pre (ok) VALUES (
     -- proceed blind. -120.08 confirmed against live, not the fees CSV's own -120.07
     -- (see the note above).
     AND ROUND((SELECT SUM(pnl) FROM trades WHERE challenge_id = 6), 2) = -120.08
+    -- trade 80 must still be in its known-stale, hand-typed state before the timestamp
+    -- fix below runs -- see the note above the fix itself.
+    AND (SELECT COUNT(*) FROM trades WHERE id = 80 AND challenge_id = 6 AND pair = 'BNBUSDT' AND direction = 'Long' AND time_in = '2026-09-14 06:08:00') = 1
 );
 DROP TEMPORARY TABLE _bf_fee_guard_pre;
 
@@ -59,6 +62,19 @@ UPDATE challenges SET
     max_loss_amt = 1000.00,
     daily_loss_limit = 500.00
 WHERE id = 6;
+
+-- Trade 80 (BNBUSDT, manual) carried a hand-typed time_in of 2026-09-14 06:08:00 against
+-- Bitfunded's own 06:08:19 -- the same off-by-seconds pattern that caused the ZEC
+-- duplicate in v3.12.x, this time silently missing the fee UPDATE's
+-- (pair, direction, time_in) match key below instead of creating a second row. Corrected
+-- to Bitfunded's exact time_in/time_out here, before the fee UPDATEs run, rather than
+-- special-casing the n=80 UPDATE's WHERE clause to also accept the stale timestamp --
+-- trade 80 should carry Bitfunded's own time either way, and this is the last row in the
+-- challenge still carrying a hand-typed one.
+UPDATE trades SET
+    time_in = '2026-09-14 06:08:19',
+    time_out = '2026-09-15 20:49:24'
+WHERE id = 80 AND challenge_id = 6 AND pair = 'BNBUSDT' AND direction = 'Long';
 
 -- Per-trade fees (59 rows, source: bitfunded-altcoin-fees.csv, verified against the
 -- account's transaction log before this file was written).

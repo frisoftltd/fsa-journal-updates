@@ -180,7 +180,7 @@ class ReviewEngineController {
     // ── DATA FETCH ───────────────────────────────────────────
 
     private function fetchTrades($challengeId, $start, $end) {
-        $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,net_pnl,r_multiple,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id";
+        $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,net_pnl,r_multiple,r_multiple_source,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id";
         if ($challengeId) {
             $s = $this->db->prepare("SELECT $cols FROM trades WHERE user_id=? AND challenge_id=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date ASC, time_in ASC, id ASC");
             $s->execute([$this->uid, $challengeId, $start, $end]);
@@ -224,7 +224,35 @@ class ReviewEngineController {
             'net_pnl' => round($pnlSum, 2),
             'avg_win_r' => $wins > 0 ? round($winRSum / $wins, 2) : 0,
             'avg_loss_r' => $losses > 0 ? round($lossRSum / $losses, 2) : 0,
+            'r_estimated_pct' => $this->rEstimatedPct($closed),
         ];
+    }
+
+    /**
+     * % of a closed-trade set whose r_multiple is reconstructed rather than recorded
+     * (see 2026_09_17_0002_import_bitfunded_altcoin_trades.sql — imported rows have no
+     * stop-loss price on file, so their R is a risk-unit estimate, not a fact). NULL
+     * r_multiple_source (every pre-v3.12.0 manually-logged trade) counts as recorded —
+     * this column only exists to flag reconstruction, not to cast doubt on the default.
+     */
+    private function rEstimatedPct($trades) {
+        $n = count($trades);
+        if ($n === 0) return 0;
+        $estimated = count(array_filter($trades, fn($t) => ($t['r_multiple_source'] ?? null) === 'estimated'));
+        return round($estimated / $n * 100, 1);
+    }
+
+    /**
+     * Appended to an insight's detail text when its R-based claim rests on a set that's
+     * majority reconstructed R — so an estimated figure is never read as confidently as a
+     * recorded one (CLAUDE.md v3.12.0: "no r_multiple_source='estimated' row presented
+     * anywhere as a confident figure"). Below 50% estimated, the recorded majority carries
+     * the claim and no caveat is added.
+     */
+    private function rCaveat($trades) {
+        $pct = $this->rEstimatedPct($trades);
+        if ($pct < 50) return '';
+        return " ({$pct}% of these R multiples are reconstructed from risk-unit estimates, not a recorded stop-loss — treat as directional, not exact.)";
     }
 
     private function groupStats($trades, callable $keyFn) {
@@ -710,7 +738,7 @@ class ReviewEngineController {
         if ($winRate >= 50 && $avgR < 0) {
             return [$this->insight('alert', 'consistency',
                 'You win often but your losers are too big.',
-                'Win rate ' . $winRate . '% but avg loss ' . round($avgLossR, 2) . 'R vs avg win ' . round($avgWinR, 2) . 'R — net expectancy is negative.',
+                'Win rate ' . $winRate . '% but avg loss ' . round($avgLossR, 2) . 'R vs avg win ' . round($avgWinR, 2) . 'R — net expectancy is negative.' . $this->rCaveat($closed),
                 'Cut losers faster or widen targets — your risk:reward is inverted relative to your win rate.',
                 $n, self::MIN_SANITY)];
         }
@@ -796,7 +824,7 @@ class ReviewEngineController {
         return [[
             'severity' => $severity, 'category' => 'consistency',
             'headline' => "Performance is $dir vs the previous period.",
-            'detail' => "This period: {$curWin}% win, " . round($curR, 2) . "R avg. Prior period: {$prevWin}% win, " . round($prevR, 2) . "R avg.",
+            'detail' => "This period: {$curWin}% win, " . round($curR, 2) . "R avg. Prior period: {$prevWin}% win, " . round($prevR, 2) . "R avg." . $this->rCaveat(array_merge($closed, $prevClosed)),
             'recommendation' => $dir === 'declining' ? 'Slow down and revisit what changed since the last period.' : 'Keep doing what\'s working.',
             'based_on_n' => min($curN, $prevN), 'conclusive' => true,
         ]];
@@ -875,7 +903,7 @@ class ReviewEngineController {
         return [[
             'severity' => 'good', 'category' => 'consistency',
             'headline' => "Your '{$t['name']}' style is winning.",
-            'detail' => "'{$t['name']}': expectancy " . ($t['expectancy_r'] >= 0 ? '+' : '') . "{$t['expectancy_r']}R over {$t['n']} trades. '{$b['name']}': " . ($b['expectancy_r'] >= 0 ? '+' : '') . "{$b['expectancy_r']}R over {$b['n']} trades.",
+            'detail' => "'{$t['name']}': expectancy " . ($t['expectancy_r'] >= 0 ? '+' : '') . "{$t['expectancy_r']}R over {$t['n']} trades. '{$b['name']}': " . ($b['expectancy_r'] >= 0 ? '+' : '') . "{$b['expectancy_r']}R over {$b['n']} trades." . $this->rCaveat(array_merge($byChallenge[$top], $byChallenge[$bottom])),
             'recommendation' => "Lean into whatever '{$t['name']}' is doing differently — sizing, setup selection, or pace.",
             'based_on_n' => $t['n'] + $b['n'], 'conclusive' => true,
         ]];

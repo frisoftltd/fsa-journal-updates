@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.11.1 |
+| Current Version | v3.12.0 |
 
 ### Tech Stack
 
@@ -172,8 +172,20 @@ pair, direction, entry_price, stop_loss, take_profit, exit_price,
 lot_size, risk_amount, fees, pnl, net_pnl, r_multiple,
 result, confidence, exec_score, fib_level, fsa_rules,
 notes, screenshot, screenshots (JSON, up to 4, added later — screenshot kept for back-compat),
-strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0)
+strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0),
+source, r_multiple_source (added v3.12.0)
 ```
+> `source` is `ENUM('manual','import') NOT NULL DEFAULT 'manual'` — distinguishes hand-logged
+> trades from ones backfilled from a broker's own trade history (see "The Journal Was a
+> Winner-Weighted Subset" below). The default means no code change was needed in
+> `TradeController::saveTrade()` for this to work; it never sets the column.
+>
+> `r_multiple_source` is `ENUM('recorded','estimated') NULL`. `'recorded'` means `r_multiple`
+> came from a real stop-loss distance (or, for imported full stop-out trades, a loss confirmed
+> to be a 1R stop-out). `'estimated'` means no stop-loss exists for that trade and `r_multiple`
+> was reconstructed from a risk-unit estimate instead — see the v3.12.0 section below for the
+> method. `NULL` (every pre-v3.12.0 manual trade) means provenance was never tracked, not that
+> the value is untrustworthy.
 > `session` is `ENUM('London','New York','Asia','Other') NULL` (nullable, no default, since v3.9.0 —
 > was `NOT NULL DEFAULT 'London'` before, which silently mislabeled every trade saved without an
 > explicit session as London). `NULL` means genuinely not recorded; do not treat it as London.
@@ -627,6 +639,62 @@ Two bugs found shortly after v3.11.0 shipped, both fixed the same day:
    (`getAll()` has no equivalent guard around it) but was not touched here — not what was reported,
    and that table has shipped and been stable since v3.5.1, unlike `trade_journal` which was still
    fresh enough to hit this exact failure mode in practice.
+
+### v3.12.0: The Journal Was a Winner-Weighted Subset of the Bitfunded Altcoin Challenge
+
+The Bitfunded Altcoin challenge (id 200140743, Starter Two Step, Stage 1, opened 2026-06-15)
+executed 58 closed positions between 2026-06-21 and 2026-09-13. The journal only had 17 of
+them — everything logged from the point the app existed. That 17-row sample was not
+representative: it was +$773.83 at 62.5% win rate, while Bitfunded's own Position History for
+the same challenge shows **−$195.32 across all 58 at 39.7%**. Every statistic, chart and review
+insight scoped to this challenge had been computed from the winner-weighted subset and was
+wrong as a result. `2026_09_17_0002_import_bitfunded_altcoin_trades.sql` reconciled the two:
+41 missing rows inserted, 17 existing rows overwritten with Bitfunded's own prices/times/pnl
+(the hand-typed originals differed by rounding, e.g. 511.15 vs 511.14). Two data defects
+surfaced and were fixed in the same pass: trade 59's `trade_date` was a stale 2026-08-17
+against a 2026-08-13 `time_in`, and trade 77 was still marked `Open` though Bitfunded closed it
+2026-09-05 for +$112.05.
+
+**Finding for future challenges:** a journal's trade count is not self-verifying — nothing in
+this app cross-checks it against the broker's own record, so a gap like this (partial logging
+from a fixed start date) sits invisibly until someone thinks to compare totals. **Reconcile any
+challenge's trade count against the broker's own history before trusting its statistics,**
+especially for challenges that were only partially logged in real time.
+
+**R-multiple, with no per-trade stop-loss on file:** neither the 41 new rows nor the 17
+existing ones have a recorded stop-loss price, so R can't be computed the normal way
+(`(exit-entry)/stop distance`, as `TradeController::saveTrade()` does for manually-logged
+trades). The account's configured risk ladder (0.25% under $9,500, 0.5% $9,500–$10,000, 1.0%
+above $10,000) was tried first and rejected — replaying it from a $10,000 starting balance
+shows the ladder was **not followed during the July/early-August drawdown**: risk stayed near
+1% while the ladder required 0.25% in that balance range, roughly a 4x gap. Deriving R from the
+ladder would have understated real losses by about that factor. Used instead: a loss with
+`35 <= |pnl| <= 115` is a full stop-out (`r_multiple = -1.00`, `r_multiple_source = 'recorded'`,
+matching the convention already on the pre-existing 17 rows); every other trade gets
+`risk_amount` = the median `|pnl|` of full stop-outs within a ±7-day window of its `time_in`,
+`r_multiple = pnl / risk_amount`, `r_multiple_source = 'estimated'`. 29 of 58 rows landed in
+each bucket. See the migration file's header and the v3.12.0 release notes for the full derived
+`risk_unit` series.
+
+**Finding for the review engine (not yet built):** the ladder violation above is a real
+behavioral signal — risk crept toward 1% exactly during the account's worst stretch, the
+opposite of what the configured ladder demanded — but nothing in `ReviewEngineController`
+currently checks a trade's `risk_amount` against the ladder tier implied by account balance at
+entry; `ruleRiskCreep()` only compares risk against risk (first half of a period vs second),
+never against the plan. A future rule should compare `risk_amount` to `risk_per_trade_pct` ×
+(balance at entry) and flag sustained divergence, not just an upward trend.
+
+**Schema (2026_09_17_0001):** added `trades.source` (`'manual'`/`'import'`, `NOT NULL DEFAULT
+'manual'`) and `trades.r_multiple_source` (`'recorded'`/`'estimated'`, `NULL`). `source`
+requires no backfill or code change for existing/future manual saves — the column default
+covers them, and `TradeController::saveTrade()` was deliberately left untouched (it never sets
+either column, so every trade added or edited through the UI keeps `source='manual'` and
+`r_multiple_source=NULL` for free). `ReviewEngineController` and `StatsController` were updated
+to track what share of a scoped set has `r_multiple_source='estimated'`, and the three review
+insights whose headline number is an R multiple (winrate/expectancy sanity, period trend,
+aggressive-vs-reserved) append a caveat to their `detail` text when the underlying set is
+majority estimated, so a reconstructed R is never presented with the confidence of a recorded
+one.
 
 ---
 

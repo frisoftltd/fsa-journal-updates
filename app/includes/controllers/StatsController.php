@@ -51,6 +51,11 @@ class StatsController {
         $stats['avg_win']       = $qv("SELECT COALESCE(AVG(net_pnl),0) FROM trades $where AND result='Win'", $p);
         $stats['avg_loss']      = $qv("SELECT COALESCE(AVG(net_pnl),0) FROM trades $where AND result='Loss'", $p);
         $stats['avg_r']         = $qv("SELECT COALESCE(AVG(r_multiple),0) FROM trades $where AND $closedFilter", $p);
+        // Imported rows (see 2026_09_17_0002) have no recorded stop-loss, so their
+        // r_multiple is a reconstructed risk-unit estimate, not a fact — surfaced here so
+        // avg_r can be captioned in the UI rather than presented with false precision.
+        // NULL r_multiple_source (every pre-v3.12.0 manual trade) is not estimated.
+        $stats['r_estimated_pct'] = $qv("SELECT COALESCE(AVG(CASE WHEN r_multiple_source='estimated' THEN 100.0 ELSE 0 END),0) FROM trades $where AND $closedFilter", $p);
 
         $wins_sum = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades $where AND result='Win'", $p);
         $loss_sum = abs($qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades $where AND result='Loss'", $p));

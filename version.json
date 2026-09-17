@@ -1,14 +1,18 @@
 {
-    "current_version": "3.11.1",
-    "release_date": "2026-09-15",
+    "current_version": "3.12.0",
+    "release_date": "2026-09-17",
     "changelog": [
-        "Fix: 2026_09_15_0001 (v3.11.0) created trade_journal and trade_journal_actions without the utf8mb4/utf8mb4_general_ci charset every other table in this schema uses — both fell back to the server default (latin1_swedish_ci on live), which would mangle or reject non-Latin1 characters. Migration 2026_09_15_0002 converts both tables; safe because both were still empty. Reproduced and verified the fix against a real database, including confirming both foreign keys survive the conversion",
-        "Fix: TradeController::getAll() had no defense against trade_journal being unavailable — a missing or broken table threw an uncaught exception that fataled the entire trade list, not just the journal portion. The journal queries are now wrapped defensively (tried once per request, not once per trade) and fall back to an empty trade_journal per trade instead of taking get_trades down",
-        "Process: added a migration-writing checklist item to CLAUDE.md — every CREATE TABLE must specify DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci explicitly, so this specific mistake doesn't recur"
+        "Data: the journal held only 17 of the Bitfunded Altcoin challenge's 58 real closed positions — everything logged from the point the app existed, a winner-weighted subset (+$773.83 at 62.5% win rate) of what Bitfunded's own Position History shows for the same challenge (-$195.32 across 58 at 39.7%). Migration 2026_09_17_0002 reconciles all 58: inserts the 41 missing rows and overwrites entry/exit price, time_in/time_out and pnl on the 17 existing rows with Bitfunded's own figures (the hand-typed originals differed by rounding). Also fixes two defects found during reconciliation: trade 59's trade_date was a stale 2026-08-17 against a 2026-08-13 time_in, and trade 77 was still marked Open though Bitfunded closed it 2026-09-05 for +$112.05",
+        "Schema: added trades.source ('manual'/'import', default 'manual') and trades.r_multiple_source ('recorded'/'estimated', NULL by default) — 2026_09_17_0001. Imported rows have no stop-loss price on file, so their R is reconstructed from observed full-size losses rather than a real stop distance; these columns let any statistic that presents R distinguish fact from estimate instead of quietly treating both the same",
+        "Data: R-multiple for the Bitfunded import is derived per-trade, not from the account's configured risk ladder — replaying the ladder against the observed position sizes shows it wasn't followed during the July/early-August drawdown (risk stayed near 1% while the ladder required 0.25%, a ~4x gap), so deriving from it would understate real losses by roughly that factor. Instead: a loss is treated as a full stop-out (r_multiple=-1.00, r_multiple_source='recorded') when 35<=|pnl|<=115, matching the convention already on the 17 pre-existing rows; every other trade gets r_multiple = pnl / (median |pnl| of nearby stop-outs, +/-7 days), r_multiple_source='estimated'. 29 of 58 rows land in each bucket — see the migration file and PR notes for the full risk_unit series",
+        "Fix: ReviewEngineController and StatsController now track what share of a scoped trade set has an estimated (not recorded) r_multiple, and the three review insights whose headline number is an R multiple (winrate/expectancy sanity check, period-trend comparison, aggressive-vs-reserved challenge comparison) append a caveat to their detail text when the underlying set is majority estimated — so a reconstructed R is never presented with the same confidence as a recorded one",
+        "Process: recorded two CLAUDE.md findings for future challenges — (1) a journal's trade count should be reconciled against the broker's own history before its statistics are trusted, since a partial subset can be silently winner-weighted; (2) the account's risk ladder was not followed during its drawdown, which the review engine should learn to detect by comparing risk_amount against the ladder tier implied by balance at entry"
     ],
     "files": [
-        {"path": "migrations/2026_09_15_0002_fix_trade_journal_charset.sql", "critical": false},
-        {"path": "includes/controllers/TradeController.php", "critical": false}
+        {"path": "migrations/2026_09_17_0001_add_trades_source_columns.sql", "critical": false},
+        {"path": "migrations/2026_09_17_0002_import_bitfunded_altcoin_trades.sql", "critical": false},
+        {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
+        {"path": "includes/controllers/StatsController.php", "critical": false}
     ],
     "db_migrations": []
 }

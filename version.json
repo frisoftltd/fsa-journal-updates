@@ -1,14 +1,14 @@
 {
-    "current_version": "3.13.1",
+    "current_version": "3.13.2",
     "release_date": "2026-09-17",
     "changelog": [
-        "Fix: 2026_09_17_0003's tolerance audit (added v3.12.1) false-positived on live, flagging trades 87/88 (BTCUSDT Long, entries at 2026-08-20 11:42:45 and 11:47:10, 4.5 minutes apart) as a possible duplicate. Both are genuine, independent positions present in Bitfunded's own Position History -- not a duplicate. Time proximity on (pair, direction) alone cannot distinguish a duplicate (one execution recorded twice) from a legitimate fast re-entry (two different executions close together) -- ordinary trading behavior, not an anomaly",
-        "Fix: the audit now also requires entry_price and pnl to match exactly before treating two rows as the same execution -- what an actual duplicate shares that a re-entry doesn't. Trades 87/88 have different entry_price (71962.10 vs 71968.30) and different pnl (+0.74 vs -0.43); the corrected audit does not flag them. 0003's state-detection design from v3.12.3 (one ZEC row already correct -> no-op; two -> repair) is unchanged -- only the trailing audit's matching rule was wrong",
-        "Edited 2026_09_17_0003 directly rather than routing around it -- it was still status='failed' on live (this exact false positive is what failed it), so per the rule v3.12.2 established, this is the retry path the runner is built for, not a checksum-lock violation",
-        "CLAUDE.md: corrected the v3.12.1 migration checklist entry, which documented the wrong heuristic (time proximity alone). A duplicate-detection check now needs (pair, direction) + a time window + entry_price + pnl all matching"
+        "Fix: 2026_09_17_0005's pre-flight guard asserted SUM(pnl) = -120.07 for challenge 6; live's actual SUM(pnl) is -120.08. Not a data error -- -120.07 came from deriving the figure as (account total -264.8228) minus (costs 144.7528), two values already rounded to 4 decimals, rather than from summing the 59 pnl rows directly. -120.08 is confirmed against live and is the value now asserted",
+        "Fix: the 59 fee UPDATEs now write net_pnl = pnl - <fee>, referencing each row's own stored pnl column instead of a literal copied from bitfunded-altcoin-fees.csv. That CSV's own pnl column sums to -120.07, a cent different from live's actual trades.pnl on at least one row -- referencing the column guarantees net_pnl is always correct relative to whatever pnl is actually stored, without needing to identify which row differs",
+        "Fix: derived-balance targets corrected accordingly -- net_pnl now sums to -258.1959 (not -258.1859), so the derived balance is 9735.1672 (not 9735.1772). Bitfunded reports 9735.1772; a one-cent residual between that and this account's derived balance is documented in CLAUDE.md rather than forced to match by adjusting funding_adjustment or any fee. Dashboard balance card should read $9,735.17, not $9,735.18",
+        "No other changes -- 0004 and 0006 are untouched. 0005 was still status='failed' on live (its own pre-flight guard is what failed it, before any UPDATE ran), so per the rule established in v3.12.2/v3.13.1, editing it directly is the retry path the runner is built for"
     ],
     "files": [
-        {"path": "migrations/2026_09_17_0003_fix_bitfunded_zec_duplicate.sql", "critical": false}
+        {"path": "migrations/2026_09_17_0005_bitfunded_altcoin_fees_and_baseline.sql", "critical": false}
     ],
     "db_migrations": []
 }

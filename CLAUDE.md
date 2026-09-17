@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.13.1 |
+| Current Version | v3.13.2 |
 
 ### Tech Stack
 
@@ -860,7 +860,9 @@ specific trade would mean guessing. Applied once as `challenges.funding_adjustme
 instead.
 
 **Fees exceed trading losses on this account: $144.75 in total cost (138.12 in trade fees
-+ 6.64 funding) against $120.07 of trading loss.** After fees, win rate falls from 39.0%
++ 6.64 funding) against $120.08 of trading loss** (corrected from an initially-reported
+$120.07 — see v3.13.2 below for the one-cent gap between two valid derivations of that
+figure). After fees, win rate falls from 39.0%
 to 33.9% and three winning trades become losers. Any performance figure computed from
 `pnl` instead of `net_pnl` — expectancy, profit factor, anything the review engine
 reports — overstates the edge on this account. `net_pnl`, not `pnl`, is the correct basis
@@ -870,7 +872,8 @@ now that the gap between the two is this large.
 
 **3. `challenges.current_balance` was a stored column nothing ever recalculated — this is
 what let #1 persist unnoticed for five weeks.** It fed the dashboard balance card
-directly, so the card read $9,108.98 against a real $9,735.18 (a $626 error), and it fed
+directly, so the card read $9,108.98 against a real $9,735.17 (a $626 error — see v3.13.2
+below for the exact cent) and it fed
 the drawdown calculation, so the drawdown bar showed 0.0% against a real ~2.6%. The
 sidebar's own JS made this worse independently: `dashboard.js` computed
 `account_balance + net_pnl`, adding the challenge's total realised P&L a second time on
@@ -948,6 +951,45 @@ on any account that re-enters a pair quickly, which is normal trading, not an an
 duplicate-detection check for a bulk-import migration needs `(pair, direction)` +
 time-window **and** `entry_price` **and** `pnl` matching before it's safe to treat two rows
 as the same execution.
+
+### v3.13.2: A One-Cent Gap Between Two Valid Derivations of the Same Figure
+
+`2026_09_17_0005`'s pre-flight guard asserted `ROUND(SUM(pnl),2) = -120.07` for challenge
+6. Live's actual `SUM(pnl)` is **-120.08** — the guard failed before any `UPDATE` ran (pure
+pre-flight, so nothing had mutated). Not a data error: `-120.07` came from *deriving* the
+figure as `(account total -264.8228) - (costs 144.7528)`, two numbers that were each
+already rounded to 4 decimal places in the source reconciliation, rather than from summing
+the 59 `pnl` rows directly. `-120.08` is what a direct sum of the real numbers gives —
+confirmed against live, not re-derived from the fees CSV — and is treated as the fact
+per the standing rule for this whole thread: where a briefing figure and live data
+disagree, live data wins.
+
+Two things followed from this, not just a guard-number edit:
+
+1. **The 59 fee `UPDATE`s now write `net_pnl = pnl - <fee>`, referencing each row's own
+   stored `pnl` column, not a literal pnl value copied from
+   `bitfunded-altcoin-fees.csv`.** That CSV's own `pnl` column sums to -120.07 — a whole
+   cent different from what's actually in `trades.pnl` on at least one of the 59 rows.
+   Hardcoding the CSV's literal would have made `net_pnl` wrong on whichever row that is;
+   referencing the column instead guarantees `net_pnl` is always *(whatever pnl is
+   actually stored)* minus its new fee, correct regardless of which side of that gap any
+   individual row falls on and without needing to identify which row it is.
+2. **The derived balance changes accordingly:** `net_pnl` sums to
+   `-120.08 - 138.1159 = -258.1959` (not `-258.1859`), so the derived balance is
+   `10000 - 258.1959 - 6.6369 = 9735.1672`, not `9735.1772`. **Bitfunded reports
+   9735.1772 — a one-cent residual remains between this account's derived balance and
+   Bitfunded's own reported figure.** This is not forced to match by adjusting
+   `funding_adjustment` or any individual fee; a penny of unexplained rounding somewhere
+   in Bitfunded's own reporting chain (likely the same kind of intermediate-rounding gap
+   that produced the `-120.07` vs `-120.08` difference above) is a smaller, more honest
+   error to carry forward than papering over it with an invented adjustment. The dashboard
+   balance card should read **$9,735.17**, not $9,735.18.
+
+General lesson: **a figure derived by subtracting two independently-rounded aggregates is
+not guaranteed to equal the same figure derived by summing the underlying rows directly,
+even when both derivations are individually "correct."** Prefer summing the rows — it's
+the one with no intermediate rounding step to introduce drift — and don't force two
+independently-rounded totals to reconcile to the cent; document the residual instead.
 
 ---
 

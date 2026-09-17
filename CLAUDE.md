@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.12.0 |
+| Current Version | v3.12.1 |
 
 ### Tech Stack
 
@@ -695,6 +695,42 @@ insights whose headline number is an R multiple (winrate/expectancy sanity, peri
 aggressive-vs-reserved) append a caveat to their `detail` text when the underlying set is
 majority estimated, so a reconstructed R is never presented with the confidence of a recorded
 one.
+
+### v3.12.1: An Exact-Timestamp Duplicate Check Missed a 9-Second Gap
+
+`2026_09_17_0002`'s 41 inserts and 17 updates all ran correctly on live; only its own
+post-verify guard failed, and for a reason the guard itself couldn't have anticipated: live
+had two more rows than the 2026-09-16 snapshot the §2 id mapping was built from.
+
+- **Trade 80** (BNBUSDT, 2026-09-14) was logged for real after the snapshot. It isn't one of
+  the 58 Bitfunded positions (the CSV ends 2026-09-13) and needed no action — it just moved
+  the challenge's legitimate row/loss counts from 58/35 to 59/36, which is exactly what
+  tripped 0002's guard (hardcoded at `COUNT(*)=58`) even though nothing was actually wrong.
+- **Trade 79** (ZECUSDT Long) was *also* logged after the snapshot, by hand, as `time_in
+  2026-09-13 06:05:00` — the same closed position as CSV row n=1, whose Bitfunded `time_in`
+  is `06:05:09`. Because trade 79 postdated the snapshot, it was never in the §2 mapping, so
+  0002 had no way to know it already covered that position. 0002's own duplicate guard for
+  new inserts matched on **exact** `(pair, direction, time_in)` — a 9-second gap between a
+  hand-typed timestamp and Bitfunded's own was enough to defeat it, so 0002 inserted a
+  *second* row for the same position instead of recognizing trade 79 as the existing one.
+
+Fixed by `2026_09_17_0003_fix_bitfunded_zec_duplicate.sql`: updates trade 79 to Bitfunded's
+own price/time/pnl for CSV row n=1 (same treatment the original 17 matched rows got),
+deletes the row 0002 inserted (confirmed empty of `trade_variables` before deletion — trade
+79's 9 rows are the ones that matter and were never touched), and re-scans the whole
+challenge with a 5-minute tolerance window instead of an exact timestamp to confirm no
+second undiscovered near-duplicate exists. `2026_09_17_0002` itself was not edited (checksum-
+locked, per §3A) — instead `0003` records it directly in `schema_migrations` as `applied`
+(mirroring `migrate.php`'s own `recordMigration()` upsert), since its data changes were
+correct and retrying it would fail the same `COUNT(*)=58` check forever now that the
+challenge legitimately holds 59 rows.
+
+**Checklist addition for any future bulk-import migration that dedupes against existing
+rows:** match on `(pair, direction)` plus a tolerance window on `time_in` (this codebase now
+uses ±5 minutes), never an exact timestamp equality. A broker's own execution timestamp and
+whatever a trader hand-typed for the same fill routinely differ by single-digit seconds to a
+few minutes — exact equality will silently let a real duplicate through rather than catching
+it, and the failure mode is a phantom extra trade with no error, not a loud one.
 
 ---
 

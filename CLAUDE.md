@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.4 |
+| Current Version | v3.14.5 |
 
 ### Tech Stack
 
@@ -216,6 +216,15 @@ exit_reason (added v3.14.0)
 > mapped to an `ENUM`, since the full set of values isn't known. `TradeController::saveTrade()`
 > never sets it, same reasoning as `source`/`r_multiple_source` above — see "The Bitfunded
 > Paste Importer" below for the full v3.14.0 design.
+>
+> `entry_price`/`exit_price`/`stop_loss`/`take_profit` are `DECIMAL(20,10) NULL` (widened
+> from `DECIMAL(14,4)` in v3.14.5 — `2026_09_18_0002_widen_trade_price_precision.sql`). Four
+> decimal places floors out inside this account's real price range: three PUMPUSDT trades
+> were silently stored with `entry_price` `0.0000` under the old precision, because the real
+> price was a fraction of a cent, below what four decimal places can represent at all — not
+> a rounding error, an outright loss of the value. Ten decimal places covers the account's
+> full observed range (0.0044 to 71,968) without truncation. See CLAUDE.md v3.14.5 below —
+> widening the column does not recover the already-zeroed rows; those need a real re-import.
 >
 > `r_multiple_source` is `ENUM('recorded','estimated') NULL`. `'recorded'` means `r_multiple`
 > came from a real stop-loss distance (or, for imported full stop-out trades, a loss confirmed
@@ -1557,8 +1566,9 @@ then the next label, which is never all-uppercase, so the check simply doesn't f
   instead of `'matched'` updates. Changed to `ABS(pnl - ?) <= 0.01`
   (`PNL_MATCH_TOLERANCE`), comfortably inside the at-most-half-a-cent rounding gap and
   nowhere near the dollars-wide gap between genuinely distinct trades that `entry_price`
-  (still an exact match — no comparable precision issue found there) and the ±10-minute
-  window already rule out. See `matchAll()`'s docblock for the full reasoning.
+  (still an exact match at the time — **superseded in v3.14.5 below**, which found the
+  same precision gap applies to `entry_price` too) and the ±10-minute window already rule
+  out. See `matchAll()`'s docblock for the full reasoning.
 
 **Consequence, stated plainly so it isn't mistaken for a regression:** the next real import
 against challenge 6 will overwrite each matched row's `pnl`/`net_pnl` with Bitfunded's true
@@ -1581,6 +1591,48 @@ reason on the Short. The two remaining synthetic regression tests from v3.14.2/v
 (label order-swap, NBSP-suffixed label) are kept as legitimate, still-true properties of
 the exact-match label design — relabeled in the code to stop implying either one was ever
 the actual live defect, since v3.14.3/v3.14.4 together showed neither was.
+
+### v3.14.5: entry_price Needed the Same Tolerance as pnl, Plus a Real Zero-Price Defect
+
+A full run of the (now working, v3.14.4) parser against challenge 6's actual Position
+History read all 59 positions correctly — the parser itself is done. But 32 of the 59 came
+back `needs attention`, every one of them purely on `entry_price` precision: `LIT 4.6370`
+vs. this account's stored `4.6300`, `INJ 5.321` vs. stored `5.3200`, `PUMP 0.004412` vs.
+stored `0.0000`. The same "hand-transcribed at lower precision" gap v3.14.4 found and fixed
+for `pnl` applies to `entry_price` too — `BitfundedImportController::matchAll()`'s exact
+`entry_price=?` just hadn't been through a real full-account run yet to surface it.
+
+**Fix 1 — relative tolerance on `entry_price`.** Unlike `pnl` (fixed dollar amounts, so a
+flat `±0.01` tolerance works everywhere), `entry_price` in this account spans **0.0044 to
+71,968** — a flat absolute tolerance would be far too loose at the low end or far too tight
+at the high end. `matchAll()` now compares `ABS(entry_price - ?) <= ABS(incoming_price) *
+0.005` (`ENTRY_PRICE_MATCH_TOLERANCE_PCT`) — 0.5% of the *incoming* Bitfunded price, not
+the stored one. The tolerance base has to be the incoming value specifically: a
+percentage-of-*stored*-value tolerance would be permanently `0` for any row already
+zeroed by the defect below, and could never match no matter what real price came in.
+
+**Fix 2 — a real, independent data-loss defect.** `entry_price`/`exit_price`/`stop_loss`/
+`take_profit` were `DECIMAL(14,4)` — four decimal places, which floors out well inside this
+account's actual price range. The `PUMP` row above isn't a precision mismatch like `LIT`/
+`INJ` — its stored `entry_price` is `0.0000`, a real value silently lost to truncation at
+write time, not merely rounded. This is **not specific to the importer**: any manually
+entered trade on a low-priced pair would hit the same floor. Worse, it silently breaks R:
+`risk_per_unit = ABS(entry_price - stop_loss)` (the v3.14.1 §5 formula) is meaningless once
+`entry_price` itself is wrongly zero. `2026_09_18_0002_widen_trade_price_precision.sql`
+widens all four columns to `DECIMAL(20,10)` — ten decimal places, comfortably covering
+0.0044 to 71,968 with headroom, applied via a plain `MODIFY COLUMN` (widening a `DECIMAL`'s
+precision/scale is always safe — a value that fit in `(14,4)` fits exactly in `(20,10)`,
+nothing is truncated or reinterpreted, so no pre-flight guard was needed).
+
+**What this migration does not do:** recover the already-zeroed `PUMP` rows. Their real
+price was lost at the moment it was originally written under the old column type — widening
+the column going forward doesn't reconstruct a value that's no longer in the row. Those
+rows get their real `entry_price` back only from an actual re-import over them (which the
+0.5% relative tolerance still won't match automatically for these three specifically, since
+their stored value is *entirely* wrong, not just imprecise — `0.0000` vs. `0.004412` is a
+100% difference, nowhere near 0.5% of anything. They'll still show as `needs attention` or
+`new` after this release and may need a manual follow-up; flagged here rather than silently
+left unexplained if the next full run doesn't show exactly 59/0/0).
 
 ---
 

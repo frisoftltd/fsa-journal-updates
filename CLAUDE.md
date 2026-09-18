@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.2 |
+| Current Version | v3.14.3 |
 
 ### Tech Stack
 
@@ -1438,6 +1438,78 @@ the two lines in swapped order and asserting `pnl` lands on `-98.68`, never `-10
 appending a literal U+00A0 to the `Realized PnL%` line (reproducing the exact live
 failure). Both assert the row still parses to a single result with `pnl = -98.68`, never
 `-10.10`.
+
+### v3.14.3: v3.14.2 Didn't Fix It — a Diagnostic Instead of a Third Guess
+
+v3.14.2 shipped and the identical real paste of challenge 6's Position History still failed
+with the identical error: `"Lines 6, 19: more than one unrecognized line in the BNBUSDT
+block starting at line 1"`. Two releases in a row had now fixed this exact error from
+reasoning about a plausible cause rather than from the real failing bytes, and neither
+held. This release is a read-only investigation plus one diagnostic — no further guess at
+the underlying cause was shipped.
+
+**What the investigation established, with evidence, not reasoning:**
+
+- **v3.14.2's fix was not wrong, but it was redundant with something already true of the
+  code, and that's why it didn't move the needle.** PCRE's `\s` under the `/u` modifier —
+  already used in `bf_clean_line()`'s second `preg_replace()` — matches every Unicode
+  `White_Space` character, confirmed empirically: NBSP, zero-width space, narrow NBSP,
+  figure/thin/en space, ideographic space, and even the line separator U+2028 all collapse
+  to a plain space through that one line alone. v3.14.2's explicit `[\x{00A0}\x{200B}\x{FEFF}]`
+  list only added anything for U+200B and U+FEFF (format characters, not whitespace — `\s`
+  doesn't match either). **If the real defect were any whitespace-shaped character, it was
+  already fixed before v3.14.2 shipped.** Since the error persisted unchanged, the
+  candidate set narrows to non-whitespace invisible characters — Unicode format characters
+  (category Cf: soft hyphen U+00AD, zero-width joiner/non-joiner, directional marks,
+  word joiner, variation selectors) — none of which `\s` matches and none of which are in
+  the explicit strip list either.
+- **The premise that line 19 is `Realized PnL%` was never verified against real bytes.**
+  It traces back to a chat-pasted sample used to write the v3.14.1 CLAUDE.md format
+  documentation, hand-counted, not extracted from a real paste. The parser's own line
+  numbering (`parsePositionHistory()`, `bitfunded_parser.php` — `n` is captured from the
+  unfiltered raw split index before blank-line filtering) is internally consistent and
+  accurate to the real paste's physical line count, but that says nothing about which
+  *field* actually occupies that physical line in a real card — the two are independent
+  claims, and only the first one was ever checked.
+- **A separate, real defect was found and is being left unfixed, deliberately:**
+  `bf_clean_line()`'s `preg_replace(..., '/u', ...)` calls return `null` on genuinely
+  invalid UTF-8 input (confirmed: triggers `PREG_BAD_UTF8_ERROR`), and the `?? $l` fallback
+  silently returns the **original, uncleaned** line rather than surfacing the failure —
+  the function does nothing and says nothing. **This is very unlikely to be the cause of
+  the current bug specifically:** the request reaches `parsePositionHistory()` through
+  `BitfundedImportController::parseRequest()` → `jsonInput()` (`includes/helpers.php`) →
+  `json_decode(file_get_contents('php://input'), true) ?? []`. `json_decode()` fails
+  outright (returns `null`, `[]` after the fallback) on any invalid UTF-8 anywhere in the
+  payload — confirmed empirically — which would produce the *different* "Paste Bitfunded's
+  Position History into Box 1 first" error, not the parse error actually seen. Since the
+  observed error is the parse error, the payload must have been valid UTF-8 end to end.
+  **Left in the code, undocumented no longer:** a future or different entry point could
+  still hit this silently, and it's real regardless of whether it's this bug.
+
+**Diagnostic added (`bitfunded_parser.php`):** the ambiguous-leftover error (the one
+actually thrown here) now includes, per unrecognized line, its cleaned text plus a hex
+dump of both the raw (pre-`bf_clean_line()`) and cleaned bytes:
+
+```
+Lines 6, 19: more than one unrecognized line in the BNBUSDT block starting at line 1 — expected at most one, the exit reason.
+  line 6: "Stop Loss"
+    raw:                  53 74 6f 70 20 4c 6f 73 73
+    after bf_clean_line(): "Stop Loss" (hex: 53 74 6f 70 20 4c 6f 73 73)
+  line 19: "..."
+    raw:                  ...
+    after bf_clean_line(): "..." (hex: ...)
+```
+
+One more real paste from Acrob against this build settles, directly rather than by
+inference: whether line 19 is actually `Realized PnL%`; whether it carries an invisible
+character `bf_clean_line()` doesn't strip; and whether line 6 is genuinely just `Stop
+Loss`. Only the diagnostic shipped — no third guess at the underlying character or the
+line-19 assumption. `bf_hex()` is diagnostic-only, never used in a comparison — it cannot
+change parsing behavior.
+
+---
+
+## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
 database except an inline `db_migrations` array in `version.json` (documented below in §16,

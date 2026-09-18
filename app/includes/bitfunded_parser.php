@@ -1,6 +1,6 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Parser (v3.14.2)
+ * FundedControl — Bitfunded Paste Parser (v3.14.3)
  * Pure parsing: no DB access, no side effects. Used by BitfundedImportController and by
  * the self-test at the bottom of this file (run standalone: `php bitfunded_parser.php`).
  *
@@ -65,6 +65,11 @@ function bf_clean_line(string $l): string {
     return trim($l);
 }
 
+/** Space-separated hex byte dump, for diagnostics only -- never used in a comparison. */
+function bf_hex(string $s): string {
+    return implode(' ', str_split(bin2hex($s), 2));
+}
+
 function bf_split_line(string $line): array {
     // Tab-separated is the expected shape (browsers convert an HTML table's cells to
     // tabs on copy). If a line has no tabs at all but has runs of 2+ spaces, fall back
@@ -116,7 +121,10 @@ function parsePositionHistory(string $raw): array {
     foreach ($rawLines as $i => $l) {
         $clean = bf_clean_line($l);
         if ($clean === '') continue;
-        $lines[] = ['n' => $i + 1, 'text' => $clean];
+        // 'raw' is kept only for the ambiguous-leftover diagnostic below (v3.14.3) -- it's
+        // the pre-bf_clean_line() text, so a hex dump of it can show whether a character
+        // was stripped during cleaning or was never touched at all.
+        $lines[] = ['n' => $i + 1, 'text' => $clean, 'raw' => $l];
     }
     if (empty($lines)) {
         throw new BitfundedParseException('Position History paste is empty. Copy each position\'s card from Bitfunded → Trader Hub → Position History and paste them in Box 1.');
@@ -207,9 +215,20 @@ function parsePositionHistory(string $raw): array {
         }
         if (count($leftover) > 1) {
             $where = implode(', ', array_map(fn($l) => $l['n'], $leftover));
+            // v3.14.3: two rounds of fixing this exact error from reasoning about plausible
+            // causes (13-column assumption, then an explicit NBSP/ZWSP/BOM strip list) both
+            // shipped without ever seeing the actual bytes on the unrecognized line. Show
+            // them here instead of guessing again -- raw (pre-bf_clean_line) and cleaned
+            // (post-bf_clean_line) text plus a hex dump of each, so the next failure is
+            // self-diagnosing from one paste rather than another round of inference.
+            $diag = array_map(function ($l) {
+                return "  line {$l['n']}: \"{$l['text']}\"\n" .
+                    "    raw:                  " . bf_hex($l['raw']) . "\n" .
+                    "    after bf_clean_line(): \"{$l['text']}\" (hex: " . bf_hex($l['text']) . ")";
+            }, $leftover);
             throw new BitfundedParseException(
                 "Lines $where: more than one unrecognized line in the $pair block starting at line " .
-                "$startLineNo — expected at most one, the exit reason."
+                "$startLineNo — expected at most one, the exit reason.\n" . implode("\n", $diag)
             );
         }
         $exitReason = $leftover ? trim($leftover[0]['text']) : '';

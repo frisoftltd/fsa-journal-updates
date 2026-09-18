@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.3 |
+| Current Version | v3.14.4 |
 
 ### Tech Stack
 
@@ -1506,6 +1506,81 @@ character `bf_clean_line()` doesn't strip; and whether line 6 is genuinely just 
 Loss`. Only the diagnostic shipped — no third guess at the underlying character or the
 line-19 assumption. `bf_hex()` is diagnostic-only, never used in a comparison — it cannot
 change parsing behavior.
+
+### v3.14.4: The Real Cause Was an Orphaned Unit Line, Not a Character
+
+The v3.14.3 diagnostic settled it on the next real paste. Line 19 was a bare `USDT` —
+clean ASCII (`55 53 44 54`), no invisible character of any kind. **Both v3.14.2's NBSP
+theory and the whole "stray codepoint" line of investigation in v3.14.2/v3.14.3 were
+chasing something that was never there.**
+
+**Real cause:** in the browser copy, a value and its unit can land on separate lines. The
+chat-pasted sample the parser was originally specified against (used to write the v3.14.1
+format documentation) showed `-3.86690000 USDT` as one line; a real paste produces `Fee` /
+`-3.86690000` / `USDT` as three. The parser read the number as the label's value and left
+the bare unit line orphaned. Because `Fee` is the last field in the block in that sample,
+its orphan survived to the end and collided with the genuine exit-reason line, tripping
+the ambiguous-leftover guard — the exact "Lines 6, 19" error, now fully explained.
+
+A second real paste (four positions: BNBUSDT, ZECUSDT, LITUSDT, TRXUSDT — the same one the
+self-test is now built from, see below) showed this isn't Fee-specific and isn't universal
+either: **in that paste, only `Exit Price` splits across lines; every other field —
+including `Fee` — keeps its unit inline.** Confirms two things at once: Bitfunded doesn't
+apply this consistently field-to-field (so the fix cannot special-case any one label), and
+the original bug report's specific symptom (`Fee`'s orphan colliding with the exit reason)
+was itself paste-specific, not the general shape of the defect.
+
+**Fix (`parsePositionHistory()`, `bitfunded_parser.php`):** after reading a label's value
+line, the line after that is checked against `/^[A-Z]{2,10}$/` — a bare token of nothing
+but uppercase letters, 2–10 characters, matching how Bitfunded always renders `USDT` and
+every asset symbol (`BNB`, `ZEC`, `LIT`, `TRX`, ...). If it matches (and isn't itself a
+known label, checked defensively though none of the eight labels are ever all-uppercase),
+it's folded into the value and consumed, rather than left loose to become a phantom
+leftover line. Applied uniformly to every label's value, not just `Fee` — per instruction,
+since any field can split this way depending on how Bitfunded renders that particular row.
+Same-line values (`"723.41 USDT"` as one line) are unaffected: the line after the value is
+then the next label, which is never all-uppercase, so the check simply doesn't fire.
+
+**Two more real findings from the same paste, both fixed:**
+
+- **A winning trade's `Realized PnL` carries a leading `+`** (`+3.75199USDT` on the TRXUSDT
+  Short). Checked before assuming a fix was needed: `bf_parse_num()`'s existing strip
+  regex (`preg_replace('/[^0-9.\-]/', '', $s)`) already removes `+` along with every other
+  non-numeric character — confirmed empirically, no code change required. Its doc comment
+  already said as much ("Strip thousands separators, %, currency suffixes, **+**,
+  whitespace"); this was previously undocumented-as-verified, now is.
+- **Bitfunded reports `pnl` at up to 4 decimal places; this account's existing 59 rows were
+  hand-transcribed from screenshots at 2** (e.g. `trades.pnl` holds `-98.68` where
+  Bitfunded's own Position History reports `-98.6850`). `BitfundedImportController::
+  matchAll()`'s exact-match query compared `pnl=?` — under this real precision gap, every
+  one of the 59 historical rows would fail to match and re-import as `'new'` duplicates
+  instead of `'matched'` updates. Changed to `ABS(pnl - ?) <= 0.01`
+  (`PNL_MATCH_TOLERANCE`), comfortably inside the at-most-half-a-cent rounding gap and
+  nowhere near the dollars-wide gap between genuinely distinct trades that `entry_price`
+  (still an exact match — no comparable precision issue found there) and the ±10-minute
+  window already rule out. See `matchAll()`'s docblock for the full reasoning.
+
+**Consequence, stated plainly so it isn't mistaken for a regression:** the next real import
+against challenge 6 will overwrite each matched row's `pnl`/`net_pnl` with Bitfunded's true
+higher-precision figures (this is exactly what a `'matched'` update is supposed to do —
+execution fields, `pnl` included, are never excluded from that `UPDATE`). Post-import,
+`SUM(pnl)` and `SUM(net_pnl)` for challenge 6 will differ slightly from the
+`-120.08`/`-258.1909` figures documented in v3.13.2–v3.13.4 (which were themselves derived
+from the 2-decimal hand-transcribed values). **This is a correction, not a regression** —
+the same "trust the stored column" principle those sections already established, just
+discovering that the stored column itself was about to become more precise, not less.
+
+**Self-test rebuilt from real bytes, not reconstructed from a description.** The v3.14.1
+two-position fixture — used unmodified through v3.14.3 — had every field's unit inline,
+which is exactly the shape the live paste doesn't reliably have; it passed every self-test
+run while the live path kept failing. Replaced with a byte-for-byte real four-position
+paste (BNBUSDT, ZECUSDT, LITUSDT, TRXUSDT — a Notepad-saved copy of an actual clipboard
+paste from Bitfunded's Position History), asserting all ten fields on all four rows,
+including the split `Exit Price`, the leading-`+` PnL, and the `Manual Closing` exit
+reason on the Short. The two remaining synthetic regression tests from v3.14.2/v3.14.3
+(label order-swap, NBSP-suffixed label) are kept as legitimate, still-true properties of
+the exact-match label design — relabeled in the code to stop implying either one was ever
+the actual live defect, since v3.14.3/v3.14.4 together showed neither was.
 
 ---
 

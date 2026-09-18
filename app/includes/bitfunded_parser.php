@@ -1,6 +1,6 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Parser (v3.14.3)
+ * FundedControl — Bitfunded Paste Parser (v3.14.4)
  * Pure parsing: no DB access, no side effects. Used by BitfundedImportController and by
  * the self-test at the bottom of this file (run standalone: `php bitfunded_parser.php`).
  *
@@ -192,11 +192,31 @@ function parsePositionHistory(string $raw): array {
                 throw new BitfundedParseException("Line {$block[$i]['n']}: \"{$block[$i]['text']}\" has no value line after it.");
             }
             $target = $LABELS[$key];
-            if ($target !== null) {
-                $values[$target] = ['text' => $block[$i + 1]['text'], 'n' => $block[$i + 1]['n']];
-            }
+            $valueText = $block[$i + 1]['text'];
+            $valueLineNo = $block[$i + 1]['n'];
             $consumed[$i] = true;
             $consumed[$i + 1] = true;
+
+            // v3.14.4: a value and its unit can land on separate lines -- "Fee" / "-3.8669"
+            // / "USDT" as three lines, not "Fee" / "-3.8669 USDT" as two. Confirmed against
+            // a real paste (the orphaned "USDT" line was what actually collided with the
+            // exit reason and produced the "more than one unrecognized line" error). If the
+            // line right after the value is a bare unit token -- USDT, or the position's own
+            // asset symbol, always plain uppercase letters and nothing else on the line --
+            // fold it into the value instead of leaving it loose. Not specific to Fee: any
+            // label's value can split this way depending on how Bitfunded renders that row.
+            $unitIdx = $i + 2;
+            if (isset($block[$unitIdx]) && !isset($consumed[$unitIdx])) {
+                $unitText = $block[$unitIdx]['text'];
+                if (preg_match('/^[A-Z]{2,10}$/', $unitText) && !array_key_exists(strtolower($unitText), $LABELS)) {
+                    $valueText .= ' ' . $unitText;
+                    $consumed[$unitIdx] = true;
+                }
+            }
+
+            if ($target !== null) {
+                $values[$target] = ['text' => $valueText, 'n' => $valueLineNo];
+            }
             $i++;
         }
 
@@ -358,10 +378,16 @@ function bf_self_test(): void {
         fwrite(STDERR, "FAIL: $label — expected " . var_export($expected, true) . ", got " . var_export($actual, true) . "\n");
     };
 
-    // Real two-position paste, verified against the BNBUSDT and ZECUSDT rows already live
-    // in the database (CLAUDE.md v3.14.1 §3) — not synthetic data. v3.14.0's self-test
-    // passed against synthetic input while the parser itself could not read a real paste;
-    // this is the correction.
+    // Real four-position paste (v3.14.4), byte-for-byte from a Notepad-saved copy of an
+    // actual Bitfunded Position History clipboard paste -- not typed, not reconstructed
+    // from a chat-pasted sample. This replaces the v3.14.1 two-position fixture, which was
+    // close enough to pass every prior self-test while the live path kept failing: it had
+    // every field's unit inline, and the real paste doesn't. Here, Exit Price genuinely
+    // splits across two lines ("708.79" / "USDT") on every one of the four positions while
+    // every other field keeps its unit inline -- exactly the shape that produced "Lines 6,
+    // 19: more than one unrecognized line" on live, now exercised directly rather than
+    // inferred. TRXUSDT additionally covers a Short position, a leading '+' on a winning
+    // trade's Realized PnL, and a "Manual Closing" exit reason (not "Stop Loss").
     $paste = <<<'TXT'
 BNBUSDT Perpetual
 Long
@@ -380,7 +406,8 @@ Liquidation Qty
 Liquidate Date
 2026-09-15 20:49:24
 Exit Price
-708.79USDT
+708.79
+USDT
 Realized PnL%
 -10.10%
 Fee
@@ -402,24 +429,71 @@ Liquidation Qty
 Liquidate Date
 2026-09-13 11:31:43
 Exit Price
-1081.63USDT
+1081.63
+USDT
 Realized PnL%
--8.43%
+-23.82%
 Fee
 -1.56990000 USDT
+LITUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Stop Loss
+Opening Time
+2026-09-11 15:07:02
+Average price
+4.6370 USDT
+Realized PnL
+-102.1657USDT
+Liquidation Qty
+237 LIT
+Liquidate Date
+2026-09-12 21:54:14
+Exit Price
+4.2060
+USDT
+Realized PnL%
+-46.48%
+Fee
+-0.83830000 USDT
+TRXUSDT Perpetual
+Short
+5X
+Isolated
+Close All
+Manual Closing
+Opening Time
+2026-09-10 15:09:17
+Average price
+0.33838 USDT
+Realized PnL
++3.75199USDT
+Liquidation Qty
+35300 TRX
+Liquidate Date
+2026-09-10 15:15:20
+Exit Price
+0.33828
+USDT
+Realized PnL%
++0.15%
+Fee
+-9.55450000 USDT
 TXT;
 
     try {
         $rows = parsePositionHistory($paste);
-        $check('row count', count($rows), 2);
-        if (count($rows) === 2) {
-            [$bnb, $zec] = $rows;
+        $check('row count', count($rows), 4);
+        if (count($rows) === 4) {
+            [$bnb, $zec, $lit, $trx] = $rows;
             $check('BNB pair', $bnb['pair'], 'BNBUSDT');
             $check('BNB direction', $bnb['direction'], 'Long');
             $check('BNB time_in', $bnb['time_in'], '2026-09-14 06:08:19');
             $check('BNB time_out', $bnb['time_out'], '2026-09-15 20:49:24');
             $check('BNB entry_price', $bnb['entry_price'], 723.41);
-            $check('BNB exit_price', $bnb['exit_price'], 708.79);
+            $check('BNB exit_price (split across two lines)', $bnb['exit_price'], 708.79);
             $check('BNB pnl', $bnb['pnl'], -98.68);
             $check('BNB lot_size', $bnb['lot_size'], 6.75);
             $check('BNB fees', $bnb['fees'], 3.8669);
@@ -430,23 +504,44 @@ TXT;
             $check('ZEC time_in', $zec['time_in'], '2026-09-13 06:05:09');
             $check('ZEC time_out', $zec['time_out'], '2026-09-13 11:31:43');
             $check('ZEC entry_price', $zec['entry_price'], 1135.75);
-            $check('ZEC exit_price', $zec['exit_price'], 1081.63);
+            $check('ZEC exit_price (split across two lines)', $zec['exit_price'], 1081.63);
             $check('ZEC pnl', $zec['pnl'], -95.79);
             $check('ZEC lot_size', $zec['lot_size'], 1.77);
             $check('ZEC fees', $zec['fees'], 1.5699);
             $check('ZEC exit_reason', $zec['exit_reason'], 'Stop Loss');
+
+            $check('LIT pair', $lit['pair'], 'LITUSDT');
+            $check('LIT direction', $lit['direction'], 'Long');
+            $check('LIT time_in', $lit['time_in'], '2026-09-11 15:07:02');
+            $check('LIT time_out', $lit['time_out'], '2026-09-12 21:54:14');
+            $check('LIT entry_price', $lit['entry_price'], 4.637);
+            $check('LIT exit_price (split across two lines)', $lit['exit_price'], 4.206);
+            $check('LIT pnl', $lit['pnl'], -102.1657);
+            $check('LIT lot_size (unit is the asset symbol, not USDT)', $lit['lot_size'], 237.0);
+            $check('LIT fees', $lit['fees'], 0.8383);
+            $check('LIT exit_reason', $lit['exit_reason'], 'Stop Loss');
+
+            $check('TRX pair', $trx['pair'], 'TRXUSDT');
+            $check('TRX direction (Short)', $trx['direction'], 'Short');
+            $check('TRX time_in', $trx['time_in'], '2026-09-10 15:09:17');
+            $check('TRX time_out', $trx['time_out'], '2026-09-10 15:15:20');
+            $check('TRX entry_price', $trx['entry_price'], 0.33838);
+            $check('TRX exit_price (split across two lines)', $trx['exit_price'], 0.33828);
+            $check('TRX pnl is +3.75199, not -3.75199 (leading + on a winning trade)', $trx['pnl'], 3.75199);
+            $check('TRX lot_size', $trx['lot_size'], 35300.0);
+            $check('TRX fees', $trx['fees'], 9.5545);
+            $check('TRX exit_reason (Manual Closing, not Stop Loss)', $trx['exit_reason'], 'Manual Closing');
         }
     } catch (BitfundedParseException $e) {
         $fail++;
-        fwrite(STDERR, "FAIL: real two-position paste threw: " . $e->getMessage() . "\n");
+        fwrite(STDERR, "FAIL: real four-position paste threw: " . $e->getMessage() . "\n");
     }
 
-    // Regression (v3.14.2): "Realized PnL%" must be recognized as a discarded label, not
-    // fall through to the exit-reason leftover slot -- it did on a real paste because
-    // trim() doesn't strip a trailing non-breaking space a browser copy can carry, and
-    // separately must never prefix-collide with "Realized PnL" (which would silently put
-    // the percentage in the pnl column). Order is swapped from the main sample (PnL% before
-    // PnL) specifically to catch a prefix-matching bug in either direction.
+    // These two are legitimate, still-true properties of the exact-match label design
+    // (added v3.14.1, unrelated to the real cause found in v3.14.4 -- the actual bug was
+    // an orphaned unit line, not a stray character or a prefix collision). Kept because
+    // they still pin real current behavior, not because either one turned out to be the
+    // live defect.
     $pnlPercentOrderSwapped = <<<'TXT'
 BNBUSDT Perpetual
 Long
@@ -481,9 +576,11 @@ TXT;
         fwrite(STDERR, "FAIL: block with Realized PnL% before Realized PnL threw: " . $e->getMessage() . "\n");
     }
 
-    // Regression (v3.14.2): a trailing non-breaking space (U+00A0) on a label line --
-    // exactly what defeated exact-match against "Realized PnL%" on a real paste -- must
-    // not stop it from being recognized and discarded.
+    // A trailing non-breaking space (U+00A0) on a label line was v3.14.2's theory for the
+    // real failure -- shown in v3.14.3/v3.14.4 not to have been the actual cause (line 19
+    // was a bare "USDT", clean ASCII, no invisible character at all). Kept as a real,
+    // still-true property: bf_clean_line()'s whitespace normalization does work correctly
+    // for this character, it just wasn't what live was hitting.
     $nbspLabel = str_replace('Realized PnL%', "Realized PnL%\u{00A0}", $pnlPercentOrderSwapped);
     try {
         $rows = parsePositionHistory($nbspLabel);
@@ -495,7 +592,10 @@ TXT;
     }
 
     // Edge case: "Close All" is a live-action button, not always present -- a block
-    // missing it must still parse, with the exit reason still found.
+    // missing it must still parse, with the exit reason still found. Exit Price is written
+    // split across two lines here (matching the real paste's actual shape, confirmed
+    // v3.14.4 -- not the inline guess this block used before) so this case also exercises
+    // the value/unit-split fix, not just the missing-button case.
     $noCloseAll = <<<'TXT'
 BNBUSDT Perpetual
 Long
@@ -513,13 +613,15 @@ Liquidation Qty
 Liquidate Date
 2026-09-15 20:49:24
 Exit Price
-708.79USDT
+708.79
+USDT
 Fee
 -3.86690000 USDT
 TXT;
     try {
         $rows = parsePositionHistory($noCloseAll);
         $check('no-Close-All row count', count($rows), 1);
+        $check('no-Close-All exit_price (still split)', $rows[0]['exit_price'] ?? null, 708.79);
         $check('no-Close-All exit_reason', $rows[0]['exit_reason'] ?? null, 'Stop Loss');
     } catch (BitfundedParseException $e) {
         $fail++;
@@ -527,7 +629,7 @@ TXT;
     }
 
     // Edge case: the exit-reason line itself is an open set and may be absent entirely --
-    // must not be required.
+    // must not be required. Same split-Exit-Price shape as above.
     $noExitReason = <<<'TXT'
 BNBUSDT Perpetual
 Long
@@ -545,13 +647,15 @@ Liquidation Qty
 Liquidate Date
 2026-09-15 20:49:24
 Exit Price
-708.79USDT
+708.79
+USDT
 Fee
 -3.86690000 USDT
 TXT;
     try {
         $rows = parsePositionHistory($noExitReason);
         $check('no-exit-reason row count', count($rows), 1);
+        $check('no-exit-reason exit_price (still split)', $rows[0]['exit_price'] ?? null, 708.79);
         $check('no-exit-reason exit_reason', $rows[0]['exit_reason'] ?? null, '');
     } catch (BitfundedParseException $e) {
         $fail++;

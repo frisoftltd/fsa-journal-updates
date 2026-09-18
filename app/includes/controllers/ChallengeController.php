@@ -37,12 +37,13 @@ class ChallengeController {
             $this->db->prepare("UPDATE challenges SET is_active=0 WHERE user_id=?")->execute([$this->uid]);
         }
 
-        $this->db->prepare("INSERT INTO challenges (user_id, name, prop_firm, challenge_phase, starting_balance, max_drawdown_pct, daily_loss_limit, risk_per_trade_pct, profit_target_pct, is_active) VALUES (?,?,?,?,?,?,?,?,?,?)")
+        $this->db->prepare("INSERT INTO challenges (user_id, name, prop_firm, challenge_phase, starting_balance, max_drawdown_pct, drawdown_type, daily_loss_limit, risk_per_trade_pct, profit_target_pct, is_active) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
             ->execute([
                 $this->uid, trim($d['name']),
                 $d['prop_firm'] ?? '', $d['challenge_phase'] ?? 'Phase 1',
                 num($d['starting_balance'] ?? 10000),
-                num($d['max_drawdown_pct'] ?? 10), num($d['daily_loss_limit'] ?? 500),
+                num($d['max_drawdown_pct'] ?? 10), $d['drawdown_type'] ?? 'static',
+                num($d['daily_loss_limit'] ?? 500),
                 num($d['risk_per_trade_pct'] ?? 0.5), num($d['profit_target_pct'] ?? 8),
                 $make_active ? 1 : 0
             ]);
@@ -55,11 +56,12 @@ class ChallengeController {
         if (!$id) jsonError('Invalid challenge ID');
         if (empty($d['name'])) jsonError('Challenge name required');
 
-        $this->db->prepare("UPDATE challenges SET name=?, prop_firm=?, challenge_phase=?, starting_balance=?, max_drawdown_pct=?, daily_loss_limit=?, risk_per_trade_pct=?, profit_target_pct=?, status=? WHERE id=? AND user_id=?")
+        $this->db->prepare("UPDATE challenges SET name=?, prop_firm=?, challenge_phase=?, starting_balance=?, max_drawdown_pct=?, drawdown_type=?, daily_loss_limit=?, risk_per_trade_pct=?, profit_target_pct=?, status=? WHERE id=? AND user_id=?")
             ->execute([
                 trim($d['name']), $d['prop_firm'] ?? '', $d['challenge_phase'] ?? 'Phase 1',
                 num($d['starting_balance'] ?? 10000),
-                num($d['max_drawdown_pct'] ?? 10), num($d['daily_loss_limit'] ?? 500),
+                num($d['max_drawdown_pct'] ?? 10), $d['drawdown_type'] ?? 'static',
+                num($d['daily_loss_limit'] ?? 500),
                 num($d['risk_per_trade_pct'] ?? 0.5), num($d['profit_target_pct'] ?? 8),
                 $d['status'] ?? 'active', $id, $this->uid
             ]);

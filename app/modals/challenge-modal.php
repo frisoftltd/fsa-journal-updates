@@ -13,6 +13,11 @@
            starting_balance + realised net P&L, never hand-entered, so editing it here
            could never have done anything but drift out of sync with the real number. -->
       <div class="form-group"><label>Max Drawdown (%)</label><input type="number" step="0.1" id="ch-max_drawdown_pct" value="10"></div>
+      <!-- Drawdown Type (v3.14.7): which convention this prop firm's Maximum Loss rule
+           actually uses. Static (default) measures from starting_balance — confirmed
+           correct for Bitfunded against its own dashboard. Trailing measures from the
+           equity high-water mark, for a firm whose rule genuinely works that way. -->
+      <div class="form-group"><label>Drawdown Type</label><select id="ch-drawdown_type"><option value="static">Static (from starting balance)</option><option value="trailing">Trailing (from equity peak)</option></select></div>
       <div class="form-group"><label>Daily Loss Limit ($)</label><input type="number" step="0.01" id="ch-daily_loss_limit" value="500"></div>
       <div class="form-group"><label>Risk Per Trade (%)</label><input type="number" step="0.01" id="ch-risk_per_trade_pct" value="0.5"></div>
       <div class="form-group"><label>Profit Target (%)</label><input type="number" step="0.1" id="ch-profit_target_pct" value="8"></div>

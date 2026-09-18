@@ -37,8 +37,12 @@
   <div class="stats-grid" style="margin-bottom:14px">
     <div class="card">
       <div class="card-title">Drawdown &amp; Streak</div>
-      <div class="stat-row"><span class="stat-label">Max Drawdown</span><span class="stat-val red" id="s-maxdd">—</span></div>
-      <div class="stat-row"><span class="stat-label">Current Drawdown</span><span class="stat-val" id="s-curdd">—</span></div>
+      <!-- v3.14.7: Max Drawdown is always the historical worst peak-to-trough figure,
+           labeled explicitly as such so it isn't read as "the number the prop firm judges
+           you on right now" — that's Current Drawdown's job, and its own type (static from
+           starting balance, or trailing from the equity peak) is shown alongside it. -->
+      <div class="stat-row"><span class="stat-label">Max Drawdown <span style="color:var(--text3);font-weight:400">(historical worst)</span></span><span class="stat-val red" id="s-maxdd">—</span></div>
+      <div class="stat-row"><span class="stat-label">Current Drawdown <span style="color:var(--text3);font-weight:400" id="s-curdd-type"></span></span><span class="stat-val" id="s-curdd">—</span></div>
       <div class="stat-row"><span class="stat-label">Current Streak</span><span class="stat-val" id="s-streak-cur">—</span></div>
       <div class="stat-row"><span class="stat-label">Longest Win Streak</span><span class="stat-val green" id="s-streak-maxwin">—</span></div>
       <div class="stat-row"><span class="stat-label">Longest Loss Streak</span><span class="stat-val red" id="s-streak-maxloss">—</span></div>

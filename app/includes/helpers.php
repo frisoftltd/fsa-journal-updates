@@ -130,6 +130,30 @@ function enrichChallenges($db, array $challenges) {
 }
 
 /**
+ * "Static" drawdown (added v3.14.7): distance below starting_balance, floored at 0 —
+ * how most prop firms, Bitfunded included, actually judge a Maximum Loss rule. Confirmed
+ * against Bitfunded's own dashboard: it reports 264.82 used of a 1,000 allowance,
+ * matching 10,000 - 9,735.17 (starting_balance - current_balance) exactly — not a
+ * peak-relative figure. This is the default for challenges.drawdown_type and the single
+ * shared implementation for every consumer that measures drawdown against the starting
+ * balance rather than an equity high-water mark: AlertController's MAX DRAWDOWN REACHED
+ * threshold, StatsController's sidebar dd_pct, StatsController's current_drawdown_pct
+ * when drawdown_type='static', and ReviewEngineController::ruleDrawdownProximity() — one
+ * formula to get right, not four copies to keep in sync by hand (they used to be four
+ * near-identical inline copies; unified here in the same release that added the setting).
+ *
+ * $challenge must already be enrichChallenge()'d — reads current_balance, never
+ * challenges.current_balance directly (that column doesn't exist, see enrichChallenge()
+ * above). Not rounded — callers already round at their own display precision.
+ */
+function staticDrawdownPct(array $challenge): float {
+    $starting = (float)($challenge['starting_balance'] ?? 0);
+    if ($starting <= 0) return 0.0;
+    $current = (float)($challenge['current_balance'] ?? $starting);
+    return abs(min(0, $current - $starting)) / $starting * 100;
+}
+
+/**
  * Read JSON POST body
  */
 function jsonInput() {

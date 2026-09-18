@@ -86,12 +86,32 @@ class StatsController {
         foreach ($cum_trades as $i => $t) {
             $running += $t['net_pnl'];
             if ($running > $peak) $peak = $running;
+            // Always peak-to-trough here, regardless of drawdown_type -- this is what
+            // "Max Drawdown" below reports as the account's historical worst, and that
+            // figure doesn't change meaning based on which rule the prop firm actually
+            // enforces (see CLAUDE.md v3.14.7).
             $dd = ($peak > 0 && $starting_bal > 0) ? (($peak - $running) / $starting_bal) * 100 : 0;
             $cum[] = ['trade' => $i + 1, 'net_pnl' => round($t['net_pnl'], 2), 'cumulative' => round($running, 2), 'drawdown' => round($dd, 2), 'date' => $t['trade_date']];
         }
-        $stats['cumulative']           = $cum;
-        $stats['max_drawdown_pct']     = count($cum) > 0 ? max(array_column($cum, 'drawdown')) : 0;
-        $stats['current_drawdown_pct'] = count($cum) > 0 ? end($cum)['drawdown'] : 0;
+        $stats['cumulative'] = $cum;
+        // "Max Drawdown" -- the account's historical worst, peak-to-trough, always (never
+        // affected by drawdown_type; see CLAUDE.md v3.14.7 for why this stays fixed while
+        // Current Drawdown below does not). Label this clearly as historical/worst-case in
+        // the UI, not as "the number the prop firm judges you on right now" -- that's
+        // Current Drawdown's job.
+        $stats['max_drawdown_pct'] = count($cum) > 0 ? max(array_column($cum, 'drawdown')) : 0;
+
+        // "Current Drawdown" (CLAUDE.md v3.14.7): 'static' (default) -- distance below
+        // starting_balance, matching how Bitfunded's own Maximum Loss rule judges this
+        // account (confirmed against its dashboard: 264.82 used of a 1,000 allowance =
+        // 10,000 - 9,735.17). 'trailing' -- distance below the equity high-water mark
+        // reached so far (the old, only behavior through v3.14.6) -- a stricter measure,
+        // correct only if the prop firm's own rule genuinely is trailing.
+        $drawdownType = $ch['drawdown_type'] ?? 'static';
+        $stats['drawdown_type'] = $drawdownType;
+        $stats['current_drawdown_pct'] = $drawdownType === 'trailing'
+            ? (count($cum) > 0 ? end($cum)['drawdown'] : 0)
+            : round(staticDrawdownPct($ch), 2);
 
         // Streak
         $chWhere = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL)";
@@ -114,8 +134,9 @@ class StatsController {
         $daily_limit = floatval($ch['daily_loss_limit'] ?? 500);
         $stats['today_pnl'] = $today_pnl;
         $stats['daily_limit_pct'] = $daily_limit > 0 ? abs(min(0, $today_pnl)) / $daily_limit * 100 : 0;
-        $stats['dd_pct'] = ($starting_bal > 0)
-            ? abs(min(0, floatval($ch['current_balance'] ?? $starting_bal) - $starting_bal)) / $starting_bal * 100 : 0;
+        // Sidebar "DD: X%" widget -- always static, same reasoning as AlertController's
+        // identical threshold check (helpers.php::staticDrawdownPct()).
+        $stats['dd_pct'] = staticDrawdownPct($ch);
 
         jsonResponse($stats);
     }

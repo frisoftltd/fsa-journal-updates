@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.6 |
+| Current Version | v3.14.7 |
 
 ### Tech Stack
 
@@ -163,7 +163,8 @@ starting_balance, max_drawdown_pct,
 daily_loss_limit, risk_per_trade_pct, profit_target_pct,
 status (active/completed/failed), is_active (0/1), created_at,
 default_strategy_id (added v3.5.0 — links to strategies.id),
-funding_adjustment, profit_target_amt, max_loss_amt (added v3.13.0)
+funding_adjustment, profit_target_amt, max_loss_amt (added v3.13.0),
+drawdown_type (added v3.14.7)
 ```
 > `current_balance` was **dropped** in v3.13.0 — it was a stored column nothing ever
 > recalculated, and it drifted silently for five weeks on the Bitfunded Altcoin challenge
@@ -187,6 +188,15 @@ funding_adjustment, profit_target_amt, max_loss_amt (added v3.13.0)
 > two columns (dashboard label, `AlertController`, `ReviewEngineController::
 > ruleDrawdownProximity()`) gets the amount-derived figure without needing its own
 > amount-vs-percent branch.
+>
+> `drawdown_type` is `ENUM('static','trailing') NOT NULL DEFAULT 'static'`. Controls how
+> `current_drawdown_pct` (`StatsController::getStats()`) is computed — `'static'` measures
+> from `starting_balance` (how Bitfunded's own Maximum Loss rule, and most prop firms,
+> actually judge the account); `'trailing'` measures from the equity high-water mark
+> reached so far, FundedControl's only behavior through v3.14.6. See CLAUDE.md v3.14.7 for
+> the full rationale and a known scope boundary (the risk-alert threshold and the
+> Review Engine's drawdown-proximity insight are always `'static'`, regardless of this
+> setting).
 >
 > `challenges` was MyISAM/latin1 until v3.13.0 — the only table on this schema left on the
 > old engine, and the reason `trades.challenge_id` had no foreign key (MyISAM can't be an
@@ -1681,6 +1691,66 @@ entry_price OR entry_price = 0` (three branches, all against the incoming price)
   same anti-false-positive structure as the original v3.13.1 duplicate-detection rule.
 
 `ENTRY_PRICE_MATCH_TOLERANCE_PCT` is removed — no longer used by anything.
+
+### v3.14.7: Current Drawdown Was Peak-to-Trough — Bitfunded Judges From the Starting Balance
+
+FundedControl's Statistics page showed Current Drawdown at 5.29% for challenge 6, measured
+peak-to-trough (distance below the highest equity this account's ever reached). Bitfunded's
+own dashboard reports something different for the same account: **264.82 used of a 1,000
+Maximum Loss allowance** — which is exactly `10,000 − 9,735.17` (`starting_balance −
+current_balance`), not any peak-relative figure. The 5.29% wasn't wrong as a calculation,
+it was answering a stricter question than the one the account is actually judged by.
+
+**`challenges.drawdown_type`** (`ENUM('static','trailing') NOT NULL DEFAULT 'static'`,
+`2026_09_18_0003_add_challenges_drawdown_type.sql`) lets each challenge say which
+convention its own prop firm uses. `'static'` (the default, and what challenge 6 is
+explicitly set to by this migration) measures from `starting_balance`. `'trailing'`
+preserves the old peak-to-trough behavior, for a firm whose rule genuinely is a
+high-water mark.
+
+**Discovering this also surfaced that "static" was already the codebase's unspoken
+default everywhere except the one place it was actually displayed as "Current
+Drawdown."** `AlertController`'s `MAX DRAWDOWN REACHED` threshold and
+`ReviewEngineController::ruleDrawdownProximity()`'s risk insight were both *already*
+independently computing the exact same static formula (distance below `starting_balance`,
+floored at 0) — written separately, at different times, with no shared code between them
+or with the Stats page. Three near-identical inline copies of the same formula, one of
+which (`StatsController::getStats()`'s `dd_pct`, feeding the sidebar's small "DD: X%"
+widget) was already static while its neighbor `current_drawdown_pct` (the Stats page's
+actual "Current Drawdown" figure) was trailing — the same app was already showing two
+different numbers under similar names for the same concept, before this release touched
+anything. Unified into one shared function, `helpers.php::staticDrawdownPct($challenge)`
+— reads the already-`enrichChallenge()`'d `current_balance`, one formula instead of four
+copies to keep in sync by hand.
+
+**What changed, and what deliberately did not:**
+- `StatsController::getStats()`'s `current_drawdown_pct` now branches on
+  `drawdown_type`: `'static'` calls `staticDrawdownPct()`; `'trailing'` keeps the exact
+  v3.14.6-and-earlier peak-to-trough calculation, unchanged. The response also now
+  includes `drawdown_type` itself, so the UI can label which convention is active.
+- **`max_drawdown_pct` (labeled "Max Drawdown") is unaffected by `drawdown_type` and
+  always stays the peak-to-trough historical-worst figure** — genuinely useful context
+  regardless of which rule the account is judged by, so it's kept, not replaced. Relabeled
+  in the UI (`pages/stats.php`) as "Max Drawdown (historical worst)" specifically so it
+  reads as context, not as the number the prop firm enforces right now — that's Current
+  Drawdown's job, and its own active type is now shown alongside it.
+- `AlertController` and `ReviewEngineController::ruleDrawdownProximity()` were **not**
+  changed to respect `drawdown_type` — both call the shared `staticDrawdownPct()`
+  unconditionally, same behavior as before this release. This is a deliberate, narrow
+  scope boundary, not an oversight: computing a *trailing* drawdown requires walking the
+  challenge's full ordered trade history with peak-tracking (what `StatsController`
+  already does for the Drawdown Curve chart and `max_drawdown_pct`), which neither
+  `AlertController` nor `ReviewEngineController` currently does or has cheap access to.
+  Every challenge in this account is `'static'` today (the default, and what challenge 6
+  is explicitly set to), so nothing currently diverges — **but if a challenge is ever set
+  to `'trailing'`, its risk alert and Review Engine insight will keep using static
+  drawdown while the Stats page shows trailing, and those two will disagree.** Flagged
+  here rather than silently left unexplained if that ever surfaces as a confusing report,
+  and a reasonable follow-up if `'trailing'` challenges turn out to be common enough to
+  justify the extra query cost everywhere.
+- `drawdown_type` is exposed in the challenge add/edit form (`modals/challenge-modal.php`)
+  and `ChallengeController::add()`/`update()`, defaulting to `'static'` for new challenges
+  — not just settable via migration.
 
 ---
 

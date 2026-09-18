@@ -18,6 +18,7 @@ async function loadStats(){
     set('s-pf',s.profit_factor);
     set('s-maxdd',s.max_drawdown_pct?.toFixed(2)+'%');
     set('s-curdd',s.current_drawdown_pct?.toFixed(2)+'%');
+    set('s-curdd-type', s.drawdown_type==='trailing' ? '(trailing, from equity peak)' : '(static, from starting balance)');
     const str=s.streak||{};
     set('s-streak-cur',(str.current||0)+' '+(str.type||''));
     set('s-streak-maxwin',str.max_win||0);

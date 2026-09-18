@@ -34,8 +34,11 @@ class AlertController {
         $daily_limit  = floatval($ch['daily_loss_limit'] ?? 500);
         $max_dd_pct   = floatval($ch['max_drawdown_pct'] ?? 10);
 
-        $dd_pct = ($starting_bal > 0)
-            ? abs(min(0, floatval($ch['current_balance'] ?? $starting_bal) - $starting_bal)) / $starting_bal * 100 : 0;
+        // Always static (helpers.php::staticDrawdownPct()), regardless of the challenge's
+        // own drawdown_type (added v3.14.7) — this threshold protects the account against
+        // its actual Maximum Loss rule, which for every prop firm seen in this codebase so
+        // far (Bitfunded included) is measured from starting_balance, not a trailing peak.
+        $dd_pct = staticDrawdownPct($ch);
         $daily_pct = ($daily_limit > 0)
             ? abs(min(0, $today)) / $daily_limit * 100 : 0;
 

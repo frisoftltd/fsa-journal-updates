@@ -835,10 +835,14 @@ class ReviewEngineController {
 
     private function ruleDrawdownProximity($challenge) {
         $starting = (float)($challenge['starting_balance'] ?? 0);
-        $current = (float)($challenge['current_balance'] ?? $starting);
         $maxDd = (float)($challenge['max_drawdown_pct'] ?? 0);
         if ($starting <= 0 || $maxDd <= 0) return [];
-        $currentDd = max(0, ($starting - $current) / $starting * 100);
+        // Always static (helpers.php::staticDrawdownPct()) -- same reasoning as
+        // AlertController's identical check, unaffected by the challenge's own
+        // drawdown_type (added v3.14.7). See CLAUDE.md v3.14.7 for the known scope
+        // boundary this leaves: a challenge explicitly set to 'trailing' would see this
+        // insight diverge from the Stats page's Current Drawdown.
+        $currentDd = staticDrawdownPct($challenge);
         if ($maxDd - $currentDd <= 2) {
             return [[
                 'severity' => 'alert', 'category' => 'risk',

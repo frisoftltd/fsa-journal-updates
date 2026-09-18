@@ -1,12 +1,24 @@
 {
-    "current_version": "3.14.6",
+    "current_version": "3.14.7",
     "release_date": "2026-09-18",
     "changelog": [
-        "Fix: v3.14.5's 0.5% relative tolerance on entry_price was itself wrong -- a real full-account run with it already in place still returned 15 'needs attention' rows spanning 0.9% off (ADA 0.1816 vs stored 0.1800) to 100% off (PUMP 0.004412 vs stored 0.0000), a range no single percentage threshold can cover because it isn't proportional rounding. Checked the actual stored values against the incoming ones: every discrepancy is reproduced exactly by truncating (not rounding) the incoming price to 2 decimal places -- confirmed by JUP (0.189 rounds to 0.19, which would not match the stored 0.1800, but truncates to 0.18, which matches exactly). The originally-specified fix formula (ROUND(incoming,4)=stored) was checked against these same examples before writing any SQL and matched none of them; shipped TRUNCATE(incoming,2)=stored instead, which matches all four",
-        "Change: BitfundedImportController::matchAll()'s entry_price condition is now 'entry_price = ? OR TRUNCATE(?, 2) = entry_price OR entry_price = 0' -- exact equality (keeps a re-paste of already-correct rows idempotent, since a truncation-only check would itself break that), truncated-to-2-decimals equality (the confirmed legacy hand-transcription mechanism), or stored value is exactly 0 (its own case, not a tolerance -- a pre-v3.14.5 DECIMAL(14,4) column could truncate a genuinely sub-cent price to nothing, and no comparison against a destroyed value is meaningful, so the match is accepted on pair/direction/time/pnl alone). This resolves the PUMP rows without the manual follow-up v3.14.5 predicted they'd need. entry_price is a consistency check now, not a percentage tolerance; a genuinely different trade at the same timestamp still fails to match since pair, direction, the time window, and pnl within a cent all still have to agree simultaneously. ENTRY_PRICE_MATCH_TOLERANCE_PCT removed, no longer used"
+        "Add: challenges.drawdown_type (ENUM('static','trailing') NOT NULL DEFAULT 'static') -- FundedControl's Current Drawdown was always peak-to-trough (measured from the equity high-water mark), stricter than how Bitfunded actually judges Maximum Loss for this account: its own dashboard reports 264.82 used of a 1,000 allowance, exactly 10,000 - 9,735.17 (starting_balance - current_balance), not a peak-relative figure. 'static' (the default) measures from starting_balance; 'trailing' preserves the old peak-to-trough behavior for a firm whose rule genuinely is a high-water mark. Challenge 6 explicitly set to static",
+        "Fix: StatsController::getStats()'s current_drawdown_pct now branches on drawdown_type -- 'trailing' keeps the exact pre-v3.14.7 peak-to-trough calculation; 'static' uses the account's distance below starting_balance. Discovered while building this that 'static' was already the codebase's unspoken default everywhere except the one place it was actually labeled 'Current Drawdown': AlertController's MAX DRAWDOWN REACHED threshold and ReviewEngineController::ruleDrawdownProximity() were both already independently computing the same static formula, and StatsController's own sidebar dd_pct widget was already static too -- three near-identical inline copies, one of which disagreed with its neighbor (current_drawdown_pct) under a near-identical name. Unified into one shared helpers.php::staticDrawdownPct($challenge)",
+        "Change: max_drawdown_pct ('Max Drawdown') is unaffected by drawdown_type and always stays the peak-to-trough historical-worst figure -- genuinely useful context regardless of which rule the account is judged by. Relabeled in the Statistics page as 'Max Drawdown (historical worst)' so it reads as context, not as the live enforced number; Current Drawdown's active type (static/trailing) is now shown alongside it",
+        "Note (deliberate scope boundary, not an oversight): AlertController and ReviewEngineController::ruleDrawdownProximity() still always use static drawdown regardless of a challenge's drawdown_type -- trailing requires walking the full ordered trade history with peak-tracking, which only StatsController currently does cheaply (for the Drawdown Curve chart). Every challenge is static today so nothing currently diverges, but a challenge set to trailing would see its risk alert and Review Engine insight disagree with the Stats page display -- documented in CLAUDE.md v3.14.7 rather than silently left unexplained",
+        "Add: drawdown_type exposed in the challenge add/edit form and ChallengeController::add()/update(), defaulting to 'static' for new challenges -- not just settable via migration"
     ],
     "files": [
-        {"path": "includes/controllers/BitfundedImportController.php", "critical": false}
+        {"path": "migrations/2026_09_18_0003_add_challenges_drawdown_type.sql", "critical": false},
+        {"path": "includes/helpers.php", "critical": false},
+        {"path": "includes/controllers/AlertController.php", "critical": false},
+        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
+        {"path": "includes/controllers/ChallengeController.php", "critical": false},
+        {"path": "modals/challenge-modal.php", "critical": false},
+        {"path": "js/challenges.js", "critical": false},
+        {"path": "js/stats.js", "critical": false},
+        {"path": "pages/stats.php", "critical": false}
     ],
     "db_migrations": []
 }

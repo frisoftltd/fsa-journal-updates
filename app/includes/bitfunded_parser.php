@@ -1,6 +1,6 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Parser (v3.14.1)
+ * FundedControl — Bitfunded Paste Parser (v3.14.2)
  * Pure parsing: no DB access, no side effects. Used by BitfundedImportController and by
  * the self-test at the bottom of this file (run standalone: `php bitfunded_parser.php`).
  *
@@ -48,15 +48,32 @@ function bf_parse_datetime(string $raw, int $lineNo, string $field): string {
     return date('Y-m-d H:i:s', $ts);
 }
 
+/**
+ * Normalizes a line before any exact-text comparison (label matching, Long/Short,
+ * "Close All", margin mode). A browser copy of a styled card routinely carries non-breaking
+ * spaces (U+00A0), zero-width spaces (U+200B), and a BOM/zero-width-no-break-space
+ * (U+FEFF) in place of, or alongside, plain spaces — PHP's trim() does not strip any of
+ * these, so a label like "Realized PnL%" with a trailing NBSP survives trim() as
+ * "realized pnl% " (note the trailing space) and silently fails exact match against the
+ * known-label set, misclassifying it as the exit reason instead of a discarded label.
+ * Collapsing all of these to a single plain space before trimming makes exact-text
+ * comparisons resilient to that class of invisible-character artifact.
+ */
+function bf_clean_line(string $l): string {
+    $l = preg_replace('/[\x{00A0}\x{200B}\x{FEFF}]/u', ' ', $l) ?? $l;
+    $l = preg_replace('/\s+/u', ' ', $l) ?? $l;
+    return trim($l);
+}
+
 function bf_split_line(string $line): array {
     // Tab-separated is the expected shape (browsers convert an HTML table's cells to
     // tabs on copy). If a line has no tabs at all but has runs of 2+ spaces, fall back
     // to that — some paste paths collapse tabs to spaces — but never fall back further
     // than that; a line that fits neither shape is a parse failure, not a guess.
     if (strpos($line, "\t") !== false) {
-        return array_map('trim', explode("\t", $line));
+        return array_map('bf_clean_line', explode("\t", $line));
     }
-    return array_values(array_filter(array_map('trim', preg_split('/ {2,}/', $line))));
+    return array_values(array_filter(array_map('bf_clean_line', preg_split('/ {2,}/', $line))));
 }
 
 /**
@@ -97,8 +114,9 @@ function parsePositionHistory(string $raw): array {
     $rawLines = preg_split('/\r\n|\r|\n/', $raw);
     $lines = [];
     foreach ($rawLines as $i => $l) {
-        if (trim($l) === '') continue;
-        $lines[] = ['n' => $i + 1, 'text' => trim($l)];
+        $clean = bf_clean_line($l);
+        if ($clean === '') continue;
+        $lines[] = ['n' => $i + 1, 'text' => $clean];
     }
     if (empty($lines)) {
         throw new BitfundedParseException('Position History paste is empty. Copy each position\'s card from Bitfunded → Trader Hub → Position History and paste them in Box 1.');
@@ -402,6 +420,59 @@ TXT;
     } catch (BitfundedParseException $e) {
         $fail++;
         fwrite(STDERR, "FAIL: real two-position paste threw: " . $e->getMessage() . "\n");
+    }
+
+    // Regression (v3.14.2): "Realized PnL%" must be recognized as a discarded label, not
+    // fall through to the exit-reason leftover slot -- it did on a real paste because
+    // trim() doesn't strip a trailing non-breaking space a browser copy can carry, and
+    // separately must never prefix-collide with "Realized PnL" (which would silently put
+    // the percentage in the pnl column). Order is swapped from the main sample (PnL% before
+    // PnL) specifically to catch a prefix-matching bug in either direction.
+    $pnlPercentOrderSwapped = <<<'TXT'
+BNBUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Stop Loss
+Opening Time
+2026-09-14 06:08:19
+Average price
+723.41 USDT
+Realized PnL%
+-10.10%
+Realized PnL
+-98.68USDT
+Liquidation Qty
+6.75 BNB
+Liquidate Date
+2026-09-15 20:49:24
+Exit Price
+708.79USDT
+Fee
+-3.86690000 USDT
+TXT;
+    try {
+        $rows = parsePositionHistory($pnlPercentOrderSwapped);
+        $check('PnL%-before-PnL row count', count($rows), 1);
+        $check('PnL%-before-PnL pnl is -98.68, not -10.10', $rows[0]['pnl'] ?? null, -98.68);
+        $check('PnL%-before-PnL exit_reason', $rows[0]['exit_reason'] ?? null, 'Stop Loss');
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: block with Realized PnL% before Realized PnL threw: " . $e->getMessage() . "\n");
+    }
+
+    // Regression (v3.14.2): a trailing non-breaking space (U+00A0) on a label line --
+    // exactly what defeated exact-match against "Realized PnL%" on a real paste -- must
+    // not stop it from being recognized and discarded.
+    $nbspLabel = str_replace('Realized PnL%', "Realized PnL%\u{00A0}", $pnlPercentOrderSwapped);
+    try {
+        $rows = parsePositionHistory($nbspLabel);
+        $check('NBSP-suffixed label row count', count($rows), 1);
+        $check('NBSP-suffixed label pnl', $rows[0]['pnl'] ?? null, -98.68);
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: block with a non-breaking space on the Realized PnL% line threw: " . $e->getMessage() . "\n");
     }
 
     // Edge case: "Close All" is a live-action button, not always present -- a block

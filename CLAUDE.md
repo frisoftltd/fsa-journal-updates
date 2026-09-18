@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.1 |
+| Current Version | v3.14.2 |
 
 ### Tech Stack
 
@@ -1404,9 +1404,40 @@ Altcoin trades has a stop-loss on file, so this release does not retro-derive an
 them** — the formula only takes effect going forward, the next time a trade is created with
 a real stop and later matched by an import.
 
----
+### v3.14.2: A Trailing Non-Breaking Space Defeated Exact Label Matching
 
-## 3A. DATABASE MIGRATIONS (added v3.7.0)
+A real paste of challenge 6's Position History failed with "more than one unrecognized
+line" naming the exit-reason line and the `Realized PnL%` line together — meaning
+`Realized PnL%` wasn't being recognized as a known (discard) label at all, even though it
+was in `parsePositionHistory()`'s label map from the start.
+
+**Cause: PHP's `trim()` does not strip a non-breaking space (U+00A0).** A browser copy of a
+styled card can carry one in place of, or alongside, an ordinary space — trailing
+`Realized PnL%` with an NBSP survives `trim()` and lowercasing as `"realized pnl% "` (note
+the trailing space), which no longer equals the `'realized pnl%'` key in the label map, so
+the line fell through to "unrecognized" and collided with the genuine exit-reason line,
+tripping the ambiguous-leftover guard. This is exactly the class of invisible-character
+artifact the exact-match label design (added in v3.14.1 specifically to avoid a
+prefix-matching accident) had no defense against, since it assumed `trim()` fully
+normalized whitespace.
+
+**Fix:** `bf_clean_line()` (`includes/bitfunded_parser.php`) collapses non-breaking space
+(U+00A0), zero-width space (U+200B), and BOM/zero-width-no-break-space (U+FEFF) to a plain
+space, then collapses any run of whitespace to one space and trims — applied to every line
+of Position History as it's read, and to every cell of Transaction History via
+`bf_split_line()` (which routes through the same function), since the same artifact class
+could in principle hit Box 2 too. This is a normalization fix, not a matching-strategy
+change: label lookup is still a single exact-string hashmap lookup — `array_key_exists()`
+against `$LABELS` — never a prefix or substring check, so a label appearing as a prefix of
+another (`Realized PnL` / `Realized PnL%`) still cannot cross-match regardless of which one
+is scanned first; the self-test added below exercises exactly that by parsing a block with
+the two lines in swapped order and asserting `pnl` lands on `-98.68`, never `-10.10`.
+
+**Self-test additions:** a block with `Realized PnL%` placed *before* `Realized PnL`
+(catching a prefix bug in either direction), and a second block built from the first by
+appending a literal U+00A0 to the `Realized PnL%` line (reproducing the exact live
+failure). Both assert the row still parses to a single result with `pnl = -98.68`, never
+`-10.10`.
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
 database except an inline `db_migrations` array in `version.json` (documented below in §16,

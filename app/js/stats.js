@@ -49,4 +49,5 @@ async function loadStats(){
     }
     tbodyFn('s-pair-tbody',(s.by_pair||[]).map(r=>`<tr><td style="font-weight:600">${r.pair}</td><td>${r.trades}</td><td>${r.trades>0?fmtPct(r.wins/r.trades*100):'0%'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
     tbodyFn('s-dir-tbody',(s.by_direction||[]).map(r=>`<tr><td>${r.direction==='Long'?'<span class="badge badge-long">Long</span>':'<span class="badge badge-short">Short</span>'}</td><td>${r.trades}</td><td>${r.trades>0?fmtPct(r.wins/r.trades*100):'0%'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
+    tbodyFn('s-exit-reason-tbody',(s.by_exit_reason||[]).map(r=>`<tr><td>${r.exit_reason}</td><td>${r.trades}</td><td style="color:${r.avg_r!==null&&parseFloat(r.avg_r)>=0?'var(--green)':'var(--red)'}">${r.avg_r!==null?fmtR(r.avg_r):'—'}</td><td style="color:${r.total_r!==null&&parseFloat(r.total_r)>=0?'var(--green)':'var(--red)'}">${r.total_r!==null?fmtR(r.total_r):'—'}</td><td class="${pnlCls(r.pnl)}">${fmt(r.pnl)}</td></tr>`).join(''));
 }

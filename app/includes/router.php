@@ -36,6 +36,9 @@ $routes = [
     'delete_pair'           => ['PairController', 'delete'],
     // Import
     'import_trades'         => ['ImportController', 'import'],
+    // Bitfunded paste importer (v3.14.0)
+    'preview_bitfunded_import' => ['BitfundedImportController', 'preview'],
+    'confirm_bitfunded_import' => ['BitfundedImportController', 'confirm'],
     // Strategy
     'get_strategy_trades'   => ['StrategyController', 'getAll'],
     'get_strategy_stats'    => ['StrategyController', 'getStats'],

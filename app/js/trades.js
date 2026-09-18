@@ -122,6 +122,7 @@ function viewTrade(id) {
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Session</div><div>${t.session||'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exec Score</div><div style="font-family:var(--font-head);font-size:16px;color:var(--gold)">${t.exec_score?t.exec_score+'/10':'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Emotion</div><div>${t.emotion_tag?emotionLabel(t.emotion_tag):(t.trade_journal?.find(j=>j.phase==='pre_entry')?.emotion_code?emotionLabel(t.trade_journal.find(j=>j.phase==='pre_entry').emotion_code):'—')}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exit Reason</div><div style="font-size:13px">${t.exit_reason||'—'}</div></div>
                 </div>
                 <div style="margin-top:12px;display:flex;gap:8px">
                     <button class="btn btn-ghost" style="flex:1" onclick="document.getElementById('view-trade-modal').classList.remove('open')">Close</button>
@@ -259,11 +260,10 @@ function openTradeModal(data=null) {
     document.getElementById('strategy-vars-fields').innerHTML='';
     populateStrategySelect(data);
     initJournalSections(data);
+    renderExecutionSummary(data);
     if(data){
-        const fields=['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes'];
+        const fields=['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes'];
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
-        if(data.time_in) { const d=data.time_in.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_in_date').value=parts[0]; document.getElementById('f-time_in_time').value=parts[1]?.substring(0,5)||''; }
-        if(data.time_out) { const d=data.time_out.replace(' ','T'); const parts=d.split('T'); document.getElementById('f-time_out_date').value=parts[0]; document.getElementById('f-time_out_time').value=parts[1]?.substring(0,5)||''; }
         selectGrade(data.setup_grade||null);
         // Show existing screenshots
         const images = data.screenshots_data || [];
@@ -280,11 +280,33 @@ function openTradeModal(data=null) {
     } else {
         const today=new Date().toISOString().split('T')[0];
         document.getElementById('f-trade_date').value=today;
-        document.getElementById('f-time_in_date').value=today;
-        document.getElementById('f-time_out_date').value=today;
         selectGrade(null);
     }
     document.getElementById('trade-modal').classList.add('open');
+}
+
+// v3.14.0 — execution fields (time_in/time_out/entry/exit/lot/fees/pnl/net_pnl/
+// result/exit_reason) are written exclusively by the Bitfunded importer now, never by
+// this form. Shown read-only once populated; hidden entirely for a trade that's still
+// pre-entry-only, which is the normal state for a brand-new trade going forward.
+function renderExecutionSummary(data){
+    const wrap = document.getElementById('execution-summary');
+    if (!data || !data.time_in) { wrap.style.display = 'none'; return; }
+    const grid = document.getElementById('execution-summary-grid');
+    const field = (label, val) => `<div style="background:var(--bg3);padding:8px;border-radius:6px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:2px">${label}</div><div style="font-family:var(--font-head);font-size:12px">${val ?? '—'}</div></div>`;
+    grid.innerHTML = [
+        field('Time In', data.time_in),
+        field('Time Out', data.time_out),
+        field('Entry', data.entry_price ? parseFloat(data.entry_price).toFixed(4) : '—'),
+        field('Exit', data.exit_price ? parseFloat(data.exit_price).toFixed(4) : '—'),
+        field('Lot Size', data.lot_size ?? '—'),
+        field('Fees', data.fees != null ? fmt(data.fees) : '—'),
+        field('PnL', data.pnl != null ? fmt(data.pnl) : '—'),
+        field('Net PnL', data.net_pnl != null ? fmt(data.net_pnl) : '—'),
+        field('Exit Reason', data.exit_reason || '—'),
+        field('Source', data.source || 'manual'),
+    ].join('');
+    wrap.style.display = 'block';
 }
 
 // ── TRADE JOURNAL SECTIONS (collapse/reveal) ─────────────
@@ -628,31 +650,12 @@ async function saveTrade() {
     const id=document.getElementById('trade-id').value;
     const form=document.getElementById('trade-form');
 
-    // ── P&L vs Result validation ──
-    const result = document.getElementById('f-result')?.value || '';
-    const entry = parseFloat(document.getElementById('f-entry_price')?.value || 0);
-    const exit_p = parseFloat(document.getElementById('f-exit_price')?.value || 0);
-    const direction = document.getElementById('f-direction')?.value || 'Long';
-    const lot = parseFloat(document.getElementById('f-lot_size')?.value || 0);
-    const fees = parseFloat(document.getElementById('f-fees')?.value || 0);
-
-    if (result && entry && exit_p && lot) {
-        const rawPnl = direction === 'Long' ? (exit_p - entry) * lot : (entry - exit_p) * lot;
-        const netPnl = rawPnl - fees;
-
-        if (result === 'Loss' && netPnl > 0) {
-            toast('Result is "Loss" but P&L is positive ($' + netPnl.toFixed(2) + '). Check your prices or result.', 'error');
-            return;
-        }
-        if (result === 'Win' && netPnl < 0) {
-            toast('Result is "Win" but P&L is negative (-$' + Math.abs(netPnl).toFixed(2) + '). Check your prices or result.', 'error');
-            return;
-        }
-        if (result === 'Break Even' && netPnl < 0) {
-            toast('Result is "Break Even" but P&L is negative (-$' + Math.abs(netPnl).toFixed(2) + '). Check your prices.', 'error');
-            return;
-        }
-    }
+    // v3.14.0: the P&L-vs-result cross-check that used to live here compared hand-typed
+    // entry/exit/lot/fees against the chosen result — those fields no longer exist on
+    // this form (execution is import-only now), so there's nothing left to cross-check
+    // at save time. Any such mismatch would now show up in the Bitfunded importer's
+    // preview/reconciliation step instead, against real broker data rather than
+    // hand-typed prices.
 
     // ── File size validation (1MB per image) ──
     for (let i = 1; i <= 4; i++) {
@@ -672,17 +675,10 @@ async function saveTrade() {
         if (inp && inp.files.length > 0) { hasFiles = true; break; }
     }
 
-    const tin_d=document.getElementById('f-time_in_date').value;
-    const tin_t=document.getElementById('f-time_in_time').value;
-    const tout_d=document.getElementById('f-time_out_date').value;
-    const tout_t=document.getElementById('f-time_out_time').value;
-
     let r;
     if (hasFiles) {
         // Use FormData for file uploads
         const fd = new FormData(form);
-        if(tin_d&&tin_t) fd.set('time_in',tin_d+' '+tin_t+':00');
-        if(tout_d&&tout_t) fd.set('time_out',tout_d+' '+tout_t+':00');
         if(id) fd.set('id',id);
         if (id) {
             const t = allTrades.find(t => t.id == id);
@@ -698,9 +694,7 @@ async function saveTrade() {
         // three-phase trade_journal below replaced them on the form (the columns still
         // exist for historical trades, just nothing writes to them anymore).
         const data = {};
-        ['trade_date','session','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','fees','result','exec_score','notes','strategy_id','setup_grade'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
-        data.time_in=tin_d&&tin_t?tin_d+' '+tin_t+':00':null;
-        data.time_out=tout_d&&tout_t?tout_d+' '+tout_t+':00':null;
+        ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','setup_grade'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
         data.trade_variables = collectTradeVariables();
         data.trade_journal = collectTradeJournal();
         if(id) {

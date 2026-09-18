@@ -44,6 +44,7 @@ $u = currentUser();
     <a href="#" data-page="trades" onclick="showPage('trades');return false;"><span class="icon">📋</span>Trade Log</a>
     <a href="#" data-page="stats" onclick="showPage('stats');return false;"><span class="icon">📈</span>Statistics</a>
     <div class="nav-section">Tools</div>
+    <a href="#" data-page="bfimport" onclick="showPage('bfimport');return false;"><span class="icon">📥</span>Import</a>
     <a href="#" data-page="calculator" onclick="showPage('calculator');return false;"><span class="icon">🧮</span>Risk Calculator</a>
     <a href="#" data-page="strategy" onclick="showPage('strategy');return false;"><span class="icon">🧪</span>Strategy Tester</a>
     <a href="#" data-page="strategies" onclick="showPage('strategies');return false;"><span class="icon">🧩</span>Strategies</a>
@@ -95,7 +96,7 @@ $u = currentUser();
 
   <?php
   // ── Load each page from its own file ──
-  $pages = ['dashboard','trades','stats','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
+  $pages = ['dashboard','trades','stats','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
   foreach ($pages as $p) {
       include "pages/{$p}.php";
   }
@@ -127,18 +128,6 @@ function filterTrades(q) {
     renderTradesTable(f);
 }
 function clearCalcResult(){document.getElementById('calc-results').style.display='none';}
-function fillTradeFromCalc(){
-    const lot=document.getElementById('res-lot').textContent;
-    const entry=document.getElementById('calc-entry').value;
-    const sl=document.getElementById('calc-sl').value;
-    const tp=document.getElementById('calc-tp').value;
-    document.getElementById('f-entry_price').value=entry;
-    document.getElementById('f-stop_loss').value=sl;
-    document.getElementById('f-take_profit').value=tp;
-    document.getElementById('f-lot_size').value=lot;
-    showPage('trades');
-    setTimeout(()=>openTradeModal(),100);
-}
 document.querySelectorAll('.modal-overlay').forEach(el=>{
     el.addEventListener('click',e=>{if(e.target===el)el.classList.remove('open');});
 });
@@ -157,5 +146,6 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 <script src="js/profile.js"></script>
 <script src="js/challenges.js"></script>
 <script src="js/import.js"></script>
+<script src="js/bfimport.js"></script>
 </body>
 </html>

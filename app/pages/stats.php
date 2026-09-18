@@ -67,4 +67,14 @@
     <table><thead><tr><th>Direction</th><th>Trades</th><th>Win%</th><th>Net P&amp;L</th></tr></thead>
     <tbody id="s-dir-tbody"></tbody></table>
   </div>
+  <div class="card">
+    <!-- v3.14.0: exit_reason comes from Bitfunded's own Position History label (Stop
+         Loss / Manual Closing / etc.), populated by the Bitfunded importer, never
+         hand-typed. Avg R / Total R are blank for a reason bucket with no r_multiple
+         recorded on any of its trades, not zero — a missing R is not the same claim as
+         a recorded zero. -->
+    <div class="card-title">By Exit Reason</div>
+    <table><thead><tr><th>Exit Reason</th><th>Trades</th><th>Avg R</th><th>Total R</th><th>Net P&amp;L</th></tr></thead>
+    <tbody id="s-exit-reason-tbody"></tbody></table>
+  </div>
 </div>

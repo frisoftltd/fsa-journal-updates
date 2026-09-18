@@ -1,14 +1,31 @@
 {
-    "current_version": "3.13.4",
-    "release_date": "2026-09-17",
+    "current_version": "3.14.0",
+    "release_date": "2026-09-18",
     "changelog": [
-        "Fix: 0005's data work already succeeded on live (trade 80 at 06:08:19, fee 3.8669, SUM(fees) exactly 138.1159), but the file's pre-flight guard blocked its own result on retry -- it asserted trade 80 was still at its pre-fix timestamp (06:08:00), which the successful run had already corrected. Narrowed the guard to an identity check (trade 80 is still BNBUSDT/Long under challenge 6), dropping the timestamp condition -- the fix statement itself has no time_in condition and is already safe to re-run either way",
-        "Process: this is the fourth guard in this release chain to encode 'hasn't been fixed yet' instead of 'is in a state safe to proceed from,' and the fourth time it blocked a legitimate retry. Documented as a general rule in CLAUDE.md: a pre-flight guard in a retryable migration must accept every state the file can legitimately leave things in, not just the pre-fix state",
-        "Fix: SUM(net_pnl) is -258.1909, not the -258.1959 the post-flight guard asserted. Real precision, not an error -- trade 80's pnl is stored at 4-decimal precision (-98.6850, from TradeController's round($pnl,4) on manual entry), not the 2-decimal -98.68 the fees CSV displays, so net_pnl = pnl - 3.8669 correctly evaluates to -102.5519. Same class of gap as the -120.07/-120.08 difference in v3.13.2, resolved the same way: trust the stored column, correct the guard. Derived balance is now 9735.1722 (0.0050 off Bitfunded's reported 9735.1772, a smaller residual than v3.13.2's estimate) -- documented, not forced to match",
-        "No other changes -- 0004 and 0006 untouched. 0006's own guard (checking for orphaned trades.challenge_id) was already a proper precondition check, not a 'hasn't run yet' check, and needed no fix -- it was only ever blocked by 0005 sorting first in filename order"
+        "Add: Bitfunded paste importer — new Import page under Tools. Paste Bitfunded's Position History (required) and Transaction History (optional, for funding) directly; Preview parses, matches against existing trades, and shows a reconciliation check without writing anything; Confirm applies in one transaction, all-or-nothing. Replaces hand-transcription — thirteen migration files and nine deploy cycles were spent importing one account's history by hand, and all four silent defects found along the way (wrong trade_date, a trade stuck Open, a duplicated row, a timestamp off by nineteen seconds) were in the 17 rows that were typed manually, none in the 41 from broker data",
+        "Add: matching rule is pair + direction + entry_price + pnl exactly, with time_in within +/-10 minutes. A +/-5 minute (pair, direction)-only window (the original v3.12.1 spec) produced a confirmed false positive on live data (two genuine BTCUSDT re-entries 4.5 minutes apart) -- entry_price and pnl are the actual duplicate signature, not optional narrowing. Three outcomes: new (insert, source='import', all strategy/psychology fields NULL), matched (execution fields only -- trade_variables, emotion_tag, setup_grade, notes, stop_loss, take_profit, strategy_id, screenshots and id are never touched), needs attention (ambiguous or a near-match on one field -- shown, never guessed, never written)",
+        "Add: Position History's own Fee column is the source for trades.fees, verified against the transaction log before this importer was built (BNB/ZEC/LIT/TRX each match opening+closing fee exactly) -- fees are not reconstructed from the transaction log. Transaction History is used only for summed Funding Fee rows (-> challenges.funding_adjustment) and the most recent Balance (for reconciliation); Order History and Transaction Details are different tabs and are structurally rejected, not silently accepted",
+        "Add: reconciliation check (derived balance vs Bitfunded's own reported balance, flagged over $1) shown in Preview before any write -- this is what would have caught the v3.13.0 $626 starting_balance error on the day it happened instead of five weeks later",
+        "Fix: TradeController::saveTrade() unconditionally overwrote every execution column (time_in, entry_price, pnl, r_multiple, etc.) on every save, including edits that only touched strategy/grade/notes -- found while building the importer, not a reported live incident, but the same silent-clobber shape as the four historical defects. Execution columns removed from saveTrade() entirely (they're now written exclusively by the importer), so a pre-entry-field edit can never disturb execution data an import already landed on a row",
+        "Change: trade-modal.php's manual entry no longer has inputs for date/time in, date/time out, entry price, exit price, lot size, or fees -- removed entirely, not just hidden. Stop loss and take profit moved up into the Pre-Entry Journal section (intent, not outcome). A read-only Execution summary block displays time_in/time_out/entry/exit/lot_size/fees/pnl/net_pnl/exit_reason/source once an import has populated them. The trade form is now routinely saveable with no execution data at all",
+        "Add: trades.exit_reason (varchar(40), Bitfunded's own Position History label stored verbatim, not mapped to an enum) and a Statistics 'By Exit Reason' breakdown (count, avg R, total R, net P&L) -- this account's realised payoff (1.49) against the FSA rule's stated 1:3 minimum is otherwise invisible as 'targets too close' vs 'closed early'; the Stop Loss / Manual Closing / target-hit split starts to answer which",
+        "Cleanup: removed daily_limits write from TradeController::saveTrade() (depended on a variable that no longer exists post-fix; a full-codebase grep confirmed daily_limits was never read anywhere, only ever written there) and fillTradeFromCalc() in index.php (already an orphaned, uncalled function referencing both deleted form fields and calculator element IDs that didn't match the current calculator page either)"
     ],
     "files": [
-        {"path": "migrations/2026_09_17_0005_bitfunded_altcoin_fees_and_baseline.sql", "critical": false}
+        {"path": "migrations/2026_09_18_0001_add_trades_exit_reason.sql", "critical": false},
+        {"path": "includes/bitfunded_parser.php", "critical": false},
+        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
+        {"path": "includes/controllers/TradeController.php", "critical": false},
+        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "index.php", "critical": false},
+        {"path": "pages/bfimport.php", "critical": false},
+        {"path": "pages/stats.php", "critical": false},
+        {"path": "modals/trade-modal.php", "critical": false},
+        {"path": "js/bfimport.js", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "js/trades.js", "critical": false},
+        {"path": "js/stats.js", "critical": false}
     ],
     "db_migrations": []
 }

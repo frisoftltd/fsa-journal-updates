@@ -18,25 +18,28 @@
           </select>
         </div>
         <div class="form-group full" id="strategy-vars-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
-        <div class="section-divider"></div>
-        <div class="section-label">Time In</div>
-        <div class="form-group"><label>Date In</label><input type="date" id="f-time_in_date" name="time_in_date"></div>
-        <div class="form-group"><label>Time In</label><input type="time" id="f-time_in_time" name="time_in_time"></div>
-        <div class="form-group"><label>Date Out</label><input type="date" id="f-time_out_date" name="time_out_date"></div>
-        <div class="form-group"><label>Time Out</label><input type="time" id="f-time_out_time" name="time_out_time"></div>
         <div class="form-group"><label>Direction</label><select id="f-direction" name="direction"><option>Long</option><option>Short</option></select></div>
-        <div class="section-divider"></div>
-        <div class="section-label">Prices</div>
-        <div class="form-group"><label>Entry Price</label><input type="number" step="0.0001" id="f-entry_price" name="entry_price"></div>
-        <div class="form-group"><label>Stop Loss</label><input type="number" step="0.0001" id="f-stop_loss" name="stop_loss"></div>
-        <div class="form-group"><label>Take Profit</label><input type="number" step="0.0001" id="f-take_profit" name="take_profit"></div>
-        <div class="form-group"><label>Exit Price</label><input type="number" step="0.0001" id="f-exit_price" name="exit_price"></div>
-        <div class="form-group"><label>Lot Size</label><input type="number" step="0.0001" id="f-lot_size" name="lot_size"></div>
-        <div class="form-group"><label>Fees ($)</label><input type="number" step="0.01" id="f-fees" name="fees" value="0"></div>
+        <!-- v3.14.0: date in, time in, date out, time out, entry price, exit price, lot
+             size and fees are gone from manual entry — execution never belongs in this
+             form again, it's written exclusively by the Bitfunded importer once a
+             position closes (see CLAUDE.md v3.14.0's division-of-responsibility table).
+             Stop loss and take profit are intent, not outcome, so they stay here — moved
+             up next to Pre-Entry Journal below, since that's the moment they're actually
+             knowable. A brand-new trade is now routinely saved with none of the fields
+             this section used to require. -->
         <div class="section-divider"></div>
         <div class="section-label">Outcome</div>
         <div class="form-group"><label>Result</label><select id="f-result" name="result"><option value="">—</option><option>Win</option><option>Loss</option><option>Break Even</option><option>Open</option></select></div>
         <div class="form-group"><label>Exec Score (1-10)</label><input type="number" min="1" max="10" id="f-exec_score" name="exec_score"></div>
+        <!-- Execution — read only, populated once the Bitfunded importer has matched this
+             trade to a closed position. Hidden entirely until then (see
+             renderExecutionSummary() in trades.js): a pre-entry-only trade has nothing to
+             show here yet, and that absence is itself the normal case now, not a gap to
+             explain away. -->
+        <div class="form-group full" id="execution-summary" style="display:none">
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Execution (from Bitfunded — read only)</div>
+          <div id="execution-summary-grid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px"></div>
+        </div>
         <!-- ═══ THREE-PHASE TRADE JOURNAL (v3.11.0) ═══
              Replaces the old single "Strategy & Psychology" section and its three
              justification-prompt textareas (note_saw/note_why/note_unsure), which asked
@@ -66,6 +69,14 @@
           <span id="journal-chevron-pre_entry" style="font-size:11px">▸</span>
         </div>
         <div class="form-group full" id="journal-body-pre_entry" style="display:none">
+          <!-- v3.14.0: stop loss / take profit moved here from the old "Prices" section —
+               intent, not outcome (the broker never records either), so they belong with
+               the rest of what's knowable before entry, not next to execution data that
+               no longer lives in this form at all. -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+            <div class="form-group"><label>Stop Loss</label><input type="number" step="0.0001" id="f-stop_loss" name="stop_loss"></div>
+            <div class="form-group"><label>Take Profit</label><input type="number" step="0.0001" id="f-take_profit" name="take_profit"></div>
+          </div>
           <label style="display:block">Setup Quality (grade the SETUP, not the outcome)</label>
           <div id="grade-grid" style="display:flex;gap:6px;margin-top:4px">
             <button type="button" class="btn btn-ghost btn-sm grade-pill" data-value="A" onclick="selectGrade('A')">A</button>

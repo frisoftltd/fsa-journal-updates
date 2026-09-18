@@ -85,41 +85,27 @@ class TradeController {
     public function add()    { $this->saveTrade(false); }
     public function update() { $this->saveTrade(true); }
 
+    /**
+     * v3.14.0 — execution fields (time_in, time_out, entry_price, exit_price, lot_size,
+     * fees, pnl, net_pnl, r_multiple, risk_amount) are no longer part of this method at
+     * all. They're populated exclusively by BitfundedImportController, which writes them
+     * directly via its own INSERT/UPDATE scoped to exactly those columns. This form only
+     * ever handles pre-entry fields (see CLAUDE.md v3.14.0's division-of-responsibility
+     * table) — critically, that means editing a trade's strategy/gates/grade/notes can
+     * never disturb execution data an import already landed on the row, because this
+     * UPDATE's SET clause simply doesn't mention those columns anymore. Before this
+     * change it did (unconditionally, every save), which would have silently zeroed out
+     * an imported trade's prices/times/pnl/r_multiple the moment anyone edited its
+     * pre-entry fields after import — caught while building the importer, not reported
+     * as a live incident, but the same class of silent-clobber bug this whole release
+     * exists to stop happening to execution data.
+     */
     private function saveTrade($isUpdate) {
         $ch = getActiveChallenge();
         $chId = $ch['id'] ?? null;
 
         $isForm = !empty($_FILES) || !empty($_POST);
         $d = $isForm ? $_POST : jsonInput();
-
-        $entry_price = num($d['entry_price'] ?? null, null);
-        $stop_loss   = num($d['stop_loss'] ?? null, null);
-        $exit_price  = num($d['exit_price'] ?? null, null);
-        $lot_size    = num($d['lot_size'] ?? null, null);
-        $fees        = num($d['fees'] ?? 0);
-
-        // Calculate P&L
-        $pnl = 0;
-        if ($exit_price && $entry_price && $lot_size) {
-            $pnl = ($d['direction'] ?? '') === 'Long'
-                ? ($exit_price - $entry_price) * $lot_size
-                : ($entry_price - $exit_price) * $lot_size;
-        }
-        $net = $pnl - $fees;
-
-        // Calculate R-multiple
-        $r = 0;
-        if ($entry_price && $stop_loss && $entry_price != $stop_loss) {
-            $sld = abs($entry_price - $stop_loss);
-            if (($d['result'] ?? '') === 'Loss') $r = -1;
-            elseif (($d['result'] ?? '') === 'Break Even') $r = 0;
-            elseif ($exit_price) {
-                $r = ($d['direction'] ?? '') === 'Long'
-                    ? ($exit_price - $entry_price) / $sld
-                    : ($entry_price - $exit_price) / $sld;
-                $r = round($r, 2);
-            }
-        }
 
         // Handle multiple screenshots (up to 4, max 1MB each)
         $screenshotsJson = null;
@@ -140,28 +126,25 @@ class TradeController {
             }
         }
 
-        $cols = ['trade_date','session','time_in','time_out','pair','direction','entry_price','stop_loss','take_profit','exit_price','lot_size','risk_amount','fees','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
+        $cols = ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
 
         if ($isUpdate) {
             $trade_id = validId($d['id'] ?? 0);
             if (!$trade_id) jsonError('Invalid trade ID');
             $update_vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
-            $update_vals[] = round($pnl, 4);
-            $update_vals[] = round($net, 4);
-            $update_vals[] = $r;
             $update_vals[] = $singleScreenshot;
             $update_vals[] = $screenshotsJson;
             $update_vals[] = $trade_id;
             $update_vals[] = $this->uid;
             $sets = implode(',', array_map(fn($c) => "$c=?", $cols));
-            $sets .= ",pnl=?,net_pnl=?,r_multiple=?,screenshot=?,screenshots=?";
+            $sets .= ",screenshot=?,screenshots=?";
             $this->db->prepare("UPDATE trades SET $sets WHERE id=? AND user_id=?")->execute($update_vals);
             $finalTradeId = $trade_id;
         } else {
             $vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
-            $vals = array_merge([$this->uid, $chId], $vals, [round($pnl, 4), round($net, 4), $r, $singleScreenshot, $screenshotsJson]);
-            $ph = implode(',', array_fill(0, count($cols) + 5, '?'));
-            $allcols = implode(',', $cols) . ",pnl,net_pnl,r_multiple,screenshot,screenshots";
+            $vals = array_merge([$this->uid, $chId], $vals, [$singleScreenshot, $screenshotsJson]);
+            $ph = implode(',', array_fill(0, count($cols) + 4, '?'));
+            $allcols = implode(',', $cols) . ",screenshot,screenshots";
             $this->db->prepare("INSERT INTO trades (user_id,challenge_id,$allcols) VALUES (?,?,{$ph})")->execute($vals);
             $finalTradeId = $this->db->lastInsertId();
         }
@@ -182,11 +165,6 @@ class TradeController {
         }
 
         $this->saveJournal($finalTradeId, $d['trade_journal'] ?? null);
-
-        // Update daily limits
-        $dl_date = $d['trade_date'] ?? date('Y-m-d');
-        $this->db->prepare("INSERT INTO daily_limits (user_id,log_date,daily_pnl,trades_count) VALUES (?,?,?,1) ON DUPLICATE KEY UPDATE daily_pnl=daily_pnl+?,trades_count=trades_count+1")
-            ->execute([$this->uid, $dl_date, round($net, 4), round($net, 4)]);
 
         jsonResponse(['success' => true, 'id' => $finalTradeId]);
     }

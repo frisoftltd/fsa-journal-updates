@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.13.4 |
+| Current Version | v3.14.0 |
 
 ### Tech Stack
 
@@ -202,12 +202,20 @@ lot_size, risk_amount, fees, pnl, net_pnl, r_multiple,
 result, confidence, exec_score, fib_level, fsa_rules,
 notes, screenshot, screenshots (JSON, up to 4, added later — screenshot kept for back-compat),
 strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0),
-source, r_multiple_source (added v3.12.0)
+source, r_multiple_source (added v3.12.0),
+exit_reason (added v3.14.0)
 ```
 > `source` is `ENUM('manual','import') NOT NULL DEFAULT 'manual'` — distinguishes hand-logged
 > trades from ones backfilled from a broker's own trade history (see "The Journal Was a
 > Winner-Weighted Subset" below). The default means no code change was needed in
 > `TradeController::saveTrade()` for this to work; it never sets the column.
+>
+> `exit_reason` is `VARCHAR(40) NULL`, populated exclusively by the Bitfunded paste importer
+> (`BitfundedImportController`) from Position History's own exit-reason label (`Stop Loss`,
+> `Manual Closing`, and possibly others Bitfunded hasn't shown yet) — stored verbatim, not
+> mapped to an `ENUM`, since the full set of values isn't known. `TradeController::saveTrade()`
+> never sets it, same reasoning as `source`/`r_multiple_source` above — see "The Bitfunded
+> Paste Importer" below for the full v3.14.0 design.
 >
 > `r_multiple_source` is `ENUM('recorded','estimated') NULL`. `'recorded'` means `r_multiple`
 > came from a real stop-loss distance (or, for imported full stop-out trades, a loss confirmed
@@ -1072,6 +1080,161 @@ not forced to match.
 No other statements in `2026_09_17_0005` changed. `2026_09_17_0006`'s own guard (checking
 for orphaned `trades.challenge_id`, not for "hasn't run yet") was already correctly
 written and needed no change — it was only ever blocked by `0005` sorting first.
+
+### v3.14.0: The Bitfunded Paste Importer — Execution Data Should Never Be Typed
+
+Thirteen migration files and nine deploy cycles (v3.12.0 through v3.13.4) were spent
+importing one account's history by hand, from two CSVs a person transcribed off
+Bitfunded's UI. Four silent data defects were found along the way — trade 59's wrong
+`trade_date`, trade 77 stuck `Open`, the ZEC duplicate, trade 80's timestamp off by
+nineteen seconds — **all four in the 17 rows that were originally typed manually, none
+in the 41 that came from broker data.** The conclusion isn't "be more careful." It's that
+execution data should never be typed at all. v3.14.0 is the general tool that replaces
+hand-transcription with parsing Bitfunded's own tables directly, so this class of defect
+can't recur on the next challenge the way it did on this one.
+
+#### The division of responsibility
+
+The core design decision, and the one every other choice in this release follows from:
+two moments, two sources, no field appears in both lists.
+
+**Before the trade — the trader enters, in the app (`trade-modal.php`):** strategy (picks
+which gate/tag variables render), gate and tag answers (only knowable at analysis time),
+**stop loss** and **take profit** (intent, not outcome — the broker never records either),
+the nine-state emotion grid (must be captured live; retrospective self-report is
+unreliable), setup grade A/B/C (a judgement of the setup, not the result), "what would
+have to happen for me to be wrong?" (pre-commitment).
+
+**After the trade closes — the importer fills, from Bitfunded (`BitfundedImportController`):**
+`time_in`/`time_out`, `entry_price`/`exit_price`, `lot_size` (Position History's
+Liquidation Qty), `pnl` (Realized PnL), `fees` (Position History's own Fee column — see
+"Fee source" below), `exit_reason` (Position History's own label), `net_pnl` (computed:
+`pnl - fees`), `result` (derived from `pnl`'s sign), and `challenges.funding_adjustment`
+(Transaction History → summed `Funding Fee` rows, challenge-level, never per-trade).
+
+**A trade with no pre-entry record is itself data** — an imported position matching no
+existing setup row means the checklist wasn't worked before entering. The importer does
+not hide this: a genuinely new match gets `source='import'` and every strategy/psychology
+field `NULL`, not a guessed value. The 41 historical imports from v3.12.0 are exactly this
+case, and stay exactly this case after this release — the importer doesn't retroactively
+invent pre-entry data for them, because there isn't any to recover.
+
+**Enforced structurally, not just by convention:** `trade-modal.php` no longer has inputs
+for date in/out, time in/out, entry price, exit price, lot size, or fees at all — there is
+no field left for a trader to type an execution value into. `TradeController::saveTrade()`
+was found, while building this, to still unconditionally overwrite every one of those
+columns (plus `pnl`/`net_pnl`/`r_multiple`) on **every save**, including edits that only
+touched strategy/grade/notes on an already-imported trade — meaning the very next
+pre-entry-field edit on any of the 59 Bitfunded Altcoin trades would have silently zeroed
+out its imported prices, times, and P&L. Not a live incident (caught here, not reported by
+the user), but the identical failure shape — a real value overwritten by an absent one,
+no error — as the four defects this release exists to stop. Fixed by removing execution
+columns from `saveTrade()`'s `$cols` entirely: the `UPDATE`'s `SET` clause simply doesn't
+mention `time_in`, `entry_price`, `pnl`, `r_multiple`, etc. anymore, so there is nothing
+left for a pre-entry-only save to clobber. (Incidental cleanup in the same change: the
+`daily_limits` write at the end of `saveTrade()` depended on a `$net` variable that no
+longer exists after this — removed rather than faked, since a grep of the whole codebase
+shows `daily_limits` was never read anywhere, only ever written here. Also removed:
+`fillTradeFromCalc()` in `index.php`, an already-orphaned function — no caller anywhere in
+the app — that referenced both the deleted execution fields and calculator element IDs
+that didn't match the current `calculator.php` either; it was dead before this release and
+is fully dead now.)
+
+#### Matching rule, and why proximity alone is insufficient
+
+`pair` + `direction` + `entry_price` + `pnl` exactly, with `time_in` within **±10 minutes**.
+`entry_price` and `pnl` are not optional narrowing — they're the actual duplicate
+signature. A ±5-minute `(pair, direction)`-only window was tried first (the v3.12.1
+briefing's original spec for the ZEC-duplicate fix) and produced a confirmed false
+positive on live data: `BTCUSDT Long` at `2026-08-20 11:42:45` (+0.74) and `11:47:10`
+(−0.43) are two genuine, independent re-entries, 4.5 minutes apart, both present in
+Bitfunded's own Position History — not a duplicate (see v3.13.1). A true duplicate is one
+execution recorded twice, so it shares its exact `entry_price` and `pnl`, not just a
+symbol and a nearby timestamp; a fast re-entry is two different executions that happen to
+be close together, which is ordinary trading, not an anomaly. `BitfundedImportController::
+matchAll()` requires all four before calling two rows the same trade.
+
+Three outcomes, never a silent guess: **new** (no candidate at all — insert,
+`source='import'`, every strategy/psychology field `NULL`); **matched** (exactly one exact
+candidate — update execution fields only, explicitly never touching `trade_variables`,
+`emotion_tag`, `setup_grade`, the three note columns, `stop_loss`, `take_profit`,
+`strategy_id`, screenshots, or the row's `id`); **needs attention** (more than one exact
+candidate, or a near-match — same pair/direction/time-window, but `entry_price` or `pnl`
+differs — with zero exact candidates). Attention rows are never written by `confirm()`;
+they're reported and skipped, and the reconciliation math (below) excludes them from the
+projected post-import balance rather than guessing which side is right.
+
+**Idempotency, verified by construction, not by a one-off test:** every `INSERT`'s `WHERE
+NOT EXISTS`-equivalent is the matching rule itself — a row already correctly imported now
+matches exactly (`entry_price`/`pnl`/time-window all equal), so a second paste of the same
+Position History table finds it as **matched**, not **new**, and the `UPDATE` sets it to
+the same values it already has. Re-running the same paste can never duplicate a row; it
+converges to a no-op. This is the same property `2026_09_17_0002`'s idempotent `INSERT ...
+WHERE NOT EXISTS` had for the one-off migration, generalized into the ongoing tool.
+
+#### Fee source: Position History, not the transaction log
+
+Position History's own Fee column is the source for `trades.fees` — **not** the
+Transaction History log. This was verified before the importer was built: Position
+History's Fee for each of BNB/ZEC/LIT/TRX exactly equals opening + closing fee for that
+position as recorded in the transaction log (BNB −3.8669, ZEC −1.5698, LIT −0.8382, TRX
+−9.5545). Reconstructing fees from the transaction log — summing individual fee entries
+per position — is unnecessary work solving an already-solved problem, and riskier: funding
+entries in that same log are labelled `USDT` with no symbol, and positions overlap in time
+on several dates, so per-trade attribution there is genuinely impossible for funding and
+would invite exactly that kind of guessing for fees too. Position History's Fee is a
+negative display value (a cost); `trades.fees` is a positive magnitude, so the parser
+takes `abs()` once, at parse time (`bf_parse_num()` + `abs()` in `bitfunded_parser.php`),
+not per call site.
+
+Transaction History (Box 2, optional) is used for exactly two things and nothing else:
+`SUM(Amount)` where `Type = 'Funding Fee'` (negated once at parse time into
+`challenges.funding_adjustment`'s positive-cost-magnitude convention — see v3.13.0 for why
+that column is a positive magnitude subtracted in the balance formula), and the most
+recent `Balance` value, for the §6 reconciliation check. Order History and Transaction
+Details are different tabs with a different column layout and are not read by this
+importer; both parsers reject a wrong-shaped paste structurally (wrong column count, or a
+Direction/Type value that doesn't match the expected set) rather than by recognizing the
+other tabs by name, since their exact layouts aren't known to the app.
+
+#### Reconciliation
+
+`derived_balance = starting_balance + SUM(net_pnl closed, post-import) - funding_adjustment`,
+compared against Bitfunded's own most-recent `Balance` (or a manually entered figure),
+shown in Preview before anything is written. Flagged above $1 — sub-cent residuals are
+expected, not a bug (see v3.13.2/v3.13.4: the journal stores P&L at 4-decimal precision,
+Bitfunded displays 2, and even Bitfunded's own reported balance has carried an
+unexplained half-cent gap against this account's fully-precise derivation). **This check
+is what would have caught the original $626 `starting_balance` error on the day it
+happened, instead of five weeks later** — it's computed the same way `enrichChallenge()`
+computes `current_balance` (v3.13.0), just run against the *projected* post-import state
+before confirming, not the live state after the fact.
+
+#### What this release deliberately does not do
+
+`r_multiple` and `risk_amount` appear in neither side of the division-of-responsibility
+table above, and the importer never touches them — not for new rows (left `NULL`, since
+there's nothing to compute them from without a stop-loss on file) and not for matched rows
+(never included in the `UPDATE`'s `SET` clause, so whatever's already there — including
+the v3.12.0 risk-unit-derived values on the original 59 Bitfunded Altcoin trades — is
+preserved untouched). This means a **future** trade that has a real `stop_loss` recorded
+pre-entry and then gets matched by this importer will **not** automatically get an
+`r_multiple` computed from that stop distance, even though the data to compute it now
+exists. Flagged here deliberately rather than invented silently: this is a real gap, not
+an oversight being hidden, and a reasonable follow-up for a later release if wanted.
+
+#### Statistics: exit_reason breakdown
+
+`StatsController::getStats()` adds `by_exit_reason` (count, avg R, total R, net P&L per
+label), same closed-trades-only convention as every other breakdown on that page.
+Motivation: this account's realised payoff is 1.49 against the FSA rule's stated minimum
+of 1:3. Whether that gap means targets set too close or positions closed early isn't
+visible in payoff alone — the ratio of `Stop Loss` to `Manual Closing` to target-hit exits
+in this breakdown is what starts to answer which. `AVG`/`SUM(r_multiple)` return `NULL`
+for a reason bucket with no `r_multiple` recorded on any of its trades (SQL's normal NULL
+handling) rather than `0` — a missing R is absence of information, not a recorded zero,
+same convention this codebase already applies to `session`, `emotion_tag`, and
+`r_multiple_source`.
 
 ---
 

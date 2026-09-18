@@ -72,6 +72,12 @@ class StatsController {
         $stats['fib_coverage'] = $fib['coverage'];
         $stats['by_pair']      = $qa("SELECT pair,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND pair IS NOT NULL AND $closedFilter GROUP BY pair", $p);
         $stats['by_direction'] = $qa("SELECT direction,COUNT(*) as trades,SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND direction IS NOT NULL AND $closedFilter GROUP BY direction", $p);
+        // exit_reason (added v3.14.0, populated by the Bitfunded importer from Position
+        // History's own exit-reason label — Stop Loss / Manual Closing / etc., stored
+        // verbatim, not mapped to an enum). AVG/SUM(r_multiple) silently skip rows with
+        // no r_multiple recorded (SQL's normal NULL handling) rather than treating a
+        // missing R as zero, which would understate every bucket that has one.
+        $stats['by_exit_reason'] = $qa("SELECT exit_reason,COUNT(*) as trades,AVG(r_multiple) as avg_r,SUM(r_multiple) as total_r,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND exit_reason IS NOT NULL AND $closedFilter GROUP BY exit_reason", $p);
 
         // Cumulative P&L + drawdown
         $cum_trades = $qa("SELECT id,trade_date,net_pnl FROM trades $where ORDER BY trade_date,id", $p);

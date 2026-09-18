@@ -1,5 +1,5 @@
 
-<!-- ── BITFUNDED PASTE IMPORTER (v3.14.0) ── -->
+<!-- ── BITFUNDED PASTE IMPORTER (v3.14.1) ── -->
 <div class="page" id="page-bfimport">
   <div style="max-width:900px;margin:0 auto">
     <div class="card" style="margin-bottom:16px">
@@ -10,10 +10,11 @@
     <div class="card" style="margin-bottom:16px">
       <div class="card-title">2. Position History — required</div>
       <div style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:10px">
-        Bitfunded → <strong>Trader Hub</strong> → <strong>Position History</strong> tab. Select the table, copy, paste below.
-        Every row is closed-position data — prices, times, P&amp;L, fees, exit reason.
+        Bitfunded → <strong>Trader Hub</strong> → <strong>Position History</strong> tab. This is a list of cards, not a
+        table — select all the closed-position cards you want, copy, and paste below. Each card is closed-position
+        data — prices, times, P&amp;L, fees, exit reason.
       </div>
-      <textarea id="bf-position-history" rows="8" placeholder="Paste the Position History table here…" style="width:100%;font-family:var(--font-mono, monospace);font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;resize:vertical"></textarea>
+      <textarea id="bf-position-history" rows="8" placeholder="Paste the Position History cards here…" style="width:100%;font-family:var(--font-mono, monospace);font-size:11px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;resize:vertical"></textarea>
     </div>
 
     <div class="card" style="margin-bottom:16px">

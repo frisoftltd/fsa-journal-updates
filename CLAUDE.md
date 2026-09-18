@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.0 |
+| Current Version | v3.14.1 |
 
 ### Tech Stack
 
@@ -1222,6 +1222,9 @@ pre-entry and then gets matched by this importer will **not** automatically get 
 `r_multiple` computed from that stop distance, even though the data to compute it now
 exists. Flagged here deliberately rather than invented silently: this is a real gap, not
 an oversight being hidden, and a reasonable follow-up for a later release if wanted.
+**Partially closed in v3.14.1 — see that section below:** matched rows now get this
+computed when the existing trade already has a `stop_loss`; new rows still can't, since
+this importer never sets `stop_loss` on an insert.
 
 #### Statistics: exit_reason breakdown
 
@@ -1235,6 +1238,171 @@ for a reason bucket with no `r_multiple` recorded on any of its trades (SQL's no
 handling) rather than `0` — a missing R is absence of information, not a recorded zero,
 same convention this codebase already applies to `session`, `emotion_tag`, and
 `r_multiple_source`.
+
+### v3.14.1: Position History Is a Card Layout, Not a Table — the Paste Format Was Never Checked
+
+v3.14.0's Position History parser expected 13 tab-separated columns, on the assumption
+that Position History copies out of the browser the same way an HTML table does
+(Transaction History's actual behavior — see below). **That assumption was never checked
+against a real paste.** Position History is a **card layout**: each closed position copies
+as a block of plain lines, a label on one line and its value on the line after it. A real
+paste is one column, not thirteen, and every real paste was rejected with "expected 13
+columns... found 1." The rejection message itself was working exactly as designed — loud,
+specific, naming the right tab — only the expected format inside it was wrong.
+
+**Transaction History (Box 2) is unaffected — it really is a table.** Copying it out of
+the browser still produces tab-separated rows with a `Type / Transaction / Amount / Time /
+Balance` header, exactly as v3.14.0 assumed, and `parseTransactionHistory()` did not need
+to change. **The two Bitfunded tabs paste in fundamentally different shapes and need
+different parsers** — this wasn't true of the original design and is the central lesson of
+this release.
+
+#### The verified format
+
+From a live paste of two positions (this account's BNBUSDT and ZECUSDT trades, both
+already in the database — see "Verification" below):
+
+```
+BNBUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Stop Loss
+Opening Time
+2026-09-14 06:08:19
+Average price
+723.41 USDT
+Realized PnL
+-98.68USDT
+Liquidation Qty
+6.75 BNB
+Liquidate Date
+2026-09-15 20:49:24
+Exit Price
+708.79USDT
+Realized PnL%
+-10.10%
+Fee
+-3.86690000 USDT
+ZECUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Stop Loss
+Opening Time
+2026-09-13 06:05:09
+...
+```
+
+Per position: contract line (`<SYMBOL> Perpetual`) → `pair`; direction (`Long`/`Short`);
+leverage (`5X` — no column, discarded); margin mode (`Isolated`/`Cross` — discarded);
+`Close All` (a live-action button — discarded, and **not always present**); an exit-reason
+line (`Stop Loss`, `Manual Closing`, and possibly other values not yet seen — an open set,
+**not always present**, never mapped to an enum); then label/value pairs — `Opening Time`
+→ `time_in`, `Average price` → `entry_price`, `Realized PnL` → `pnl`, `Liquidation Qty` →
+`lot_size`, `Liquidate Date` → `time_out`, `Exit Price` → `exit_price`, `Realized PnL%` →
+read and discarded (derivable), `Fee` → `fees`.
+
+Value formats are inconsistent and all have to be handled: `723.41 USDT` (space),
+`708.79USDT` (no space), `-98.68USDT` (no space, signed), `-3.86690000 USDT` (space, eight
+decimals), `6.75 BNB` (the position's own asset, not USDT), `-10.10%` (percentage). The
+existing `bf_parse_num()` (strip everything except digits/`.`/`-`) already handled every
+one of these without modification — it was never the number parsing that was wrong, only
+the column-shaped assumption wrapped around it.
+
+**Sign conventions**, unchanged from v3.14.0: `pnl` stored as given (signed); `fees` stored
+as a positive magnitude (`abs()` of Position History's negative Fee display); `net_pnl =
+pnl - fees`.
+
+#### Parsing: by label, not by line position
+
+`parsePositionHistory()` (`includes/bitfunded_parser.php`) no longer indexes into fixed
+line offsets at all. A line matching `/^([A-Za-z0-9]+)\s+Perpetual$/i` starts a new
+record; everything up to the next such line belongs to it. Within a record: the label set
+(`Opening Time`, `Average price`, `Realized PnL`, `Liquidation Qty`, `Liquidate Date`,
+`Exit Price`, `Realized PnL%`, `Fee`) is matched by exact (case-insensitive) line text
+wherever it occurs, and the line immediately after a matched label is its value —
+irrespective of where in the block that label happens to sit. Everything left over after
+labels, their values, the contract line, and the direction line is checked against leverage
+(`/^\d+(\.\d+)?x$/i`) and margin mode (`/^(isolated|cross)$/i`) patterns and discarded if it
+matches either, then against a literal `Close All` and discarded if it matches that. **What
+remains is the exit reason** — since Bitfunded's set of exit-reason values isn't fully
+known, it's identified by elimination rather than enumerated, and its absence (zero
+leftover lines) is accepted, not an error. More than one leftover line is a parse failure
+naming the ambiguous lines, rather than guessing which one is the real exit reason.
+
+This means `Close All`'s presence/absence, the exit reason's presence/absence, and (within
+reason) label order don't matter — only the well-known label text and the two bounded
+enums (margin mode; leverage's numeric pattern) are relied on structurally.
+
+#### Verification against known data
+
+The two positions in the sample above are already live in the database and were checked
+exactly:
+
+| | BNBUSDT | ZECUSDT |
+|---|---|---|
+| `time_in` | 2026-09-14 06:08:19 | 2026-09-13 06:05:09 |
+| `time_out` | 2026-09-15 20:49:24 | 2026-09-13 11:31:43 |
+| `entry_price` | 723.41 | 1135.75 |
+| `exit_price` | 708.79 | 1081.63 |
+| `pnl` | −98.68 | −95.79 |
+| `fees` | 3.8669 | 1.5699 |
+| `lot_size` | 6.75 | 1.77 |
+| `exit_reason` | Stop Loss | Stop Loss |
+
+`bitfunded_parser.php`'s self-test (`php bitfunded_parser.php`, standalone CLI — guarded so
+it never runs when the file is `require_once`'d by `BitfundedImportController`) parses
+this exact two-position block and asserts every value above, plus edge cases for a block
+missing `Close All`, a block missing the exit-reason line entirely, and rejection of a
+Transaction-History-shaped (tab-separated) paste. **v3.14.0 shipped without this
+self-test** despite its own header comment claiming one existed — its synthetic
+column-shaped test data would have caught nothing here anyway, since the bug was in the
+shape assumption, not the field mapping. This release's self-test is built from real,
+already-verified data specifically because of that: synthetic data can't catch "this isn't
+what a real paste looks like."
+
+**Live acceptance test (cannot be run from this environment — for Acrob to run after
+deploy):** paste challenge 6's full Position History into Box 1, click Preview. Expect
+**59 matched, 0 new, 0 needs attention** (an idempotency check — this data is already
+correct on live, so a correct parser should match every row, not insert or flag anything).
+Confirm, then verify `SUM(fees) = 138.1159`, `SUM(net_pnl) = -258.1909`, 59 rows,
+`trade_variables` count unchanged at 135, and `exit_reason` populated on all 59. Paste
+Transaction History into Box 2 — funding total should read −6.6369. Paste an Order History
+table — must still be rejected with a clear message.
+
+#### r_multiple / risk_amount: closing part of the v3.14.0 gap
+
+v3.14.0 flagged, but deliberately left open, that `r_multiple`/`risk_amount` were never
+computed by the importer even once `stop_loss` existed on a matched row (see "What this
+release deliberately does not do" above). This is the reason `stop_loss` moved into the
+pre-entry form in the first place — without it ever being used, R stays estimated forever
+and the planned-vs-realised R comparison can't be computed.
+
+`BitfundedImportController::confirm()` now computes, **only for a `matched` row whose
+existing trade already has a `stop_loss` on file**:
+
+```
+risk_per_unit = ABS(entry_price - stop_loss)
+r_multiple    = (exit_price - entry_price) / risk_per_unit     -- Long
+              = (entry_price - exit_price) / risk_per_unit     -- Short
+risk_amount   = risk_per_unit * lot_size
+r_multiple_source = 'recorded'
+```
+
+added to that row's `UPDATE ... SET` only when `stop_loss IS NOT NULL` and
+`risk_per_unit > 0` — the column is omitted from the statement entirely otherwise, so a
+matched row with no stop on file is left exactly as untouched as every other execution-only
+field, and an existing *estimated* `r_multiple` (the v3.12.0 risk-unit-derived values on
+the original 59 Bitfunded Altcoin trades) is never overwritten by this path. A **new** row
+is never given a `stop_loss` by this importer (stays `NULL`, per the v3.14.0
+division-of-responsibility table), so this can never apply to an insert — only a trade that
+already existed with a stop before being matched. **None of the 59 historical Bitfunded
+Altcoin trades has a stop-loss on file, so this release does not retro-derive any of
+them** — the formula only takes effect going forward, the next time a trade is created with
+a real stop and later matched by an import.
 
 ---
 

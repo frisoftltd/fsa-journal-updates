@@ -1,16 +1,27 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Parser (v3.14.0)
+ * FundedControl — Bitfunded Paste Parser (v3.14.1)
  * Pure parsing: no DB access, no side effects. Used by BitfundedImportController and by
  * the self-test at the bottom of this file (run standalone: `php bitfunded_parser.php`).
  *
- * Both Bitfunded tabs paste as tab-separated rows, one row per line, when selected and
- * copied out of the browser table (standard browser behavior for copying an HTML table
- * into a plain-text target). Every row is validated against the exact column shape
- * described in the CLAUDE.md v3.14.0 import spec; a row that doesn't fit is a hard
- * failure naming the line and the reason, never a silent skip — silent misses on
- * hand-typed data are exactly what this importer exists to stop reproducing on parsed
- * data (see CLAUDE.md v3.14.0, "Why this exists").
+ * The two Bitfunded tabs paste in genuinely different shapes and are parsed differently:
+ *
+ * - Transaction History (Box 2) IS a real HTML table, and copies as tab-separated rows,
+ *   one row per line — standard browser behavior for copying a table into plain text.
+ *   parseTransactionHistory() below still expects that shape.
+ * - Position History (Box 1) is a CARD layout, not a table — each position copies as a
+ *   block of lines, a label on one line and its value on the next (e.g. "Opening Time" /
+ *   "2026-09-14 06:08:19"). A real paste has one column, not thirteen. v3.14.0 assumed
+ *   Position History was an HTML table too, without checking against a real paste — every
+ *   real paste was rejected with "expected 13 columns... found 1". parsePositionHistory()
+ *   below is label-driven, not position-driven: a line matching "<SYMBOL> Perpetual"
+ *   starts a new record, and every field is found by its own label rather than by a fixed
+ *   line offset, since which optional lines (the "Close All" button, the exit-reason line)
+ *   are present varies row to row. See CLAUDE.md v3.14.1 for the full verified format.
+ *
+ * Both parsers still fail loudly, naming the line and the reason, on anything that doesn't
+ * fit — silent misses on hand-typed data are exactly what this importer exists to stop
+ * reproducing on parsed data (see CLAUDE.md v3.14.0, "Why this exists").
  */
 
 class BitfundedParseException extends Exception {}
@@ -49,103 +60,166 @@ function bf_split_line(string $line): array {
 }
 
 /**
- * Position History (Box 1). One row per closed position. 13 columns:
- * Contract, Direction, Leverage, Margin Mode, Opening Time, Liquidate Date,
- * Average price, Exit Price, Realized PnL, Realized PnL%, Liquidation Qty, Fee, Exit reason.
+ * Position History (Box 1). A CARD layout, not a table — see the file header. Each
+ * position pastes as a block of lines starting with its contract line ("BNBUSDT
+ * Perpetual") and running up to the next contract line (or end of paste). Verified
+ * against a real two-position paste; see CLAUDE.md v3.14.1 for the sample block.
+ *
+ * A typical block, in the order Bitfunded renders it (order is NOT relied on below):
+ *   BNBUSDT Perpetual / Long / 5X / Isolated / Close All / Stop Loss /
+ *   Opening Time / 2026-09-14 06:08:19 / Average price / 723.41 USDT /
+ *   Realized PnL / -98.68USDT / Liquidation Qty / 6.75 BNB /
+ *   Liquidate Date / 2026-09-15 20:49:24 / Exit Price / 708.79USDT /
+ *   Realized PnL% / -10.10% / Fee / -3.86690000 USDT
+ *
+ * Parsing is entirely label-driven, not position-driven, because two lines are known to
+ * be optional and Bitfunded's exact label order isn't guaranteed to be stable release to
+ * release:
+ *   - "Close All" is a live-action button, not always present.
+ *   - The exit-reason line ("Stop Loss", "Manual Closing", possibly others not seen yet)
+ *     is an open set — never mapped to an enum, and may be absent entirely.
+ * Contract line -> pair (the "<SYMBOL> Perpetual" pattern; SYMBOL is kept verbatim,
+ * uppercased). Next line -> direction (Long/Short, required). Every other line in the
+ * block is either a known label (its value is the line immediately after it), leverage
+ * ("5X" — discarded), margin mode (Isolated/Cross — discarded), the literal "Close All"
+ * (discarded), or — whatever single line is left over after all of those — the exit
+ * reason. More than one leftover line is a parse failure (ambiguous), not a guess.
  *
  * Returns a list of associative rows:
  *   pair, direction, time_in, time_out, entry_price, exit_price, pnl, lot_size, fees, exit_reason
- * (leverage, margin mode, Realized PnL% are read for column-count validation and discarded —
- * they aren't part of the AFTER-import field set in CLAUDE.md v3.14.0 §2).
  *
  * Throws BitfundedParseException naming the exact line and reason on anything that
  * doesn't fit — including a paste from the wrong tab (Order History / Transaction
- * Details), which this rejects structurally: neither has 13 columns with a Long/Short
- * value in column 2.
+ * Details / Transaction History), which this rejects structurally: none of them contain
+ * a "<SYMBOL> Perpetual" line followed by Long/Short.
  */
 function parsePositionHistory(string $raw): array {
     $rawLines = preg_split('/\r\n|\r|\n/', $raw);
     $lines = [];
     foreach ($rawLines as $i => $l) {
         if (trim($l) === '') continue;
-        $lines[] = ['n' => $i + 1, 'text' => $l];
+        $lines[] = ['n' => $i + 1, 'text' => trim($l)];
     }
     if (empty($lines)) {
-        throw new BitfundedParseException('Position History paste is empty. Copy the table from Bitfunded → Trader Hub → Position History and paste it in Box 1.');
+        throw new BitfundedParseException('Position History paste is empty. Copy each position\'s card from Bitfunded → Trader Hub → Position History and paste them in Box 1.');
     }
 
-    $EXPECTED_COLS = 13;
+    $CONTRACT_RE = '/^([A-Za-z0-9]+)\s+Perpetual$/i';
+
+    $starts = [];
+    foreach ($lines as $idx => $entry) {
+        if (preg_match($CONTRACT_RE, $entry['text'])) $starts[] = $idx;
+    }
+    if (empty($starts)) {
+        throw new BitfundedParseException(
+            'No position blocks found — no line reads "<SYMBOL> Perpetual". This does not look like ' .
+            'Position History. Order History and Transaction History use different layouts and are not ' .
+            'read by this box. Copy from Bitfunded → Trader Hub → Position History and paste each ' .
+            'position\'s card block in Box 1.'
+        );
+    }
+
+    // label (lowercased, exact line match) => target field key, or null to read-and-discard.
+    $LABELS = [
+        'opening time'    => 'time_in_raw',
+        'average price'   => 'entry_price_raw',
+        'realized pnl'    => 'pnl_raw',
+        'liquidation qty' => 'lot_size_raw',
+        'liquidate date'  => 'time_out_raw',
+        'exit price'      => 'exit_price_raw',
+        'realized pnl%'   => null,
+        'fee'             => 'fee_raw',
+    ];
+    $DISPLAY = [
+        'time_in_raw' => 'Opening Time', 'entry_price_raw' => 'Average price', 'pnl_raw' => 'Realized PnL',
+        'lot_size_raw' => 'Liquidation Qty', 'time_out_raw' => 'Liquidate Date', 'exit_price_raw' => 'Exit Price',
+        'fee_raw' => 'Fee',
+    ];
+    $REQUIRED = ['time_in_raw', 'entry_price_raw', 'pnl_raw', 'lot_size_raw', 'time_out_raw', 'exit_price_raw', 'fee_raw'];
+
     $rows = [];
-    $headerSkipped = false;
+    $total = count($lines);
+    foreach ($starts as $s => $begin) {
+        $end = ($s + 1 < count($starts)) ? $starts[$s + 1] : $total;
+        $block = array_slice($lines, $begin, $end - $begin);
+        $startLineNo = $block[0]['n'];
 
-    foreach ($lines as $entry) {
-        $lineNo = $entry['n'];
-        $cells = bf_split_line($entry['text']);
+        $m = [];
+        preg_match($CONTRACT_RE, $block[0]['text'], $m);
+        $pair = strtoupper($m[1]);
 
-        // A single leading header row ("Contract  Direction  ...") is expected and
-        // skipped once, by name — not by position — so a genuine data row that happens
-        // to be first is never silently dropped.
-        if (!$headerSkipped && count($cells) >= 2 && strcasecmp(trim($cells[0]), 'Contract') === 0) {
-            $headerSkipped = true;
-            continue;
+        if (!isset($block[1])) {
+            throw new BitfundedParseException("Line $startLineNo: \"{$block[0]['text']}\" has no direction line after it.");
         }
-
-        if (count($cells) !== $EXPECTED_COLS) {
-            throw new BitfundedParseException(
-                "Line $lineNo: expected $EXPECTED_COLS columns (Contract, Direction, Leverage, Margin Mode, " .
-                "Opening Time, Liquidate Date, Average price, Exit Price, Realized PnL, Realized PnL%, " .
-                "Liquidation Qty, Fee, exit reason) but found " . count($cells) . ". " .
-                "This does not look like Position History — Order History and Transaction Details use a " .
-                "different layout and are not read by this importer. Copy from Bitfunded → Trader Hub → " .
-                "Position History and paste that table in Box 1."
-            );
-        }
-
-        [$contract, $directionRaw, , , $openingTime, $liquidateDate, $avgPrice, $exitPrice,
-         $realizedPnl, , $liqQty, $fee, $exitReasonRaw] = $cells;
-
-        $pairParts = preg_split('/\s+/', trim($contract));
-        $pair = strtoupper($pairParts[0] ?? '');
-        if ($pair === '') {
-            throw new BitfundedParseException("Line $lineNo: could not read a pair symbol from Contract \"$contract\".");
-        }
-
-        $direction = ucfirst(strtolower(trim($directionRaw)));
+        $direction = ucfirst(strtolower($block[1]['text']));
         if ($direction !== 'Long' && $direction !== 'Short') {
-            throw new BitfundedParseException(
-                "Line $lineNo: Direction \"$directionRaw\" is not Long or Short. This does not look like a " .
-                "Position History row — check that Box 1 has the Position History table, not Order History " .
-                "or Transaction Details."
-            );
+            throw new BitfundedParseException("Line {$block[1]['n']}: expected Long or Short after \"{$block[0]['text']}\", found \"{$block[1]['text']}\".");
         }
 
-        $exitReason = trim($exitReasonRaw);
-        if ($exitReason === '') {
-            throw new BitfundedParseException("Line $lineNo: exit reason column is blank.");
+        $values = [];
+        $consumed = [0 => true, 1 => true];
+        for ($i = 2; $i < count($block); $i++) {
+            if (isset($consumed[$i])) continue;
+            $key = strtolower($block[$i]['text']);
+            if (!array_key_exists($key, $LABELS)) continue;
+            if (!isset($block[$i + 1])) {
+                throw new BitfundedParseException("Line {$block[$i]['n']}: \"{$block[$i]['text']}\" has no value line after it.");
+            }
+            $target = $LABELS[$key];
+            if ($target !== null) {
+                $values[$target] = ['text' => $block[$i + 1]['text'], 'n' => $block[$i + 1]['n']];
+            }
+            $consumed[$i] = true;
+            $consumed[$i + 1] = true;
+            $i++;
         }
+
+        // Whatever's left (not contract, direction, a label, or a label's value) is
+        // leverage, margin mode, "Close All", or the exit reason — recognized by pattern
+        // for the first three (a bounded, stable set); anything else left over is the
+        // exit reason, since that set is open. See function doc above.
+        $leftover = [];
+        for ($i = 2; $i < count($block); $i++) {
+            if (isset($consumed[$i])) continue;
+            $text = $block[$i]['text'];
+            if (preg_match('/^\d+(\.\d+)?x$/i', $text)) continue;      // leverage, e.g. "5X"
+            if (preg_match('/^(isolated|cross)$/i', $text)) continue; // margin mode
+            if (strcasecmp($text, 'Close All') === 0) continue;       // live-action button
+            $leftover[] = $block[$i];
+        }
+        if (count($leftover) > 1) {
+            $where = implode(', ', array_map(fn($l) => $l['n'], $leftover));
+            throw new BitfundedParseException(
+                "Lines $where: more than one unrecognized line in the $pair block starting at line " .
+                "$startLineNo — expected at most one, the exit reason."
+            );
+        }
+        $exitReason = $leftover ? trim($leftover[0]['text']) : '';
         if (strlen($exitReason) > 40) {
-            throw new BitfundedParseException("Line $lineNo: exit reason \"$exitReason\" is longer than 40 characters — truncating would silently lose data, not applying it.");
+            throw new BitfundedParseException("Line {$leftover[0]['n']}: exit reason \"$exitReason\" is longer than 40 characters — truncating would silently lose data, not applying it.");
+        }
+
+        foreach ($REQUIRED as $key) {
+            if (!isset($values[$key])) {
+                throw new BitfundedParseException("Line $startLineNo ($pair): missing \"{$DISPLAY[$key]}\" in this position's block.");
+            }
         }
 
         $rows[] = [
-            'line'        => $lineNo,
+            'line'        => $startLineNo,
             'pair'        => $pair,
             'direction'   => $direction,
-            'time_in'     => bf_parse_datetime($openingTime, $lineNo, 'Opening Time'),
-            'time_out'    => bf_parse_datetime($liquidateDate, $lineNo, 'Liquidate Date'),
-            'entry_price' => bf_parse_num($avgPrice, $lineNo, 'Average price'),
-            'exit_price'  => bf_parse_num($exitPrice, $lineNo, 'Exit Price'),
-            'pnl'         => bf_parse_num($realizedPnl, $lineNo, 'Realized PnL'),
-            'lot_size'    => bf_parse_num($liqQty, $lineNo, 'Liquidation Qty'),
+            'time_in'     => bf_parse_datetime($values['time_in_raw']['text'], $values['time_in_raw']['n'], 'Opening Time'),
+            'time_out'    => bf_parse_datetime($values['time_out_raw']['text'], $values['time_out_raw']['n'], 'Liquidate Date'),
+            'entry_price' => bf_parse_num($values['entry_price_raw']['text'], $values['entry_price_raw']['n'], 'Average price'),
+            'exit_price'  => bf_parse_num($values['exit_price_raw']['text'], $values['exit_price_raw']['n'], 'Exit Price'),
+            'pnl'         => bf_parse_num($values['pnl_raw']['text'], $values['pnl_raw']['n'], 'Realized PnL'),
+            'lot_size'    => bf_parse_num($values['lot_size_raw']['text'], $values['lot_size_raw']['n'], 'Liquidation Qty'),
             // Position History shows Fee as a negative (a cost); trades.fees is a
             // positive magnitude, subtracted explicitly in net_pnl = pnl - fees.
-            'fees'        => abs(bf_parse_num($fee, $lineNo, 'Fee')),
+            'fees'        => abs(bf_parse_num($values['fee_raw']['text'], $values['fee_raw']['n'], 'Fee')),
             'exit_reason' => $exitReason,
         ];
-    }
-
-    if (empty($rows)) {
-        throw new BitfundedParseException('No position rows found after the header — paste looks empty or header-only.');
     }
 
     return $rows;
@@ -229,4 +303,199 @@ function parseTransactionHistory(string $raw): array {
         'latest_balance' => $latestBalance,
         'row_count'      => $rowCount,
     ];
+}
+
+// ── SELF-TEST ────────────────────────────────────────────────────────────
+// Run standalone: `php bitfunded_parser.php`. Not executed when this file is required by
+// BitfundedImportController — guarded on being the directly-invoked CLI script.
+if (PHP_SAPI === 'cli' && basename($_SERVER['SCRIPT_FILENAME'] ?? '') === basename(__FILE__)) {
+    bf_self_test();
+}
+
+function bf_self_test(): void {
+    $pass = 0; $fail = 0;
+    $check = function (string $label, $actual, $expected) use (&$pass, &$fail) {
+        $ok = is_float($expected) ? (is_numeric($actual) && abs($actual - $expected) < 0.00005) : ($actual === $expected);
+        if ($ok) { $pass++; return; }
+        $fail++;
+        fwrite(STDERR, "FAIL: $label — expected " . var_export($expected, true) . ", got " . var_export($actual, true) . "\n");
+    };
+
+    // Real two-position paste, verified against the BNBUSDT and ZECUSDT rows already live
+    // in the database (CLAUDE.md v3.14.1 §3) — not synthetic data. v3.14.0's self-test
+    // passed against synthetic input while the parser itself could not read a real paste;
+    // this is the correction.
+    $paste = <<<'TXT'
+BNBUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Stop Loss
+Opening Time
+2026-09-14 06:08:19
+Average price
+723.41 USDT
+Realized PnL
+-98.68USDT
+Liquidation Qty
+6.75 BNB
+Liquidate Date
+2026-09-15 20:49:24
+Exit Price
+708.79USDT
+Realized PnL%
+-10.10%
+Fee
+-3.86690000 USDT
+ZECUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Stop Loss
+Opening Time
+2026-09-13 06:05:09
+Average price
+1135.75 USDT
+Realized PnL
+-95.79USDT
+Liquidation Qty
+1.77 ZEC
+Liquidate Date
+2026-09-13 11:31:43
+Exit Price
+1081.63USDT
+Realized PnL%
+-8.43%
+Fee
+-1.56990000 USDT
+TXT;
+
+    try {
+        $rows = parsePositionHistory($paste);
+        $check('row count', count($rows), 2);
+        if (count($rows) === 2) {
+            [$bnb, $zec] = $rows;
+            $check('BNB pair', $bnb['pair'], 'BNBUSDT');
+            $check('BNB direction', $bnb['direction'], 'Long');
+            $check('BNB time_in', $bnb['time_in'], '2026-09-14 06:08:19');
+            $check('BNB time_out', $bnb['time_out'], '2026-09-15 20:49:24');
+            $check('BNB entry_price', $bnb['entry_price'], 723.41);
+            $check('BNB exit_price', $bnb['exit_price'], 708.79);
+            $check('BNB pnl', $bnb['pnl'], -98.68);
+            $check('BNB lot_size', $bnb['lot_size'], 6.75);
+            $check('BNB fees', $bnb['fees'], 3.8669);
+            $check('BNB exit_reason', $bnb['exit_reason'], 'Stop Loss');
+
+            $check('ZEC pair', $zec['pair'], 'ZECUSDT');
+            $check('ZEC direction', $zec['direction'], 'Long');
+            $check('ZEC time_in', $zec['time_in'], '2026-09-13 06:05:09');
+            $check('ZEC time_out', $zec['time_out'], '2026-09-13 11:31:43');
+            $check('ZEC entry_price', $zec['entry_price'], 1135.75);
+            $check('ZEC exit_price', $zec['exit_price'], 1081.63);
+            $check('ZEC pnl', $zec['pnl'], -95.79);
+            $check('ZEC lot_size', $zec['lot_size'], 1.77);
+            $check('ZEC fees', $zec['fees'], 1.5699);
+            $check('ZEC exit_reason', $zec['exit_reason'], 'Stop Loss');
+        }
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: real two-position paste threw: " . $e->getMessage() . "\n");
+    }
+
+    // Edge case: "Close All" is a live-action button, not always present -- a block
+    // missing it must still parse, with the exit reason still found.
+    $noCloseAll = <<<'TXT'
+BNBUSDT Perpetual
+Long
+5X
+Isolated
+Stop Loss
+Opening Time
+2026-09-14 06:08:19
+Average price
+723.41 USDT
+Realized PnL
+-98.68USDT
+Liquidation Qty
+6.75 BNB
+Liquidate Date
+2026-09-15 20:49:24
+Exit Price
+708.79USDT
+Fee
+-3.86690000 USDT
+TXT;
+    try {
+        $rows = parsePositionHistory($noCloseAll);
+        $check('no-Close-All row count', count($rows), 1);
+        $check('no-Close-All exit_reason', $rows[0]['exit_reason'] ?? null, 'Stop Loss');
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: block without Close All threw: " . $e->getMessage() . "\n");
+    }
+
+    // Edge case: the exit-reason line itself is an open set and may be absent entirely --
+    // must not be required.
+    $noExitReason = <<<'TXT'
+BNBUSDT Perpetual
+Long
+5X
+Isolated
+Close All
+Opening Time
+2026-09-14 06:08:19
+Average price
+723.41 USDT
+Realized PnL
+-98.68USDT
+Liquidation Qty
+6.75 BNB
+Liquidate Date
+2026-09-15 20:49:24
+Exit Price
+708.79USDT
+Fee
+-3.86690000 USDT
+TXT;
+    try {
+        $rows = parsePositionHistory($noExitReason);
+        $check('no-exit-reason row count', count($rows), 1);
+        $check('no-exit-reason exit_reason', $rows[0]['exit_reason'] ?? null, '');
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: block without exit reason threw: " . $e->getMessage() . "\n");
+    }
+
+    // A Transaction History paste (a real tab-separated table) must be rejected by
+    // parsePositionHistory() structurally, not silently misread as one column.
+    try {
+        parsePositionHistory("Type\tTransaction\tAmount\tTime\tBalance\nFunding Fee\tFunding\t-1.23\t2026-09-14 00:00:00\t1000.00");
+        $fail++;
+        fwrite(STDERR, "FAIL: a Transaction History paste was accepted by parsePositionHistory()\n");
+    } catch (BitfundedParseException $e) {
+        $pass++;
+    }
+
+    // Transaction History parser: still a real table, sanity-checked against a small
+    // real-shaped paste (mixed decimal precision, as Bitfunded actually displays it).
+    $tx = <<<'TXT'
+Type	Transaction	Amount	Time	Balance
+Funding Fee	Funding	-1.2345	2026-09-14 00:00:00	9800.0000
+Funding Fee	Funding	-5.4024	2026-09-15 00:00:00	9750.0000
+Realized PnL	Position	-98.68	2026-09-15 20:49:24	9735.1722
+TXT;
+    try {
+        $result = parseTransactionHistory($tx);
+        $check('funding_total', $result['funding_total'], 6.6369);
+        $check('latest_balance', $result['latest_balance'], 9735.1722);
+        $check('row_count', $result['row_count'], 3);
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: Transaction History parse threw: " . $e->getMessage() . "\n");
+    }
+
+    fwrite(STDOUT, "bitfunded_parser.php self-test: $pass passed, $fail failed\n");
+    if ($fail > 0) exit(1);
 }

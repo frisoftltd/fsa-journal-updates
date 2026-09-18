@@ -1,6 +1,6 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Importer (v3.14.0)
+ * FundedControl — Bitfunded Paste Importer (v3.14.1)
  * Handles: preview_bitfunded_import, confirm_bitfunded_import
  *
  * Replaces thirteen migration files' worth of hand-typing with a page that parses
@@ -10,6 +10,16 @@
  * exit_price, lot_size, fees, pnl, net_pnl, result, exit_reason, source) and never
  * touches trade_variables, emotion_tag, setup_grade, the three note columns, stop_loss,
  * take_profit, strategy_id, screenshots, or a trade's id.
+ *
+ * v3.14.1 adds one narrow exception: for a MATCHED row only, if the existing trade
+ * already has a stop_loss on file (set pre-entry, before this execution data ever
+ * landed), r_multiple/risk_amount/r_multiple_source='recorded' are computed from that
+ * stop against Bitfunded's own entry/exit and written alongside the execution fields —
+ * see CLAUDE.md v3.14.1 for why this was a real, deliberately-flagged gap in v3.14.0.
+ * A 'new' row is never given a stop_loss by this importer (stop_loss stays NULL, per the
+ * division of responsibility above), so this never applies to inserts, and a matched row
+ * with no stop_loss on file is left exactly as untouched as before — r_multiple/
+ * risk_amount/r_multiple_source are simply omitted from that row's UPDATE.
  *
  * preview() and confirm() both re-parse the pasted text from the request on every call —
  * there is no server-side session cache of a prior preview. This keeps the two actions
@@ -77,17 +87,36 @@ class BitfundedImportController {
 
                 $result = $p['pnl'] > 0 ? 'Win' : ($p['pnl'] < 0 ? 'Loss' : 'Break Even');
                 $net = round($p['pnl'] - $p['fees'], 4);
+                $exitReasonForDb = $p['exit_reason'] !== '' ? $p['exit_reason'] : null;
 
                 if ($m['status'] === 'matched') {
-                    $this->db->prepare(
-                        "UPDATE trades SET trade_date=?, time_in=?, time_out=?, entry_price=?, exit_price=?,
-                            lot_size=?, fees=?, pnl=?, net_pnl=?, result=?, exit_reason=?, source='import'
-                         WHERE id=? AND challenge_id=?"
-                    )->execute([
+                    $sql = "UPDATE trades SET trade_date=?, time_in=?, time_out=?, entry_price=?, exit_price=?,
+                            lot_size=?, fees=?, pnl=?, net_pnl=?, result=?, exit_reason=?, source='import'";
+                    $params = [
                         substr($p['time_in'], 0, 10), $p['time_in'], $p['time_out'], $p['entry_price'], $p['exit_price'],
-                        $p['lot_size'], $p['fees'], $p['pnl'], $net, $result, $p['exit_reason'],
-                        $m['trade_id'], $challenge['id'],
-                    ]);
+                        $p['lot_size'], $p['fees'], $p['pnl'], $net, $result, $exitReasonForDb,
+                    ];
+
+                    // §5: R is measurable, not estimated, once a real stop_loss exists —
+                    // only ever computed here when the existing row already carries one;
+                    // never invented, never overwriting an estimated value that has none.
+                    if ($m['stop_loss'] !== null) {
+                        $riskPerUnit = abs($p['entry_price'] - $m['stop_loss']);
+                        if ($riskPerUnit > 0) {
+                            $rMultiple = $p['direction'] === 'Short'
+                                ? ($p['entry_price'] - $p['exit_price']) / $riskPerUnit
+                                : ($p['exit_price'] - $p['entry_price']) / $riskPerUnit;
+                            $riskAmount = round($riskPerUnit * $p['lot_size'], 4);
+                            $sql .= ", r_multiple=?, risk_amount=?, r_multiple_source='recorded'";
+                            $params[] = round($rMultiple, 4);
+                            $params[] = $riskAmount;
+                        }
+                    }
+
+                    $sql .= " WHERE id=? AND challenge_id=?";
+                    $params[] = $m['trade_id'];
+                    $params[] = $challenge['id'];
+                    $this->db->prepare($sql)->execute($params);
                     $updated++;
                 } else { // new
                     $this->db->prepare(
@@ -101,7 +130,7 @@ class BitfundedImportController {
                         $this->uid, $challenge['id'], substr($p['time_in'], 0, 10), $p['time_in'], $p['time_out'],
                         $p['pair'], $p['direction'],
                         $p['entry_price'], $p['exit_price'], $p['lot_size'], $p['fees'], $p['pnl'], $net,
-                        $result, $p['exit_reason'],
+                        $result, $exitReasonForDb,
                     ]);
                     $inserted++;
                 }
@@ -140,7 +169,7 @@ class BitfundedImportController {
         $challenge = enrichChallenge($this->db, $challenge);
 
         $positionsRaw = $d['position_history'] ?? '';
-        if (trim($positionsRaw) === '') jsonError('Paste Bitfunded\'s Position History table into Box 1 first.');
+        if (trim($positionsRaw) === '') jsonError('Paste Bitfunded\'s Position History into Box 1 first.');
         try {
             $positions = parsePositionHistory($positionsRaw);
         } catch (BitfundedParseException $e) {
@@ -183,14 +212,18 @@ class BitfundedImportController {
             $windowEnd = date('Y-m-d H:i:s', $ts + self::MATCH_WINDOW_SECONDS);
 
             $exact = $this->db->prepare(
-                "SELECT id FROM trades WHERE challenge_id=? AND pair=? AND direction=?
+                "SELECT id, stop_loss FROM trades WHERE challenge_id=? AND pair=? AND direction=?
                  AND entry_price=? AND pnl=? AND time_in BETWEEN ? AND ?"
             );
             $exact->execute([$challengeId, $p['pair'], $p['direction'], $p['entry_price'], $p['pnl'], $windowStart, $windowEnd]);
             $exactRows = $exact->fetchAll();
 
             if (count($exactRows) === 1) {
-                $out[] = ['status' => 'matched', 'trade_id' => (int)$exactRows[0]['id']];
+                $out[] = [
+                    'status' => 'matched',
+                    'trade_id' => (int)$exactRows[0]['id'],
+                    'stop_loss' => $exactRows[0]['stop_loss'] !== null ? (float)$exactRows[0]['stop_loss'] : null,
+                ];
                 continue;
             }
             if (count($exactRows) > 1) {

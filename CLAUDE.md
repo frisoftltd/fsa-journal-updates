@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.5 |
+| Current Version | v3.14.6 |
 
 ### Tech Stack
 
@@ -1602,14 +1602,19 @@ stored `0.0000`. The same "hand-transcribed at lower precision" gap v3.14.4 foun
 for `pnl` applies to `entry_price` too — `BitfundedImportController::matchAll()`'s exact
 `entry_price=?` just hadn't been through a real full-account run yet to surface it.
 
-**Fix 1 — relative tolerance on `entry_price`.** Unlike `pnl` (fixed dollar amounts, so a
-flat `±0.01` tolerance works everywhere), `entry_price` in this account spans **0.0044 to
-71,968** — a flat absolute tolerance would be far too loose at the low end or far too tight
-at the high end. `matchAll()` now compares `ABS(entry_price - ?) <= ABS(incoming_price) *
-0.005` (`ENTRY_PRICE_MATCH_TOLERANCE_PCT`) — 0.5% of the *incoming* Bitfunded price, not
-the stored one. The tolerance base has to be the incoming value specifically: a
-percentage-of-*stored*-value tolerance would be permanently `0` for any row already
-zeroed by the defect below, and could never match no matter what real price came in.
+**Fix 1 — relative tolerance on `entry_price`. Superseded in v3.14.6 below** — a real
+full-account run showed 0.5% was itself wrong (too tight at the low end, and the
+underlying mechanism isn't proportional rounding at all). Left here for the record, not as
+current behavior.
+
+Unlike `pnl` (fixed dollar amounts, so a flat `±0.01` tolerance works everywhere),
+`entry_price` in this account spans **0.0044 to 71,968** — a flat absolute tolerance would
+be far too loose at the low end or far too tight at the high end. `matchAll()` now compares
+`ABS(entry_price - ?) <= ABS(incoming_price) * 0.005` (`ENTRY_PRICE_MATCH_TOLERANCE_PCT`) —
+0.5% of the *incoming* Bitfunded price, not the stored one. The tolerance base has to be
+the incoming value specifically: a percentage-of-*stored*-value tolerance would be
+permanently `0` for any row already zeroed by the defect below, and could never match no
+matter what real price came in.
 
 **Fix 2 — a real, independent data-loss defect.** `entry_price`/`exit_price`/`stop_loss`/
 `take_profit` were `DECIMAL(14,4)` — four decimal places, which floors out well inside this
@@ -1627,12 +1632,55 @@ nothing is truncated or reinterpreted, so no pre-flight guard was needed).
 **What this migration does not do:** recover the already-zeroed `PUMP` rows. Their real
 price was lost at the moment it was originally written under the old column type — widening
 the column going forward doesn't reconstruct a value that's no longer in the row. Those
-rows get their real `entry_price` back only from an actual re-import over them (which the
-0.5% relative tolerance still won't match automatically for these three specifically, since
-their stored value is *entirely* wrong, not just imprecise — `0.0000` vs. `0.004412` is a
-100% difference, nowhere near 0.5% of anything. They'll still show as `needs attention` or
-`new` after this release and may need a manual follow-up; flagged here rather than silently
-left unexplained if the next full run doesn't show exactly 59/0/0).
+rows get their real `entry_price` back only from an actual re-import over them — see
+v3.14.6 below for how that actually resolves them, correcting this section's prediction
+that they'd need a manual follow-up.
+
+### v3.14.6: The 0.5% Tolerance Was Itself Wrong — the Real Mechanism Is Truncation to 2dp
+
+A real full-account run against challenge 6 **with v3.14.5's 0.5% relative tolerance
+already in place** still returned 44 matched / 15 needs-attention / 0 new — better than
+before, but the 15 remaining failures spanned `ADA 0.1816` vs. stored `0.1800` (0.9% off —
+already outside 0.5%) to `PUMP 0.004412` vs. stored `0.0000` (100% off). **Relative error
+scaling this wide, from under 1% to total loss, is not what proportional rounding produces
+— no single percentage threshold can cover it**, which is exactly why v3.14.5's whole
+premise (find the right percentage) was the wrong shape of fix, not just the wrong number.
+
+**The actual mechanism, found by checking the real stored values against the incoming
+ones rather than guessing another threshold:** every one of the four examples above —
+`ADA 0.1816→0.1800`, `JUP 0.189→0.1800`, `SAGA 0.01418→0.0100`, `PUMP 0.004412→0.0000` —
+is reproduced *exactly* by truncating (not rounding) the incoming price to 2 decimal
+places. `JUP` is the case that tells rounding and truncation apart: `0.189` *rounds* to
+`0.19` (which would not match the stored `0.1800`) but *truncates* to `0.18` (which
+matches exactly). The original fix instruction for this release specified `ROUND(incoming,
+4) = stored` — checked against these same four examples before writing any SQL, and it
+matches none of them; `TRUNCATE(incoming, 2) = stored` matches all four exactly. **Shipped
+what the data confirms, not the originally-specified formula** — the same standing rule as
+everywhere else in this file: where a briefing and the evidence disagree, the evidence
+wins.
+
+**`matchAll()`'s `entry_price` condition is now:** `entry_price = ? OR TRUNCATE(?, 2) =
+entry_price OR entry_price = 0` (three branches, all against the incoming price):
+- **Exact equality** — the normal case for a correctly-imported row, and what keeps a
+  re-paste of already-correctly-imported data idempotent (a truncation-only check would
+  itself break idempotency: `TRUNCATE(0.33838, 2)` is `0.33`, which would no longer equal
+  a genuinely correct stored `0.33838`).
+- **Truncated-to-2-decimals equality** — the legacy hand-transcription case, matching the
+  confirmed mechanism above.
+- **Stored value is exactly `0`** — its own case, not a tolerance at all: a
+  pre-v3.14.5 `DECIMAL(14,4)` column could truncate a genuinely sub-cent price to nothing,
+  and no comparison against a destroyed value is meaningful. Accepts the match on
+  pair/direction/time/pnl alone rather than attempting a price comparison that can't
+  succeed. This is what resolves the `PUMP` rows v3.14.5 said would need a manual
+  follow-up — they don't, once entry_price stops being compared at all for a genuinely
+  zeroed row.
+- `entry_price` is no longer a percentage-narrowed *tolerance* in the v3.14.4/v3.14.5
+  sense; it's a *consistency* check against a known, confirmed corruption shape. A
+  genuinely different trade at the same timestamp still fails to match: pair, direction,
+  the ±10-minute window, and a `pnl` within a cent all still have to agree simultaneously,
+  same anti-false-positive structure as the original v3.13.1 duplicate-detection rule.
+
+`ENTRY_PRICE_MATCH_TOLERANCE_PCT` is removed — no longer used by anything.
 
 ---
 

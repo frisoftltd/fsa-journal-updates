@@ -1,6 +1,6 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Importer (v3.14.5)
+ * FundedControl — Bitfunded Paste Importer (v3.14.6)
  * Handles: preview_bitfunded_import, confirm_bitfunded_import
  *
  * Replaces thirteen migration files' worth of hand-typing with a page that parses
@@ -31,7 +31,6 @@ require_once __DIR__ . '/../bitfunded_parser.php';
 class BitfundedImportController {
     const MATCH_WINDOW_SECONDS = 600; // +/-10 minutes, per CLAUDE.md v3.14.0 §4
     const PNL_MATCH_TOLERANCE = 0.01; // v3.14.4 -- see matchAll()
-    const ENTRY_PRICE_MATCH_TOLERANCE_PCT = 0.005; // v3.14.5 -- see matchAll()
 
     private $db;
     private $uid;
@@ -192,42 +191,44 @@ class BitfundedImportController {
     }
 
     /**
-     * Matching rule (CLAUDE.md v3.14.0 §4, tolerances added v3.14.4/v3.14.5): pair +
-     * direction exactly, entry_price within +/-0.5% (relative, not absolute — see below),
-     * pnl within +/-0.01, time_in within +/-10 minutes. A ±5-minute (pair, direction)-only
-     * window produced a false positive during the manual migrations this importer replaces
-     * (BTCUSDT Long re-entries 4.5 minutes apart, same symbol, different price and P&L —
-     * not a duplicate) — entry_price and pnl are not optional narrowing, they're the
-     * actual duplicate signature.
+     * Matching rule (CLAUDE.md v3.14.0 §4, revised v3.14.4/v3.14.5/v3.14.6): pair +
+     * direction exactly, entry_price consistent with the known corruption pattern (see
+     * below), pnl within +/-0.01, time_in within +/-10 minutes. A ±5-minute (pair,
+     * direction)-only window produced a false positive during the manual migrations this
+     * importer replaces (BTCUSDT Long re-entries 4.5 minutes apart, same symbol, different
+     * price and P&L — not a duplicate) — entry_price and pnl are not optional narrowing,
+     * they're the actual duplicate signature.
      *
      * pnl is a tolerance, not an equality, because Bitfunded reports it at up to 4 decimal
      * places and this account's existing rows were hand-transcribed from screenshots at 2
      * (e.g. stored -98.68 against Bitfunded's real -98.6850) — an exact match would reject
      * every one of the 59 historical rows. 0.01 is comfortably inside that rounding gap
      * (at most half a cent) and nowhere near the dollars-wide gap between genuine distinct
-     * trades that the exact-enough entry_price + time-window legs of this rule already
-     * rule out.
+     * trades that pair/direction/time-window already rule out.
      *
-     * entry_price is a RELATIVE tolerance (0.5% of the incoming Bitfunded price), not an
-     * absolute one, because the same transcription-precision gap applies to it and this
-     * account's price range is enormous — 0.0044 (fractional-cent tokens) to 71,968
-     * (BTCUSDT) — so no single absolute tolerance is both loose enough for the former and
-     * tight enough for the latter. Confirmed against a real paste: a full run against
-     * challenge 6 flagged 32 rows 'needs attention' purely on entry_price precision (LIT
-     * 4.6370 vs stored 4.6300, INJ 5.321 vs 5.3200, PUMP 0.004412 vs stored 0.0000 — the
-     * last of those also a symptom of the DECIMAL(14,4) column truncation fixed in the
-     * same release, see CLAUDE.md v3.14.5). The tolerance base is always the INCOMING
-     * price, never the stored one — a stored 0.0000 (the PUMPUSDT truncation case) would
-     * make a percentage-of-stored-value tolerance permanently zero and unable to ever
-     * match, whichever real price came in.
+     * entry_price v3.14.5's 0.5% relative tolerance was itself wrong, confirmed against a
+     * real full-account run: a full paste of challenge 6 with it in place still flagged 15
+     * rows 'needs attention' purely on entry_price, spanning 0.9% off (ADA 0.1816 vs stored
+     * 0.1800) to 100% off (PUMP 0.004412 vs stored 0.0000) — no single percentage covers
+     * that range, because it isn't rounding error at all. Checking the actual stored values
+     * against the incoming ones shows the real mechanism precisely: every historical
+     * discrepancy is explained by TRUNCATING (not rounding — confirmed by JUP: 0.189
+     * truncates to 0.18, matching the stored 0.1800, but *rounds* to 0.19, which would not)
+     * the incoming price to exactly 2 decimal places. `entry_price` now matches if it's
+     * either exactly equal to the incoming price (the normal case, and what keeps a
+     * re-paste of already-correctly-imported rows idempotent) or equal to the incoming
+     * price truncated to 2 decimals (the legacy hand-transcription case) — or if the
+     * stored value is exactly 0, which is its own case: the pre-v3.14.5 DECIMAL(14,4)
+     * column could truncate a genuinely sub-cent price to nothing, and no comparison
+     * against a destroyed value can ever be meaningful, so a stored 0 accepts the match on
+     * pair/direction/time/pnl alone rather than being compared at all.
      *
      * Three outcomes per row, never a silent guess:
      *   'new'       — no candidate at all.
-     *   'matched'   — exactly one exact-enough candidate.
-     *   'attention' — more than one exact-enough candidate, or a near-match (same
-     *                 pair/direction/time window, but entry_price or pnl differs by more
-     *                 than its tolerance) with zero exact-enough candidates. Nothing is
-     *                 written for these; the user decides.
+     *   'matched'   — exactly one candidate consistent with the rule above.
+     *   'attention' — more than one such candidate, or a near-match (same pair/direction/
+     *                 time window, but entry_price or pnl doesn't fit) with zero exact
+     *                 candidates. Nothing is written for these; the user decides.
      */
     private function matchAll($challengeId, array $positions): array {
         $out = [];
@@ -235,15 +236,15 @@ class BitfundedImportController {
             $ts = strtotime($p['time_in']);
             $windowStart = date('Y-m-d H:i:s', $ts - self::MATCH_WINDOW_SECONDS);
             $windowEnd = date('Y-m-d H:i:s', $ts + self::MATCH_WINDOW_SECONDS);
-            $entryPriceTolerance = abs($p['entry_price']) * self::ENTRY_PRICE_MATCH_TOLERANCE_PCT;
 
             $exact = $this->db->prepare(
                 "SELECT id, stop_loss FROM trades WHERE challenge_id=? AND pair=? AND direction=?
-                 AND ABS(entry_price - ?) <= ? AND ABS(pnl - ?) <= ? AND time_in BETWEEN ? AND ?"
+                 AND (entry_price = ? OR TRUNCATE(?, 2) = entry_price OR entry_price = 0)
+                 AND ABS(pnl - ?) <= ? AND time_in BETWEEN ? AND ?"
             );
             $exact->execute([
                 $challengeId, $p['pair'], $p['direction'],
-                $p['entry_price'], $entryPriceTolerance,
+                $p['entry_price'], $p['entry_price'],
                 $p['pnl'], self::PNL_MATCH_TOLERANCE,
                 $windowStart, $windowEnd,
             ]);

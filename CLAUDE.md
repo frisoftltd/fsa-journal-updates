@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.16.0 |
+| Current Version | v3.16.1 |
 
 ### Tech Stack
 
@@ -2000,6 +2000,118 @@ rule-change recommendations stay locked, with the lock reason naming the clean-r
 count"). Rather than reconstruct a gating mechanism the briefing referred to as already
 precisely specified, this was held back pending the actual text. Everything else in the
 v3.16.0 briefing shipped in this release.
+
+### v3.16.1 Phase 1b: Corrections Verified Against Live Data, and Making New Trades Countable
+
+**Part A corrected three rules that were reporting on artifacts of estimated data, not
+real problems** — all three checked against real numbers before this release shipped,
+not assumed.
+
+- **EXIT_TARGET_SHORT was wrong.** v3.16.0 claimed take-profits were "paying 1R" — that
+  number came from three `r_multiple_source='estimated'` rows (gross P&L ÷ `risk_amount`,
+  which this account's own audit already established "carries no information," see
+  v3.15.0/v3.16.0). Checked against live data: the four `target_hit_short` trades
+  averaged **2.343R** and returned **+$665.62** — the account's single largest
+  contributor, the opposite of an error. Rewritten to fire on `stopped_short` only
+  (severity downgraded critical → warning), and to report `target_r` (the trade's
+  *planned* geometry) rather than `r_multiple` (its *realized* outcome) — a stopped
+  trade's `r_multiple` is ≈−1 regardless of where the target was set, so `r_multiple` was
+  never the number that could have described this failure in the first place.
+- **`target_hit_short` renamed to `target_hit_sub_gate`** (`2026_09_19_0007`, data-only,
+  idempotent). 2.35R is not a "short" outcome — it's the account's best-performing
+  bucket. The 2.5 `target_r` gate threshold is unchanged (gate 5 still structurally
+  requires ≥3:1); only the label stops implying these trades were mistakes.
+- **EXIT_NO_TARGET** (new) — the largest, previously-unreported finding: every trade with
+  no target on file, what those trades returned in aggregate, and per-trade. Deliberately
+  pushed first into `getReview()`'s `$insights` array so it sorts to the top of the alert
+  tier (relies on PHP's `usort` being stable since 8.0 — this codebase targets 8.1, so
+  that's safe to depend on). Carries `action`/`verify` keys on the insight array as plain
+  data — not wired to an automatic "was this action followed, verified against the next
+  period" check. That mechanism is `CadenceGate`, still deferred from v3.16.0 pending a
+  spec section this project has never actually provided in full.
+- **NO_ACTIVITY** (new) — an empty-period review (zero trades) now returns a real insight
+  ("No trades closed. Nothing to review.") instead of an empty array. `js/review.js`'s
+  `renderReviewInsights()` no longer special-cases `data.empty` to short-circuit before
+  checking whether any insights exist — the placeholder text is now only reachable when
+  trades existed but genuinely nothing fired, a materially different situation from "no
+  trades that day" that had been collapsed into the same UI state.
+- **Ladder-adherence tolerance widened ±15% → ±20%.** Post-start-of-day-rebase adherence
+  landed at 71.2%, 1.2 points from `RISK_LADDER_DRIFT`'s 70% threshold (itself lowered
+  from 85% in v3.16.0) — close enough that a single trade closing either way would flip
+  the rule on and off. 14 over-tier and 3 under-tier trades out of 59 is a real,
+  worth-reporting pattern, so the fix widens what counts as "within tolerance" rather than
+  raising the alert threshold to 75% (which would have just moved the flicker point,
+  not removed it). `RISK_TIER_BREACH`'s own 1.15× ceiling multiplier is untouched — that's
+  a different check (a hard ceiling breach, not an adherence-rate band) and wasn't part of
+  this correction.
+
+**Part B — the actual intervention.** Everything in v3.15.0/v3.16.0 only ever backfilled
+challenge 6's *existing* 59 trades. Every trade logged from the point those releases
+shipped was landing in `exit_quality='unknown'` forever, because nothing computed these
+columns going forward — the app was measuring dead history, not live behavior.
+
+- **`helpers.php::computeTradeRiskFields($db, $tradeId)`** — new, shared by
+  `TradeController::saveTrade()` and `BitfundedImportController::confirm()`. Reads
+  whatever is *currently* on a trade's row (and whether a `trade_journal` pre-entry row
+  exists) rather than taking values as arguments, which is what makes it safe to call at
+  two different points in a trade's life as more of it becomes known: right after a
+  pre-entry save (entry_price/lot_size usually still null — this form has had no
+  execution inputs since v3.14.0) and again right after the Bitfunded importer writes real
+  fill data. Every figure that can't yet be derived comes back `null` (or `0` for
+  `clean_rep`), never guessed. `planned_risk_pct` always reads `risk_ladder_tiers WHERE
+  active=1` live via the new `helpers.php::ladderTierForBalance()` — per this release's
+  own instruction, "the ladder changed once already because I seeded it wrong; it must
+  not be able to drift out of sync again" — there is now exactly one place that reads the
+  ladder for a live computation, not a copy that could go stale.
+- **`TradeController::saveTrade()`** calls `computeTradeRiskFields()`/
+  `persistTradeRiskFields()` *after* `saveJournal()` runs in the same request —
+  deliberately, so `clean_rep`'s "a pre-entry record exists" check sees a brand-new
+  trade's own just-written journal entry rather than missing it by one request-cycle.
+- **`stop_loss`/`take_profit` are now required**, blocking, on every trade save (add
+  *and* update) — not a warning. This is the whole intervention the briefing named:
+  27 trades cost $1,150.31 (see `EXIT_NO_TARGET`'s expected figures) because this field
+  was optional. **Consequence, stated plainly:** editing *any* existing trade — including
+  a bare historical Bitfunded import that will never have a stop/target on file — now
+  also requires filling both in first. That's a deliberate tradeoff this release accepts,
+  not an oversight; it wasn't scoped down to "new trades only" because the briefing's own
+  instruction was unqualified.
+- **`BitfundedImportController::confirm()`** recomputes `actual_risk_pct`/`target_r`/
+  `clean_rep`/`exit_quality` immediately after its own matched-row `UPDATE` or new-row
+  `INSERT`, now that real `entry_price`/`lot_size`/`exit_reason` exist. It never writes to
+  `stop_loss`/`take_profit` — `computeTradeRiskFields()` only *reads* them — so whatever a
+  trader set pre-entry survives an import untouched, exactly as the existing
+  division-of-responsibility contract (v3.14.0) already required for every other
+  pre-entry field. `balance_at_day_start`/`planned_risk_pct` are deliberately **not**
+  recomputed on import — they're a function of `trade_date`/challenge history, which an
+  execution-field reconciliation doesn't change, and were already correct from the
+  pre-entry save.
+- **Pre-trade sizing panel — an interpretive decision worth flagging explicitly.** The
+  briefing asked for a live panel showing entered risk "from stop distance × lot size"
+  and target R "from stop and target," computed before save. Taken completely literally,
+  this would require `entry_price` and `lot_size` to become real, persisted pre-entry
+  inputs again — which would partially reverse v3.14.0's "execution data should never be
+  typed" principle, a decision this codebase's own history shows was hard-won across four
+  separate silent-data-corruption incidents (CLAUDE.md v3.12.1 through v3.13.4). Instead,
+  **Planned Entry Price** and **Planned Lot Size** were added to the trade form as
+  ephemeral, non-persisted inputs — no `name=` attribute, never read by `saveTrade()`,
+  purely local state feeding a live preview via the new `CalculatorController::
+  sizePreview()` (`size_preview` route). This keeps the "never type execution truth"
+  principle intact (a *planned* number that's discarded after the preview is not a claim
+  about what actually happened) while still giving the panel real numbers to show. **If
+  this reading is wrong** — if entry price/lot size were meant to become real, persisted
+  pre-entry fields — that's a straightforward follow-up: promote the two ephemeral inputs
+  into `TradeController::saveTrade()`'s `$cols`, matching how `stop_loss`/`take_profit`
+  already work.
+- `dollars_per_R` is a P&L-weighted harmonic mean of risk (Σ dollars ÷ Σ R across the
+  resolved population), not `AVG(risk_amount)` — noted here as the same footnote already
+  added to the Statistics page's Size Integrity panel in v3.16.0, worth restating since
+  this release is the one that made the underlying `risk_amount`/`actual_risk_pct`
+  pipeline live rather than backfill-only.
+
+**Still deferred: CadenceGate (item 6, first raised in the v3.16.0 briefing).** Not
+addressed in this release either — no further text was provided this session. `action`/
+`verify` fields now exist as plain data on `EXIT_NO_TARGET`'s insight, which is as far as
+this release goes without that spec.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

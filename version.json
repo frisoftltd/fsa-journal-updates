@@ -1,24 +1,29 @@
 {
-    "current_version": "3.16.0",
+    "current_version": "3.16.1",
     "release_date": "2026-09-19",
     "changelog": [
-        "Recalibrate (v3.15.0 rules firing on artifacts, not real problems): RISK_SIZE_SKEW threshold 1.15 -> 1.25 and severity critical -> info (new severity tier, see below) -- fired at the account's real 1.08 skew, which should be silent. RISK_TIER_BREACH message now names which months the breaches fall in, not just a count -- 11 breaches in one week reads differently from 11 spread across four months. RISK_LADDER_DRIFT threshold <85% -> <70% -- fired at the account's real 74.6% baseline; message now splits over-tier vs. under-tier counts, since oversizing and undersizing are different failures",
-        "Add: 'info' as a fourth insight severity (alongside alert/watch/good) for context that isn't a problem -- js/review.js REVIEW_SEVERITY gains a blue INFO style; getReview()'s sort order updated",
-        "Add: Size Integrity panel footnote -- dollars-per-R is Sigma dollars / Sigma R across the resolved population (a P&L-weighted harmonic mean of risk), not AVG(risk_amount). Not comparable to an arithmetic-mean risk figure",
-        "Add: trades.balance_at_day_start / target_r / exit_quality (nullable). Backfilled for challenge 6: target_r from (take_profit-entry_price)/(entry_price-stop_loss), signed (no direction branch needed -- worked correctly for both Long and Short by construction, and exposes direction-blind geometry errors as a negative value instead of masking them); balance_at_day_start as the running balance before the first trade of each trade_date; exit_quality derived from target_r x exit_reason (target_hit_valid/target_hit_short/stopped_valid/stopped_short/manual_close/unknown, 2.5 target_r threshold)",
-        "Fix: risk-ladder tier basis moves from balance_at_entry (exact trade time) to balance_at_day_start (start of day) -- 27 of challenge 6's 59 trades sat within $250 of the $9,500 boundary, so an at-entry basis let a trade's own tier flip mid-session purely because an earlier same-day trade closed first. planned_risk_pct and risk_deviation_pct recomputed across all 59 rows against the new basis; balance_at_entry stays stored, just no longer used for tier assignment",
-        "Finding: three 'Take Profit' exits paid 0.88R/0.94R/1.01R against a >=2.5 target_r gate -- the target was set at roughly 1R, not the ~3:1 the strategy requires. Invisible under exit_reason alone (Bitfunded's label is not a judgement); now surfaced by EXIT_TARGET_SHORT",
-        "Add: ReviewEngineController v3.7.0 -> v3.8.0, fifteen new rule methods (additive -- no existing rule, Phase 0's 20 or Phase 1's 3, was rewritten): Repetition (REP_NO_CLEAN_REPS, REP_TEMPLATE_EXISTS, REP_FIELDS, REP_NO_DENOMINATOR), Exit Quality (EXIT_TARGET_SHORT, EXIT_QUALITY_UNKNOWN, EXIT_VALID_HELD), Edge recorded/estimated split (EDGE_RECORDED_ONLY, EDGE_UNPROVEN, EDGE_NEGATIVE, EDGE_INTERVENTION_POSITIVE), Cost (COST_EXCEEDS_LOSS, COST_DRAG, COST_FLIPPED), Geometry (GEO_RATIO_DRIFT)",
-        "Note: fee_drag_R/fee_drag_pct and purchased_ratio/live_boundary_ratio/ratio_drift formulas were not given explicit definitions in either briefing this was built from -- only conditions and message templates. Derived and documented in CLAUDE.md v3.16.0 (fee_drag_R in the same $-per-R unit dollars_per_R_winners already uses; ratio_drift from profit_target_amt/max_loss_amt vs. the same ratio recomputed against current balance) -- flagged for review, not silently assumed correct",
-        "Deferred: item 6 (CadenceGate, daily/weekly/monthly cadence gating and computed-action verification) is not in this release. It references an 'original §6' this session was never given the text of -- everything else in this briefing shipped; item 6 follows once that text is provided"
+        "Fix (A1): EXIT_TARGET_SHORT was wrong -- verified against live data, the four target_hit_short trades averaged 2.343R and returned +$665.62, the account's largest single contributor. The v3.16.0 claim that take-profits were 'paying 1R' traced to three estimated-R rows (gross P&L / risk_amount, which carries no information). Rewritten to fire on stopped_short only (severity warning), reporting target_r -- the planned geometry -- not r_multiple, the realized outcome",
+        "Add (A2): EXIT_NO_TARGET -- the largest, previously-unreported finding. Fires whenever any trade has no target on file, severity critical, pushed first in the insights list so it leads the panel. Expected on challenge 6: 27 trades, -$1,150.31, -$42.60 each. Carries 'action'/'verify' fields (informational only -- not wired to an automatic verification check; that mechanism, CadenceGate, is still deferred pending its own spec)",
+        "Rename (A3a): exit_quality value 'target_hit_short' -> 'target_hit_sub_gate' -- 2.35R is not a short outcome, it's the account's best-performing bucket. The 2.5 target_r gate threshold is unchanged; only the label stops implying these trades were errors",
+        "Add (A4): NO_ACTIVITY insight ('No trades closed. Nothing to review.') for a period with zero trades, replacing a blank panel -- two daily reviews (Sep 17, 19) previously rendered nothing",
+        "Fix (A5): ladder-adherence tolerance widened +/-15% -> +/-20%. Post-rebase adherence was 71.2% against RISK_LADDER_DRIFT's 70% threshold -- 1.2 points of margin that would flicker the rule on single trades. 14 over-tier / 3 under-tier out of 59 is a real pattern; the tolerance widens rather than the threshold moving to 75",
+        "Add (B1): TradeController::saveTrade() now computes and persists balance_at_day_start/planned_risk_pct/actual_risk_pct/risk_deviation_pct/target_r/clean_rep/exit_quality on every insert and update, via new shared helpers.php::computeTradeRiskFields()/persistTradeRiskFields(). Ladder tier always reads risk_ladder_tiers WHERE active=1 live -- never hardcoded. entry_price/lot_size are still not collected by this form (unchanged since v3.14.0), so actual_risk_pct/target_r/exit_quality stay null until a real fill lands via import; balance_at_day_start/planned_risk_pct/clean_rep populate immediately since they only need trade_date/challenge_id/stop/target/journal",
+        "Add (B2): BitfundedImportController recomputes actual_risk_pct/target_r/clean_rep/exit_quality via the same shared helper immediately after each matched-row UPDATE or new-row INSERT, now that real fill data exists. Never writes to stop_loss/take_profit -- whatever was set pre-entry (B1) or left null (an unattended new import) stays exactly as it was",
+        "Add (B3): stop_loss and take_profit are now required on every trade save (add and update) -- TradeController::saveTrade() rejects the request outright rather than warning. Applies to editing existing trades too, including historical rows that predate this change",
+        "Add (B4): pre-trade sizing panel on the trade form -- start-of-day balance, ladder tier, prescribed risk ($), entered risk (from planned entry/lot size), deviation %, target R, plus two non-blocking inline warnings (deviation beyond +/-20%, target_r < 3.0). New CalculatorController::sizePreview() (size_preview route) backs it. Planned entry price / planned lot size are deliberately NOT persisted to trades.entry_price/lot_size -- ephemeral planning inputs only, read once per preview and discarded; the real values still come exclusively from the Bitfunded importer on close"
     ],
     "files": [
-        {"path": "migrations/2026_09_19_0004_add_trades_exit_quality_columns.sql", "critical": false},
-        {"path": "migrations/2026_09_19_0005_backfill_challenge6_target_r_and_exit_quality.sql", "critical": false},
-        {"path": "migrations/2026_09_19_0006_rebase_challenge6_tier_basis_to_day_start.sql", "critical": false},
+        {"path": "migrations/2026_09_19_0007_rename_target_hit_short_to_sub_gate.sql", "critical": false},
+        {"path": "includes/helpers.php", "critical": false},
         {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
-        {"path": "js/review.js", "critical": false},
-        {"path": "pages/stats.php", "critical": false}
+        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "includes/controllers/TradeController.php", "critical": false},
+        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
+        {"path": "includes/controllers/CalculatorController.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "modals/trade-modal.php", "critical": false},
+        {"path": "js/trades.js", "critical": false},
+        {"path": "js/review.js", "critical": false}
     ],
     "db_migrations": []
 }

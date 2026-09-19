@@ -107,6 +107,18 @@ class TradeController {
         $isForm = !empty($_FILES) || !empty($_POST);
         $d = $isForm ? $_POST : jsonInput();
 
+        // v3.16.1 B3 — "the whole intervention": 27 trades cost $1,150 because stop_loss/
+        // take_profit were optional. Blocks, does not warn. Applies to add() and update()
+        // alike (both funnel through here) — editing an existing trade that predates this
+        // change (e.g. a bare Bitfunded import with no stop on file) now also requires
+        // filling these in first. That is a deliberate consequence, not an oversight: see
+        // CLAUDE.md v3.16.1 for the tradeoff this creates on historical rows.
+        $stopVal = trim((string)($d['stop_loss'] ?? ''));
+        $targetVal = trim((string)($d['take_profit'] ?? ''));
+        if ($stopVal === '' || $targetVal === '' || !is_numeric($stopVal) || !is_numeric($targetVal)) {
+            jsonError('Stop loss and take profit are required before a trade can be saved.');
+        }
+
         // Handle multiple screenshots (up to 4, max 1MB each)
         $screenshotsJson = null;
         $singleScreenshot = null;
@@ -165,6 +177,17 @@ class TradeController {
         }
 
         $this->saveJournal($finalTradeId, $d['trade_journal'] ?? null);
+
+        // v3.16.1 B1 — computed AFTER saveJournal() specifically so clean_rep's "a
+        // pre-entry record exists" check sees the trade_journal row this same request
+        // may have just written; computing it any earlier would miss a brand-new trade's
+        // own first pre-entry journal entry. Degrades gracefully: entry_price/lot_size
+        // are normally still null at this point (this form has had no execution inputs
+        // since v3.14.0), so actual_risk_pct/target_r/exit_quality stay null here and
+        // only become real once BitfundedImportController recomputes them from a real
+        // fill (v3.16.1 B2) — balance_at_day_start/planned_risk_pct/clean_rep, which only
+        // need trade_date/challenge_id/stop/target/journal, populate immediately.
+        persistTradeRiskFields($this->db, $finalTradeId, computeTradeRiskFields($this->db, $finalTradeId));
 
         jsonResponse(['success' => true, 'id' => $finalTradeId]);
     }

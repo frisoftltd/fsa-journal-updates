@@ -1,10 +1,18 @@
 
 <?php
 /**
- * FundedControl — Behavioral Review Engine (v3.8.0, Exit Quality)
+ * FundedControl — Behavioral Review Engine (v3.9.0, Phase 1b Corrections)
  * Handles: get_review, get_review_periods
  * Deterministic PHP rules over real trade data. No external API calls.
  * Leaves ReviewController / weekly_reviews (manual review) untouched.
+ *
+ * v3.9.0 (v3.16.1 Part A) corrects three v3.8.0 rules against live-verified data
+ * (EXIT_TARGET_SHORT rewritten to fire on stopped_short only — its prior "take-profits
+ * paying 1R" claim traced to estimated-R rows and was wrong; RISK_LADDER_DRIFT's
+ * tolerance widened +/-15% -> +/-20%), adds EXIT_NO_TARGET (the largest previously-
+ * unreported finding, pushed first in the insights list) and a NO_ACTIVITY insight for
+ * empty periods. See CLAUDE.md v3.16.1 for the full corrections list and why 'target_hit_
+ * short' was renamed to 'target_hit_sub_gate'.
  *
  * v3.7.0 (v3.15.0 Phase 1) added three rule methods (ruleSizeSkew/ruleTierBreach/
  * ruleLadderDrift) and their supporting metrics over the new risk_ladder_tiers table and
@@ -108,12 +116,22 @@ class ReviewEngineController {
         $scope = ['challenge_id' => $challengeId, 'label' => $challenge ? $challenge['name'] : 'All Combined'];
 
         if (count($trades) === 0) {
-            $this->upsertReview($challengeId, $type, $periodStart, $periodEnd, json_encode([]), json_encode($metrics));
+            // v3.16.1 A4: two daily reviews (Sep 17, 19) returned a blank panel with
+            // nothing closed that day -- render an explicit NO_ACTIVITY insight instead
+            // of an empty array, so the UI has something to show rather than nothing.
+            $noActivity = [[
+                'severity' => 'info', 'category' => 'repetition',
+                'headline' => 'No trades closed.',
+                'detail' => 'No trades closed. Nothing to review.',
+                'recommendation' => '',
+                'based_on_n' => 0, 'conclusive' => true,
+            ]];
+            $this->upsertReview($challengeId, $type, $periodStart, $periodEnd, json_encode($noActivity), json_encode($metrics));
             jsonResponse([
                 'period' => ['type' => $type, 'start' => $periodStart, 'end' => $periodEnd],
                 'scope' => $scope,
                 'metrics' => $metrics,
-                'insights' => [],
+                'insights' => $noActivity,
                 'empty' => true,
             ]);
         }
@@ -121,6 +139,9 @@ class ReviewEngineController {
         $challengeMap = $this->userChallengeMap();
 
         $insights = array_merge(
+            // v3.16.1 A2: EXIT_NO_TARGET leads the panel -- pushed first so it sorts to
+            // the top of the alert tier (stable sort, see the rule's own docblock).
+            $this->ruleExitNoTarget($phase2Metrics),
             $this->ruleFullRuleVsCutCorner($closed),
             $this->ruleSetupGradeVsOutcome($closed),
             $this->ruleVariableAttribution($closed),
@@ -307,7 +328,13 @@ class ReviewEngineController {
         // Sized trades: any trade in scope (open or closed) with a backfilled actual_risk_pct.
         $sized = array_values(array_filter($allTrades, fn($t) => $t['actual_risk_pct'] !== null));
         $sizedN = count($sized);
-        $withinTolerance = count(array_filter($sized, fn($t) => abs((float)$t['risk_deviation_pct']) <= 15));
+        // v3.16.1 A5: tolerance widened from +/-15% to +/-20%. Post-rebase adherence was
+        // 71.2% against RISK_LADDER_DRIFT's 70% threshold -- 1.2 points of margin, which
+        // would flicker the rule on and off on a single trade either way. 14 over-tier
+        // and 3 under-tier out of 59 is a real, worth-reporting pattern rather than
+        // noise, so the tolerance widens (stops flagging a marginal ~16-19% deviation as
+        // "outside tolerance") rather than raising RISK_LADDER_DRIFT's own 70% threshold.
+        $withinTolerance = count(array_filter($sized, fn($t) => abs((float)$t['risk_deviation_pct']) <= 20));
         $ladderAdherence = $sizedN > 0 ? round($withinTolerance / $sizedN * 100, 1) : null;
 
         // v3.16.0: a bare breach count reads the same whether it's 11 breaches in one
@@ -333,8 +360,8 @@ class ReviewEngineController {
         // account faster than planned, the other under-uses an edge that's actually
         // there) -- RISK_LADDER_DRIFT's message now splits them instead of reporting one
         // adherence number.
-        $overTierCount  = count(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null && (float)$t['risk_deviation_pct'] > 15));
-        $underTierCount = count(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null && (float)$t['risk_deviation_pct'] < -15));
+        $overTierCount  = count(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null && (float)$t['risk_deviation_pct'] > 20));
+        $underTierCount = count(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null && (float)$t['risk_deviation_pct'] < -20));
 
         $byMonth = [];
         foreach ($sized as $t) {
@@ -447,15 +474,41 @@ class ReviewEngineController {
         }
 
         // ── Exit Quality ─────────────────────────────────────
-        $targetHitValid = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'target_hit_valid'));
-        $targetHitShort = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'target_hit_short'));
-        $stoppedShort   = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'stopped_short'));
-        $unknownExit    = array_values(array_filter($allTrades, fn($t) => ($t['exit_quality'] ?? null) === null || ($t['exit_quality'] ?? null) === 'unknown'));
+        // v3.16.1 A3(a): 'target_hit_short' renamed to 'target_hit_sub_gate' -- 2.35R
+        // average is not a "short" outcome, it's the account's best-performing bucket
+        // (+$665.62, the largest single contributor). The 2.5 gate threshold is
+        // unchanged (gate 5 still requires >=3:1 structurally) but the label no longer
+        // implies these trades were errors, because verified against live data they were
+        // the opposite. See 2026_09_1?_000?_rename_target_hit_short.sql.
+        $targetHitValid   = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'target_hit_valid'));
+        $targetHitSubGate = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'target_hit_sub_gate'));
+        $stoppedShort     = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'stopped_short'));
+        $unknownExitClosed = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === null || ($t['exit_quality'] ?? null) === 'unknown'));
+        $unknownExitAll    = array_values(array_filter($allTrades, fn($t) => ($t['exit_quality'] ?? null) === null || ($t['exit_quality'] ?? null) === 'unknown'));
 
-        $shortN = count($targetHitShort) + count($stoppedShort);
-        $tpShortN = count($targetHitShort);
-        $avgShortR = $tpShortN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $targetHitShort)) / $tpShortN, 2) : null;
-        $unknownPct = $totalN > 0 ? round(count($unknownExit) / $totalN * 100, 1) : 0.0;
+        // A1: EXIT_TARGET_SHORT now fires on stopped_short ONLY. The prior version
+        // (v3.16.0) also folded in target_hit_sub_gate and claimed "targets placed at
+        // ~1R" -- that number came from three estimated-R rows (gross P&L / risk_amount,
+        // which "carries no information" per this account's own estimated-R audit) and
+        // was wrong: the four target_hit_sub_gate trades actually averaged 2.343R and
+        // returned +$665.62. avg_stopped_short_target_r is target_r (planned geometry),
+        // not r_multiple (realized outcome) -- a stopped trade's r_multiple is ~-1
+        // regardless of what the target was aimed at; target_r is the number that
+        // describes the mistake.
+        $stoppedShortN = count($stoppedShort);
+        $avgStoppedShortTargetR = $stoppedShortN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['target_r'] ?? 0), $stoppedShort)) / $stoppedShortN, 2) : null;
+
+        // A2: EXIT_NO_TARGET -- the largest, previously-unreported finding. unknown_n/
+        // unknown_pnl/unknown_per_trade are computed over $closed (a trade with no final
+        // P&L can't contribute to a dollar figure), while unknown_pct keeps the $allTrades
+        // denominator EXIT_QUALITY_UNKNOWN already used, so an open trade still counts
+        // against "how much of the account's activity has unknown geometry" even though
+        // it can't yet contribute a dollar amount.
+        $unknownN = count($unknownExitClosed);
+        $unknownPnl = round(array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $unknownExitClosed)), 2);
+        $unknownPerTrade = $unknownN > 0 ? round($unknownPnl / $unknownN, 2) : null;
+        $unknownPct = $totalN > 0 ? round(count($unknownExitAll) / $totalN * 100, 1) : 0.0;
+
         $validN = count($targetHitValid);
         $avgValidR = $validN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $targetHitValid)) / $validN, 2) : null;
 
@@ -511,7 +564,9 @@ class ReviewEngineController {
             'clean_reps' => $cleanReps, 'total_n' => $totalN, 'clean_rep_ids' => $cleanRepIds,
             'field_completeness' => $weakestFieldPct ?? $NA, 'weakest_field' => $weakestField ?? $NA, 'weakest_field_pct' => $weakestFieldPct ?? $NA,
             // Exit Quality
-            'short_n' => $shortN, 'tp_short_n' => $tpShortN, 'avg_short_r' => $avgShortR ?? $NA,
+            'stopped_short_n' => $stoppedShortN, 'avg_stopped_short_target_r' => $avgStoppedShortTargetR ?? $NA,
+            'target_hit_sub_gate_n' => count($targetHitSubGate),
+            'unknown_n' => $unknownN, 'unknown_pnl' => $unknownPnl, 'unknown_per_trade' => $unknownPerTrade ?? $NA,
             'unknown_pct' => $unknownPct, 'valid_n' => $validN, 'avg_valid_r' => $avgValidR ?? $NA,
             // Edge
             'recorded_n' => $recordedN, 'estimated_n' => $estimatedN,
@@ -1324,17 +1379,50 @@ class ReviewEngineController {
         ]];
     }
 
-    // ── I. EXIT QUALITY (v3.8.0 / v3.16.0 Phase 2) ──────────
+    // ── I. EXIT QUALITY (v3.8.0 / v3.16.0 Phase 2, corrected v3.9.0 / v3.16.1) ──
 
-    private function ruleExitTargetShort($p2) {
-        if ($p2['short_n'] < 1) return [];
-        $avgShort = $p2['avg_short_r'] === 'UNAVAILABLE' ? '?' : $p2['avg_short_r'];
+    /**
+     * v3.16.1 A2: the largest, previously-unreported finding on this account, and
+     * deliberately the first rule pushed into getReview()'s $insights merge so it sorts
+     * to the top of the alert tier (PHP's usort is stable as of 8.0, and this engine
+     * targets 8.1). Carries 'action'/'verify' as plain informational fields on the
+     * insight -- not wired to an automatic next-period verification check, since that
+     * mechanism (CadenceGate) was explicitly deferred out of v3.16.0 pending a spec this
+     * session was never given. The UI can render them as-is; nothing computes
+     * "honoured/broken" against them yet.
+     */
+    private function ruleExitNoTarget($p2) {
+        if ($p2['unknown_n'] < 1) return [];
         return [[
             'severity' => 'alert', 'category' => 'edge',
-            'headline' => "{$p2['short_n']} trade(s) had targets set below the 3:1 gate.",
-            'detail' => "{$p2['short_n']} trade(s) had targets set below the 3:1 gate — {$p2['tp_short_n']} of them reached that short target. A take-profit that pays {$avgShort}R was placed at roughly 1R.",
-            'recommendation' => 'Set targets at or above the 3:1 gate before entry — a target that pays 1R is a different trade than the one the rules describe.',
-            'based_on_n' => $p2['short_n'], 'conclusive' => true,
+            'headline' => "{$p2['unknown_n']} of {$p2['total_n']} trades have no target on file.",
+            'detail' => "{$p2['unknown_n']} of {$p2['total_n']} trades have no target on file. Those trades returned \$" . number_format($p2['unknown_pnl'], 2) . " — \$" . number_format($p2['unknown_per_trade'], 2) . " each. Every trade with a recorded target is either profitable or losing a controlled 1R.",
+            'recommendation' => 'Record stop and target before entry on every trade.',
+            'action' => 'Record stop and target before entry on every trade.',
+            'verify' => 'unknown_n_new_period = 0',
+            'based_on_n' => $p2['unknown_n'], 'conclusive' => true,
+        ]];
+    }
+
+    /**
+     * v3.16.1 A1: rewritten to fire on stopped_short only. The v3.16.0 version also
+     * counted target_hit_sub_gate (then-named target_hit_short) trades toward this rule
+     * and claimed take-profits were "paying 1R" -- verified against live data and found
+     * wrong: those four trades averaged 2.343R and returned +$665.62, the account's
+     * largest single contributor. That claim traced to three estimated-R rows (gross P&L
+     * / risk_amount), which carries no information about actual target placement. This
+     * version only ever looks at stopped_short trades and reports target_r (the planned
+     * geometry), never r_multiple, for exactly that reason.
+     */
+    private function ruleExitTargetShort($p2) {
+        if ($p2['stopped_short_n'] < 1) return [];
+        $avgTargetR = $p2['avg_stopped_short_target_r'] === 'UNAVAILABLE' ? '?' : $p2['avg_stopped_short_target_r'];
+        return [[
+            'severity' => 'watch', 'category' => 'edge',
+            'headline' => "{$p2['stopped_short_n']} stopped-out trade(s) had a sub-1:1 target.",
+            'detail' => "{$p2['stopped_short_n']} trade(s) had a target below 1:1 relative to stop ({$avgTargetR} average). Gate 5 requires structural target ≥ 3:1.",
+            'recommendation' => 'Set targets at or above the 3:1 gate before entry, independent of whether the trade ultimately stops out.',
+            'based_on_n' => $p2['stopped_short_n'], 'conclusive' => true,
         ]];
     }
 

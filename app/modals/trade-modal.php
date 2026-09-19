@@ -5,7 +5,7 @@
     <input type="hidden" id="trade-id">
     <form id="trade-form" enctype="multipart/form-data">
       <div class="form-grid">
-        <div class="form-group"><label>Trade Date</label><input type="date" id="f-trade_date" name="trade_date" required></div>
+        <div class="form-group"><label>Trade Date</label><input type="date" id="f-trade_date" name="trade_date" required onchange="updateSizingPanel()"></div>
         <div class="form-group"><label>Session</label><select id="f-session" name="session"><option value="">— Not recorded —</option><option>London</option><option>New York</option><option>Asia</option><option>Other</option></select></div>
         <div class="form-group"><label>Pair</label><select id="f-pair" name="pair" class="pair-select"></select></div>
         <!-- Strategy sits early, not buried below prices/outcome, because it determines
@@ -74,8 +74,29 @@
                the rest of what's knowable before entry, not next to execution data that
                no longer lives in this form at all. -->
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-            <div class="form-group"><label>Stop Loss</label><input type="number" step="0.0001" id="f-stop_loss" name="stop_loss"></div>
-            <div class="form-group"><label>Take Profit</label><input type="number" step="0.0001" id="f-take_profit" name="take_profit"></div>
+            <div class="form-group"><label>Stop Loss <span style="color:var(--red)">*</span></label><input type="number" step="0.0001" id="f-stop_loss" name="stop_loss" required oninput="updateSizingPanel()"></div>
+            <div class="form-group"><label>Take Profit <span style="color:var(--red)">*</span></label><input type="number" step="0.0001" id="f-take_profit" name="take_profit" required oninput="updateSizingPanel()"></div>
+          </div>
+          <!-- v3.16.1 B4: pre-trade sizing panel. "Planned Entry"/"Planned Lot Size" here
+               are deliberately NOT part of the saved trade (no name= attribute, never
+               read by saveTrade()) -- they exist only to drive this live preview. Real
+               entry_price/lot_size still come exclusively from the Bitfunded importer
+               once a position closes (CLAUDE.md v3.14.0/v3.16.1). -->
+          <div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:12px">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">Pre-Trade Sizing (planning aid — not saved)</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+              <div class="form-group" style="margin:0"><label>Planned Entry Price</label><input type="number" step="0.0001" id="f-planned-entry" oninput="updateSizingPanel()"></div>
+              <div class="form-group" style="margin:0"><label>Planned Lot Size</label><input type="number" step="0.0001" id="f-planned-lot" oninput="updateSizingPanel()"></div>
+            </div>
+            <div id="sizing-panel-grid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;font-size:11px">
+              <div>Start-of-day balance<br><span id="sp-balance" style="font-family:var(--font-mono);font-size:13px">—</span></div>
+              <div>Ladder tier<br><span id="sp-tier" style="font-family:var(--font-mono);font-size:13px">—</span></div>
+              <div>Prescribed risk<br><span id="sp-prescribed" style="font-family:var(--font-mono);font-size:13px">—</span></div>
+              <div>Entered risk<br><span id="sp-entered" style="font-family:var(--font-mono);font-size:13px">—</span></div>
+              <div>Deviation<br><span id="sp-deviation" style="font-family:var(--font-mono);font-size:13px">—</span></div>
+              <div>Target R<br><span id="sp-target-r" style="font-family:var(--font-mono);font-size:13px">—</span></div>
+            </div>
+            <div id="sizing-panel-warnings" style="margin-top:8px"></div>
           </div>
           <label style="display:block">Setup Quality (grade the SETUP, not the outcome)</label>
           <div id="grade-grid" style="display:flex;gap:6px;margin-top:4px">

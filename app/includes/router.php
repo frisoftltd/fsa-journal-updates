@@ -30,6 +30,7 @@ $routes = [
     'get_alerts'            => ['AlertController', 'getAlerts'],
     // Calculator
     'calculate_risk'        => ['CalculatorController', 'calculate'],
+    'size_preview'          => ['CalculatorController', 'sizePreview'],
     // Pairs
     'get_pairs'             => ['PairController', 'getAll'],
     'add_pair'              => ['PairController', 'add'],

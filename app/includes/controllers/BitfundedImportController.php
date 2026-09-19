@@ -1,7 +1,13 @@
 <?php
 /**
- * FundedControl — Bitfunded Paste Importer (v3.14.6)
+ * FundedControl — Bitfunded Paste Importer (v3.16.1)
  * Handles: preview_bitfunded_import, confirm_bitfunded_import
+ *
+ * v3.16.1 (Phase 1b, B2): after each matched-row UPDATE or new-row INSERT, recomputes
+ * actual_risk_pct/target_r/clean_rep/exit_quality via helpers.php::computeTradeRiskFields()
+ * now that real fill data (entry_price, lot_size, exit_reason) exists. Never touches
+ * stop_loss/take_profit — those stay exactly whatever the trader set pre-entry (v3.16.1
+ * B1), or NULL for an unattended new import, same as before this release.
  *
  * Replaces thirteen migration files' worth of hand-typing with a page that parses
  * Bitfunded's own Position History (and, optionally, Transaction History for funding)
@@ -119,6 +125,23 @@ class BitfundedImportController {
                     $params[] = $challenge['id'];
                     $this->db->prepare($sql)->execute($params);
                     $updated++;
+
+                    // v3.16.1 B2: recompute actual_risk_pct/target_r/clean_rep/
+                    // exit_quality now that real fill data (entry_price, lot_size,
+                    // exit_reason) just landed. Never touches stop_loss/take_profit
+                    // themselves — computeTradeRiskFields() only reads them, so whatever
+                    // was set pre-entry (v3.16.1 B1) stays exactly as the trader left it.
+                    // balance_at_day_start/planned_risk_pct are NOT recomputed here on
+                    // purpose: they're a function of trade_date/challenge history, which
+                    // this UPDATE doesn't change, and were already correct from the
+                    // pre-entry save.
+                    $riskFields = computeTradeRiskFields($this->db, $m['trade_id']);
+                    $this->db->prepare(
+                        "UPDATE trades SET actual_risk_pct=?, target_r=?, clean_rep=?, exit_quality=? WHERE id=?"
+                    )->execute([
+                        $riskFields['actual_risk_pct'], $riskFields['target_r'],
+                        $riskFields['clean_rep'], $riskFields['exit_quality'], $m['trade_id'],
+                    ]);
                 } else { // new
                     $this->db->prepare(
                         "INSERT INTO trades
@@ -133,6 +156,16 @@ class BitfundedImportController {
                         $p['entry_price'], $p['exit_price'], $p['lot_size'], $p['fees'], $p['pnl'], $net,
                         $result, $exitReasonForDb,
                     ]);
+                    $newTradeId = (int)$this->db->lastInsertId();
+                    // v3.16.1 B2: a brand-new import has no pre-entry data (stop_loss/
+                    // take_profit stay NULL by this importer's own design), so
+                    // actual_risk_pct/target_r/clean_rep resolve to null/null/0 here --
+                    // but balance_at_day_start/planned_risk_pct and exit_quality
+                    // ('unknown', since target_r is null) are real, useful facts even for
+                    // an unattended import, and this is what lets EXIT_NO_TARGET count it
+                    // correctly without waiting for a future edit to trigger the compute.
+                    $riskFields = computeTradeRiskFields($this->db, $newTradeId);
+                    persistTradeRiskFields($this->db, $newTradeId, $riskFields);
                     $inserted++;
                 }
             }

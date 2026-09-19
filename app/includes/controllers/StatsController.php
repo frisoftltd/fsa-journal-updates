@@ -194,9 +194,13 @@ class StatsController {
         $dprLosers  = $lossR > 0 ? round($lossDollars / $lossR, 2) : null;
         $sizeSkew   = ($dprWinners !== null && $dprWinners > 0 && $dprLosers !== null) ? round($dprLosers / $dprWinners, 3) : null;
 
+        // v3.16.1 A5: tolerance widened +/-15% -> +/-20%, matching
+        // ReviewEngineController::computeSizeIntegrityMetrics() -- see that method's
+        // docblock for why (71.2% post-rebase adherence sat 1.2 points from the 70%
+        // RISK_LADDER_DRIFT threshold, flickering on single trades either way).
         $sizedStmt = $this->db->prepare(
             "SELECT COUNT(*) AS n,
-                    SUM(CASE WHEN ABS(risk_deviation_pct) <= 15 THEN 1 ELSE 0 END) AS within_tol,
+                    SUM(CASE WHEN ABS(risk_deviation_pct) <= 20 THEN 1 ELSE 0 END) AS within_tol,
                     SUM(CASE WHEN planned_risk_pct IS NOT NULL AND actual_risk_pct > planned_risk_pct * 1.15 THEN 1 ELSE 0 END) AS breaches,
                     MAX(ABS(risk_deviation_pct)) AS worst
              FROM trades $where AND actual_risk_pct IS NOT NULL"

@@ -87,10 +87,13 @@ const REVIEW_SEVERITY = {
 
 function renderReviewInsights(data) {
     const c = document.getElementById('rv-insights');
-    if (data.empty || !data.insights || !data.insights.length) {
+    // v3.16.1 A4: an empty period now carries a real NO_ACTIVITY insight (server-side),
+    // so this only falls back to the placeholder when insights is genuinely empty --
+    // trades existed but nothing fired. data.empty is no longer what gates this branch.
+    if (!data.insights || !data.insights.length) {
         c.innerHTML = `<div class="card"><div class="empty">
             <div class="empty-icon">🧭</div>
-            <p>${data.empty ? 'No trades logged in this period.' : 'No behavioral patterns detected yet — keep logging to unlock insights.'}</p>
+            <p>No behavioral patterns detected yet — keep logging to unlock insights.</p>
         </div></div>`;
         return;
     }

@@ -283,6 +283,55 @@ function openTradeModal(data=null) {
         selectGrade(null);
     }
     document.getElementById('trade-modal').classList.add('open');
+    document.getElementById('f-planned-entry').value = '';
+    document.getElementById('f-planned-lot').value = '';
+    updateSizingPanel();
+}
+
+// v3.16.1 B4 — pre-trade sizing panel. Planned Entry/Planned Lot Size are read straight
+// out of the DOM, never persisted (see the markup comment in trade-modal.php for why) —
+// this function's only job is to keep the live preview in sync with whatever's currently
+// typed. Debounced because it fires on every keystroke across five inputs.
+let _sizingPanelTimer = null;
+function updateSizingPanel(){
+    clearTimeout(_sizingPanelTimer);
+    _sizingPanelTimer = setTimeout(_runSizingPanel, 250);
+}
+async function _runSizingPanel(){
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    const tradeDate = document.getElementById('f-trade_date').value;
+    if (!tradeDate) return;
+
+    const ch = await api('get_active_challenge');
+    if (!ch || !ch.id) { set('sp-balance', '—'); return; }
+
+    const stop = document.getElementById('f-stop_loss').value;
+    const target = document.getElementById('f-take_profit').value;
+    const entry = document.getElementById('f-planned-entry').value;
+    const lot = document.getElementById('f-planned-lot').value;
+
+    let r;
+    try {
+        r = await api('size_preview', 'POST', {
+            challenge_id: ch.id, trade_date: tradeDate,
+            stop, target, entry, lot_size: lot,
+        });
+    } catch (e) { return; }
+    if (!r || r.error) return;
+
+    set('sp-balance', r.balance_at_day_start != null ? fmt(r.balance_at_day_start) : '—');
+    set('sp-tier', r.planned_risk_pct != null ? r.planned_risk_pct + '%' : '—');
+    set('sp-prescribed', r.prescribed_risk_dollars != null ? fmt(r.prescribed_risk_dollars) : '—');
+    set('sp-entered', r.entered_risk_dollars != null ? fmt(r.entered_risk_dollars) : '—');
+    set('sp-deviation', r.deviation_pct != null ? (r.deviation_pct > 0 ? '+' : '') + r.deviation_pct + '%' : '—');
+    set('sp-target-r', r.target_r != null ? r.target_r + ':1' : '—');
+
+    const warnEl = document.getElementById('sizing-panel-warnings');
+    if (warnEl) {
+        warnEl.innerHTML = (r.warnings || []).map(w =>
+            `<div style="font-size:11px;color:var(--orange);margin-top:4px">⚠️ ${w}</div>`
+        ).join('');
+    }
 }
 
 // v3.14.0 — execution fields (time_in/time_out/entry/exit/lot/fees/pnl/net_pnl/

@@ -176,3 +176,133 @@ function jsonError($msg, $code = 200) {
     echo json_encode(['error' => $msg]);
     exit;
 }
+
+/**
+ * v3.16.1 (Phase 1b) — balance before the first trade of $tradeDate: starting_balance
+ * plus the realised net P&L of every closed trade in the same challenge whose own
+ * trade_date is strictly earlier. If none exist, this is starting_balance itself — the
+ * same degenerate case the migration-era backfill relied on (COALESCE(...,0)), not a
+ * special case that needs its own branch.
+ *
+ * Shared by computeTradeRiskFields() below and CalculatorController::sizePreview() (the
+ * B4 pre-trade sizing panel) so both read the exact same definition rather than two
+ * independently-written copies of the same sum drifting apart over time.
+ */
+function balanceAtDayStart(PDO $db, int $challengeId, string $tradeDate, ?int $excludeTradeId = null): float {
+    $cs = $db->prepare("SELECT starting_balance FROM challenges WHERE id=?");
+    $cs->execute([$challengeId]);
+    $starting = (float)($cs->fetchColumn() ?: 0);
+
+    $sql = "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE challenge_id=? AND result IN ('Win','Loss','Break Even') AND trade_date < ?";
+    $params = [$challengeId, $tradeDate];
+    if ($excludeTradeId) { $sql .= " AND id <> ?"; $params[] = $excludeTradeId; }
+    $s = $db->prepare($sql);
+    $s->execute($params);
+
+    return round($starting + (float)$s->fetchColumn(), 2);
+}
+
+/**
+ * v3.16.1 (Phase 1b) — ladder tier for a given balance. Always reads risk_ladder_tiers
+ * WHERE active=1 live; never a hardcoded percentage. Per the B1 briefing: "The ladder
+ * changed once already because I seeded it wrong; it must not be able to drift out of
+ * sync again" — every consumer of the ladder (this function, ReviewEngineController's
+ * own getLadderTiers()/ladderLookup(), the migrations) reads the same table, so a
+ * correction to risk_ladder_tiers takes effect everywhere the next time each is called,
+ * with nothing left to independently update by hand.
+ */
+function ladderTierForBalance(PDO $db, int $challengeId, float $balance): ?float {
+    $s = $db->prepare("SELECT lower_balance, upper_balance, risk_pct FROM risk_ladder_tiers WHERE challenge_id=? AND active=1 ORDER BY lower_balance ASC");
+    $s->execute([$challengeId]);
+    foreach ($s->fetchAll() as $tier) {
+        $lower = (float)$tier['lower_balance'];
+        $upper = $tier['upper_balance'] !== null ? (float)$tier['upper_balance'] : null;
+        if ($balance >= $lower && ($upper === null || $balance < $upper)) return (float)$tier['risk_pct'];
+    }
+    return null;
+}
+
+/**
+ * v3.16.1 (Phase 1b, B1/B2) — computes the seven Size-Integrity / Exit-Quality columns
+ * for one trade, reading whatever is CURRENTLY on the row (and in trade_journal) rather
+ * than taking values as arguments. This is what makes it safe to call from both
+ * TradeController::saveTrade() (right after a pre-entry insert/update, where entry_price/
+ * lot_size are usually still null — this form has had no execution inputs since v3.14.0)
+ * and BitfundedImportController::confirm() (right after its own execution-field UPDATE,
+ * where entry_price/lot_size/exit_reason just became real) — same function, same
+ * definitions, called at two different points in a trade's life as more of its data
+ * becomes known. Every figure that can't yet be derived from what's on the row comes back
+ * null (or 0 for clean_rep), never guessed — degrading gracefully is the point, not an
+ * edge case to special-case around.
+ *
+ * clean_rep additionally requires a trade_journal row with phase='pre_entry' to exist —
+ * queried fresh here rather than trusted from a caller-supplied flag, so this always
+ * reflects whatever was actually just persisted, regardless of call order.
+ */
+function computeTradeRiskFields(PDO $db, int $tradeId): array {
+    $out = [
+        'balance_at_day_start' => null, 'planned_risk_pct' => null, 'actual_risk_pct' => null,
+        'risk_deviation_pct' => null, 'target_r' => null, 'clean_rep' => 0, 'exit_quality' => null,
+    ];
+
+    $s = $db->prepare("SELECT challenge_id, trade_date, entry_price, stop_loss, take_profit, lot_size, exit_reason, result FROM trades WHERE id=?");
+    $s->execute([$tradeId]);
+    $t = $s->fetch();
+    if (!$t || !$t['challenge_id'] || !$t['trade_date']) return $out;
+
+    $challengeId = (int)$t['challenge_id'];
+    $balanceAtDayStart = balanceAtDayStart($db, $challengeId, $t['trade_date'], $tradeId);
+    $out['balance_at_day_start'] = $balanceAtDayStart;
+
+    $planned = ladderTierForBalance($db, $challengeId, $balanceAtDayStart);
+    $out['planned_risk_pct'] = $planned;
+
+    $entry = $t['entry_price']; $stop = $t['stop_loss']; $target = $t['take_profit']; $lot = $t['lot_size'];
+
+    if ($entry !== null && $stop !== null && $lot !== null && $balanceAtDayStart > 0) {
+        $out['actual_risk_pct'] = round(abs((float)$entry - (float)$stop) * (float)$lot / $balanceAtDayStart * 100, 3);
+    }
+    if ($out['actual_risk_pct'] !== null && $planned !== null && $planned > 0) {
+        $out['risk_deviation_pct'] = round(($out['actual_risk_pct'] / $planned - 1) * 100, 2);
+    }
+    // Signed, no direction branch — see CLAUDE.md v3.16.0 for why this is correct for
+    // both Long and Short by construction and exposes (rather than masks) a stop/target
+    // on the wrong side of entry as a negative value.
+    if ($entry !== null && $stop !== null && $target !== null && (float)$entry != (float)$stop) {
+        $out['target_r'] = round(((float)$target - (float)$entry) / ((float)$entry - (float)$stop), 2);
+    }
+
+    $pj = $db->prepare("SELECT COUNT(*) FROM trade_journal WHERE trade_id=? AND phase='pre_entry'");
+    $pj->execute([$tradeId]);
+    $hasPreEntry = (int)$pj->fetchColumn() > 0;
+
+    $exitReason = $t['exit_reason'];
+    $out['clean_rep'] = ($hasPreEntry && $stop !== null && $target !== null && in_array($exitReason, ['Take Profit', 'Stop Loss'], true)) ? 1 : 0;
+
+    // v3.16.1 A3(a): 'target_hit_sub_gate' (renamed from 'target_hit_short' — see
+    // 2026_09_19_0007) for a Take Profit exit whose target_r sits below the 2.5 gate.
+    if ($exitReason === 'Manual Closing') {
+        $out['exit_quality'] = 'manual_close';
+    } elseif ($out['target_r'] === null) {
+        $out['exit_quality'] = 'unknown';
+    } elseif ($exitReason === 'Take Profit') {
+        $out['exit_quality'] = $out['target_r'] >= 2.5 ? 'target_hit_valid' : 'target_hit_sub_gate';
+    } elseif ($exitReason === 'Stop Loss') {
+        $out['exit_quality'] = $out['target_r'] >= 2.5 ? 'stopped_valid' : 'stopped_short';
+    } else {
+        $out['exit_quality'] = 'unknown';
+    }
+
+    return $out;
+}
+
+/** Writes computeTradeRiskFields()'s output onto the row. Separate from the compute step so a caller can inspect the values (e.g. for a response) before/without persisting, though every current caller persists immediately. */
+function persistTradeRiskFields(PDO $db, int $tradeId, array $fields): void {
+    $db->prepare(
+        "UPDATE trades SET balance_at_day_start=?, planned_risk_pct=?, actual_risk_pct=?, risk_deviation_pct=?, target_r=?, clean_rep=?, exit_quality=? WHERE id=?"
+    )->execute([
+        $fields['balance_at_day_start'], $fields['planned_risk_pct'], $fields['actual_risk_pct'],
+        $fields['risk_deviation_pct'], $fields['target_r'], $fields['clean_rep'], $fields['exit_quality'],
+        $tradeId,
+    ]);
+}

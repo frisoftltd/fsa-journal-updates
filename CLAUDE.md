@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.14.7 |
+| Current Version | v3.15.0 |
 
 ### Tech Stack
 
@@ -213,8 +213,16 @@ result, confidence, exec_score, fib_level, fsa_rules,
 notes, screenshot, screenshots (JSON, up to 4, added later — screenshot kept for back-compat),
 strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0),
 source, r_multiple_source (added v3.12.0),
-exit_reason (added v3.14.0)
+exit_reason (added v3.14.0),
+balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_rep (added v3.15.0)
 ```
+> `balance_at_entry`/`planned_risk_pct`/`actual_risk_pct`/`risk_deviation_pct`/`clean_rep`
+> (all `NULL`-able, no defaults) back the Size Integrity feature — see the v3.15.0 section
+> below for the exact backfill formulas, why `actual_risk_pct` falls back to `risk_amount`
+> when `stop_loss` is null (true for all 59 of challenge 6's rows), and the deliberate
+> scope boundary that `TradeController::saveTrade()`/`BitfundedImportController::confirm()`
+> do **not** populate these columns going forward — they're backfilled once, for challenge
+> 6's existing history, not computed live yet.
 > `source` is `ENUM('manual','import') NOT NULL DEFAULT 'manual'` — distinguishes hand-logged
 > trades from ones backfilled from a broker's own trade history (see "The Journal Was a
 > Winner-Weighted Subset" below). The default means no code change was needed in
@@ -256,6 +264,20 @@ exit_reason (added v3.14.0)
 ```sql
 id, user_id, symbol, active (0/1)
 ```
+
+**risk_ladder_tiers** (added v3.15.0)
+```sql
+id, challenge_id, lower_balance DECIMAL(12,2), upper_balance DECIMAL(12,2) NULL,
+risk_pct DECIMAL(5,3), active (0/1), created_at
+FK: challenge_id -> challenges(id) ON DELETE CASCADE
+```
+> The risk ladder as data, matching the Strategy Lab convention (`strategy_variables`)
+> instead of a hardcoded percentage or the flat `challenges.risk_per_trade_pct`. Lookup is
+> lower-inclusive, upper-exclusive; `upper_balance IS NULL` means "and above." Seeded for
+> challenge 6 (Bitfunded Altcoin) with its documented ladder — see the v3.15.0 section
+> below. Other challenges have no rows here yet, so every ladder-derived figure
+> (`planned_risk_pct`, `risk_deviation_pct`, tier-breach/adherence metrics) stays `NULL`/
+> `UNAVAILABLE` for them until their own ladder is seeded.
 
 **strategy_tests**
 ```sql
@@ -349,6 +371,7 @@ strategies (1) ──→ (many) strategy_variables
 strategy_variables (1) ──→ (many) trade_variables  [FK RESTRICT]
 trades (1) ──→ (many) trade_variables              [FK CASCADE]
 users (1) ──→ (many) pairs
+challenges (1) ──→ (many) risk_ladder_tiers
 users (1) ──→ (many) strategy_tests
 users (1) ──→ (many) weekly_reviews
 users (1) ──→ (many) ai_reviews
@@ -1753,6 +1776,98 @@ copies to keep in sync by hand.
   — not just settable via migration.
 
 ---
+
+### v3.15.0 Phase 1: Size Integrity — a Reconciliation, a Real Data Gap, and a Fallback Decided in the Open
+
+**Step 0 (reconciliation blocker): resolved, not a data defect.** The brief for this
+release flagged four aggregates for challenge 6 that didn't obviously agree: the By Exit
+Reason table summed to −258.22, while Trading P&L (−120.08) minus Fees+funding (−144.75)
+gives −264.83 (Bitfunded's own reported Realised P&L is −264.82 — a one-cent residual
+already established as normal, see v3.13.2/v3.13.4). The exit-reason total sat $6.60 short
+of that. Traced to `StatsController::getStats()`'s `by_exit_reason` query
+(`StatsController.php`): it sums `net_pnl` (each row's own fee already netted out) but has
+no column to represent `challenges.funding_adjustment` — funding isn't a `trades` column
+at all, and v3.14.0 deliberately never attributes it to a single trade (overlapping
+positions and shared funding timestamps on this account make that attribution a guess, not
+a fact — see v3.13.0/v3.14.0 above). $6.60 is, to the cent this account's numbers round to,
+exactly the funding adjustment (6.6369). **Not a bug — the exit-reason breakdown will
+always sit short of true realised P&L by the funding amount, structurally, for as long as
+funding stays a challenge-level line item.** Fixed the recurring-confusion risk, not the
+number: `getStats()` now returns `exit_reason_excludes_funding` and the Statistics page
+renders it as a footnote under the table (`js/stats.js`), so this doesn't get re-raised as
+a discrepancy the next time someone totals the column by hand.
+
+**A second problem, found while scoping the backfill, not in the original brief.** The
+formula specified for `actual_risk_pct` is `NULL` wherever `stop_loss` is `NULL`. Checked
+against this account's own documented history before writing the backfill: **zero of
+challenge 6's 59 trades have a stop-loss on file** (every one is a Bitfunded import;
+confirmed explicitly in v3.14.1 and never changed since). Applied literally, the formula
+would leave `actual_risk_pct` — and everything downstream of it, including both new
+`RISK_TIER_BREACH`/`RISK_LADDER_DRIFT` rules and the entire Statistics ladder panel —
+permanently empty on the one account this feature exists to describe. Raised before
+writing the migration rather than shipping a feature that computes to nothing; decided in
+the same session: **`actual_risk_pct` falls back to `risk_amount ÷ balance_at_entry × 100`
+when `stop_loss` is null.** `risk_amount` has been populated for all 59 rows since the
+v3.12.0 R-multiple reconstruction (a real stop-out dollar amount for a confirmed full
+stop, a derived risk-unit estimate otherwise) — this fallback carries the exact same
+"estimated, not measured" caveat `r_multiple_source` already flags for those same rows,
+not a new claim of certainty. `clean_rep` was **not** given an equivalent fallback (out of
+scope for this decision) — it backfills to `0` for all 59 rows, correctly, since none of
+them have a pre-entry `trade_journal` record or a real `stop_loss` either; that's the
+"a trade with no pre-entry record is itself data" principle from v3.14.0 working as
+intended, not a bug to route around.
+
+**Migration design.** `balance_at_entry` is specified in the brief as "a running balance
+ordered by close time," including an overlap rule ("if a trade opened before an earlier
+one closed, use the balance as at its own open time"). Both are exactly captured by a
+single, order-independent, per-row condition — `starting_balance + SUM(net_pnl) of every
+trade whose time_out is before this trade's own time_in` — which needs no session
+variables or ORDER BY-dependent UPDATE (a pattern that's unreliable under modern MySQL/
+MariaDB optimizers and was avoided on purpose). The correlated SELECT is wrapped as its
+own derived table (`UPDATE trades t JOIN (SELECT ... FROM trades ...) calc ON ...`) rather
+than inlined into the `UPDATE`'s `SET` clause, because MySQL/MariaDB reject reading and
+writing the same table in one statement (error 1093) — the derived-table wrap is the
+standard, portable way around that, not specific to this migration.
+
+**Guards.** Pre-flight: challenge 6 identity + 59 rows + 3 active ladder tiers, all
+required before any `UPDATE` runs. Post-flight: row count and both `pnl`/`net_pnl` sums
+must be byte-for-byte unchanged (this migration only ever writes the five new columns —
+"backfill writes derived columns only" is enforced, not just stated), plus a units sanity
+bound (`MAX(actual_risk_pct) <= 25`) standing in for the brief's own instruction to
+"verify against one trade by hand" — this environment has no live data to hand-check
+against (no DB credentials here, by design, §13 rule 4), so the check is automated
+instead: nothing in this account's documented history comes close to a 25% position size,
+so a row at or above that almost certainly means a units mismatch (e.g. `lot_size` read as
+notional USDT instead of base-asset quantity) rather than a real number, and the migration
+refuses to commit a metric nobody would trust.
+
+**Three new rule methods, additive.** `ReviewEngineController.php` v3.6.0 → v3.7.0.
+`ruleSizeSkew` (size_skew > 1.15, n≥10 resolved trades — resolved meaning `exit_reason IN
+('Take Profit','Stop Loss')`, since a manually-closed trade's R was never the R that was
+actually risked), `ruleTierBreach` (≥1 trade exceeded its ladder ceiling by more than 15%),
+`ruleLadderDrift` (<85% ladder adherence, n≥10 sized trades). All three read from a new
+`computeSizeIntegrityMetrics()` alongside the existing `computeMetrics()` — dollars-per-R
+and skew are computed over the closed-and-resolved population passed into the period being
+reviewed; ladder adherence/tier-breach/deviation use every trade in scope with a backfilled
+`actual_risk_pct`, open or closed, since a sizing decision is real the moment a trade opens.
+Every figure whose own denominator is empty returns the literal string `'UNAVAILABLE'`
+rather than `0` — same convention as every other "absence of information is not a
+recorded zero" case already established in this codebase (`session`, `r_multiple`,
+`emotion_tag`).
+
+**Statistics page panel** mirrors the same metrics at whole-scope (same month/year filter
+as everything else on that page) rather than period-scoped like the Review page's version
+— `deviation_by_month` in particular only means something as a full-history view.
+
+**Deliberate scope boundary, not an oversight:** this release backfills challenge 6's
+existing 59 trades once. It does **not** touch `TradeController::saveTrade()` or
+`BitfundedImportController::confirm()` — a trade logged today, or a new Bitfunded import
+match, will not get `balance_at_entry`/`planned_risk_pct`/`actual_risk_pct` computed. Every
+Size Integrity figure in this release will stay frozen at its backfilled value for
+challenge 6 until a follow-up wires the same computation into the live save/import paths —
+flagged here the same way v3.14.0 flagged the equivalent gap for `r_multiple`/
+`risk_amount` on matched import rows (closed two releases later, in v3.14.1, once it was
+actually needed).
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

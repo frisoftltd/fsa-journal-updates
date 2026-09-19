@@ -78,6 +78,22 @@ class StatsController {
         // no r_multiple recorded (SQL's normal NULL handling) rather than treating a
         // missing R as zero, which would understate every bucket that has one.
         $stats['by_exit_reason'] = $qa("SELECT exit_reason,COUNT(*) as trades,AVG(r_multiple) as avg_r,SUM(r_multiple) as total_r,COALESCE(SUM(net_pnl),0) as pnl FROM trades $where AND exit_reason IS NOT NULL AND $closedFilter GROUP BY exit_reason", $p);
+        // v3.15.0 Phase 1, Step 0 finding: this breakdown sums net_pnl (fees already
+        // netted per row) but structurally cannot reflect challenges.funding_adjustment --
+        // funding isn't a trades column, and v3.14.0 deliberately never attributes it to
+        // any single trade (dates with overlapping positions and shared funding
+        // timestamps make that attribution a guess, not a fact). So this table's total
+        // will always sit short of true realised P&L by exactly the funding amount.
+        // Surfaced here so the UI can caption it instead of letting it look like a
+        // discrepancy every time someone adds the rows by hand.
+        $stats['exit_reason_excludes_funding'] = round((float)($ch['funding_adjustment'] ?? 0), 2);
+
+        // Size Integrity (v3.15.0 Phase 1) -- whole scope (same $where as everything else
+        // on this page, so a month/year filter narrows it the same way it narrows every
+        // other breakdown here). See getSizeIntegrity() docblock for why dollars-per-R
+        // uses the resolved-only population while the ladder figures use every sized
+        // trade regardless of outcome.
+        $stats['size_integrity'] = $this->getSizeIntegrity($where, $p, $closedFilter);
 
         // Cumulative P&L + drawdown
         $cum_trades = $qa("SELECT id,trade_date,net_pnl FROM trades $where ORDER BY trade_date,id", $p);
@@ -139,6 +155,80 @@ class StatsController {
         $stats['dd_pct'] = staticDrawdownPct($ch);
 
         jsonResponse($stats);
+    }
+
+    /**
+     * Size Integrity (v3.15.0 Phase 1). Dollars-per-R and size_skew are computed over the
+     * RESOLVED population only (exit_reason IN ('Take Profit','Stop Loss')) -- a
+     * manually-closed trade's R is not the R that was actually risked, so it can't inform
+     * how much a winner vs. a loser was sized (same reasoning ReviewEngineController's
+     * computeSizeIntegrityMetrics() uses). Ladder adherence / tier-breach / deviation
+     * figures instead look at every trade in scope with a backfilled actual_risk_pct
+     * (open or closed) -- a sizing decision is real the moment a trade opens.
+     *
+     * Every figure whose own denominator is 0 returns the literal string 'UNAVAILABLE',
+     * never a silent 0 or null cast to a number by the frontend.
+     */
+    private function getSizeIntegrity($where, $p, $closedFilter) {
+        $NA = 'UNAVAILABLE';
+
+        $byResult = [];
+        $stmt = $this->db->prepare(
+            "SELECT result, COALESCE(SUM(net_pnl),0) AS dollars, COALESCE(SUM(r_multiple),0) AS r
+             FROM trades $where AND $closedFilter AND exit_reason IN ('Take Profit','Stop Loss')
+             GROUP BY result"
+        );
+        $stmt->execute($p);
+        foreach ($stmt->fetchAll() as $row) $byResult[$row['result']] = $row;
+
+        $rcStmt = $this->db->prepare("SELECT COUNT(*) FROM trades $where AND $closedFilter AND exit_reason IN ('Take Profit','Stop Loss')");
+        $rcStmt->execute($p);
+        $resolvedN = (int)$rcStmt->fetchColumn();
+
+        $winDollars = (float)($byResult['Win']['dollars'] ?? 0);
+        $winR       = (float)($byResult['Win']['r'] ?? 0);
+        $lossDollars = abs((float)($byResult['Loss']['dollars'] ?? 0));
+        $lossR       = abs((float)($byResult['Loss']['r'] ?? 0));
+
+        $dprWinners = $winR > 0 ? round($winDollars / $winR, 2) : null;
+        $dprLosers  = $lossR > 0 ? round($lossDollars / $lossR, 2) : null;
+        $sizeSkew   = ($dprWinners !== null && $dprWinners > 0 && $dprLosers !== null) ? round($dprLosers / $dprWinners, 3) : null;
+
+        $sizedStmt = $this->db->prepare(
+            "SELECT COUNT(*) AS n,
+                    SUM(CASE WHEN ABS(risk_deviation_pct) <= 15 THEN 1 ELSE 0 END) AS within_tol,
+                    SUM(CASE WHEN planned_risk_pct IS NOT NULL AND actual_risk_pct > planned_risk_pct * 1.15 THEN 1 ELSE 0 END) AS breaches,
+                    MAX(ABS(risk_deviation_pct)) AS worst
+             FROM trades $where AND actual_risk_pct IS NOT NULL"
+        );
+        $sizedStmt->execute($p);
+        $sizedRow = $sizedStmt->fetch();
+        $sizedN = (int)($sizedRow['n'] ?? 0);
+        $ladderAdherence = $sizedN > 0 ? round(((int)$sizedRow['within_tol']) / $sizedN * 100, 1) : null;
+        $worstDeviation = ($sizedRow && $sizedRow['worst'] !== null) ? round((float)$sizedRow['worst'], 2) : null;
+
+        $monthStmt = $this->db->prepare(
+            "SELECT DATE_FORMAT(trade_date,'%Y-%m') AS month, COUNT(*) AS n, AVG(risk_deviation_pct) AS avg_dev
+             FROM trades $where AND actual_risk_pct IS NOT NULL AND risk_deviation_pct IS NOT NULL
+             GROUP BY DATE_FORMAT(trade_date,'%Y-%m') ORDER BY month ASC"
+        );
+        $monthStmt->execute($p);
+        $deviationByMonth = array_map(
+            fn($r) => ['month' => $r['month'], 'avg_deviation_pct' => round((float)$r['avg_dev'], 2), 'n' => (int)$r['n']],
+            $monthStmt->fetchAll()
+        );
+
+        return [
+            'dollars_per_R_winners' => $dprWinners ?? $NA,
+            'dollars_per_R_losers'  => $dprLosers ?? $NA,
+            'size_skew'             => $sizeSkew ?? $NA,
+            'resolved_n'            => $resolvedN,
+            'ladder_adherence_rate' => $ladderAdherence ?? $NA,
+            'tier_breach_count'     => $sizedN > 0 ? (int)$sizedRow['breaches'] : $NA,
+            'worst_deviation'       => $worstDeviation ?? $NA,
+            'deviation_by_month'    => $deviationByMonth,
+            'sized_n'               => $sizedN,
+        ];
     }
 
     /**

@@ -80,5 +80,36 @@
     <div class="card-title">By Exit Reason</div>
     <table><thead><tr><th>Exit Reason</th><th>Trades</th><th>Avg R</th><th>Total R</th><th>Net P&amp;L</th></tr></thead>
     <tbody id="s-exit-reason-tbody"></tbody></table>
+    <div id="s-exit-reason-footnote" style="font-size:10px;color:var(--text3);margin-top:6px"></div>
+  </div>
+  <div class="stats-grid" style="margin-top:14px">
+    <div class="card">
+      <!-- v3.15.0 Phase 1 (Size Integrity). dollars-per-R is computed over the resolved
+           population only (exit_reason Take Profit/Stop Loss) -- a manually-closed
+           trade's R isn't the R that was actually risked. UNAVAILABLE means the
+           denominator behind that figure is zero, not that it's zero. -->
+      <div class="card-title">Size Integrity — Dollars per R</div>
+      <div class="stat-row"><span class="stat-label">$ / R — Winners</span><span class="stat-val green" id="si-dpr-winners">—</span></div>
+      <div class="stat-row"><span class="stat-label">$ / R — Losers</span><span class="stat-val red" id="si-dpr-losers">—</span></div>
+      <div class="stat-row"><span class="stat-label">Size Skew (losers ÷ winners)</span><span class="stat-val" id="si-skew">—</span></div>
+      <div class="stat-row"><span class="stat-label">Resolved Trades</span><span class="stat-val" id="si-resolved-n">—</span></div>
+      <div id="si-skew-note" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+    </div>
+    <div class="card">
+      <!-- Ladder figures use every sized trade (actual_risk_pct not null), open or
+           closed -- a sizing decision is real the moment a trade opens, not just once
+           it resolves. -->
+      <div class="card-title">Size Integrity — Ladder Adherence</div>
+      <div class="stat-row"><span class="stat-label">Ladder Adherence</span><span class="stat-val" id="si-adherence">—</span></div>
+      <div class="stat-row"><span class="stat-label">Tier Breaches</span><span class="stat-val red" id="si-breaches">—</span></div>
+      <div class="stat-row"><span class="stat-label">Worst Deviation</span><span class="stat-val" id="si-worst-dev">—</span></div>
+      <div class="stat-row"><span class="stat-label">Sized Trades</span><span class="stat-val" id="si-sized-n">—</span></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <div class="card-title">Size Integrity — Deviation by Month</div>
+    <table><thead><tr><th>Month</th><th>Trades</th><th>Avg Deviation</th></tr></thead>
+    <tbody id="si-month-tbody"></tbody></table>
+    <div id="si-month-footnote" style="font-size:10px;color:var(--text3);margin-top:6px">Positive = sized larger than the ladder tier prescribed; negative = smaller.</div>
   </div>
 </div>

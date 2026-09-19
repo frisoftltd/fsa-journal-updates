@@ -1,10 +1,15 @@
 
 <?php
 /**
- * FundedControl — Behavioral Review Engine (v3.6.0, Wave 3)
+ * FundedControl — Behavioral Review Engine (v3.7.0, Size Integrity)
  * Handles: get_review, get_review_periods
  * Deterministic PHP rules over real trade data. No external API calls.
  * Leaves ReviewController / weekly_reviews (manual review) untouched.
+ *
+ * v3.7.0 (v3.15.0 Phase 1) adds three rule methods (ruleSizeSkew/ruleTierBreach/
+ * ruleLadderDrift) and their supporting metrics over the new risk_ladder_tiers table and
+ * trades.balance_at_entry/planned_risk_pct/actual_risk_pct/risk_deviation_pct/clean_rep
+ * columns (2026_09_19_000*). Additive only — the existing 20 rule methods are unchanged.
  */
 require_once __DIR__ . '/../emotion_states.php';
 
@@ -26,6 +31,8 @@ class ReviewEngineController {
     const MIN_SCRATCH        = 8;    // E3
     const MIN_TREND          = 10;   // E4, each period
     const MIN_CHALLENGE_RANK = 20;   // F3, each challenge
+    const MIN_SIZE_SKEW      = 10;   // G1, resolved (exit_reason Take Profit/Stop Loss) trades
+    const MIN_LADDER_DRIFT   = 10;   // G3, sized (actual_risk_pct not null) trades
 
     private $db;
     private $uid;
@@ -83,6 +90,8 @@ class ReviewEngineController {
         $trades = $this->fetchTrades($challengeId, $periodStart, $periodEnd);
         $closed = array_values(array_filter($trades, fn($t) => in_array($t['result'], ['Win','Loss','Break Even'], true)));
         $metrics = $this->computeMetrics($closed, $trades);
+        $sizeMetrics = $this->computeSizeIntegrityMetrics($closed, $trades, $challenge);
+        $metrics = array_merge($metrics, $sizeMetrics);
 
         $scope = ['challenge_id' => $challengeId, 'label' => $challenge ? $challenge['name'] : 'All Combined'];
 
@@ -119,7 +128,10 @@ class ReviewEngineController {
             $this->rulePeriodTrend($type, $periodStart, $challengeId, $closed),
             $challenge ? $this->ruleDrawdownProximity($challenge) : [],
             $challenge ? $this->ruleDailyLossLimitHits($closed, $challenge) : [],
-            !$challenge ? $this->ruleAggressiveVsReserved($closed, $challengeMap) : []
+            !$challenge ? $this->ruleAggressiveVsReserved($closed, $challengeMap) : [],
+            $this->ruleSizeSkew($sizeMetrics),
+            $challenge ? $this->ruleTierBreach($sizeMetrics, $challenge) : [],
+            $this->ruleLadderDrift($sizeMetrics)
         );
 
         $order = ['alert' => 0, 'watch' => 1, 'good' => 2];
@@ -181,7 +193,7 @@ class ReviewEngineController {
     // ── DATA FETCH ───────────────────────────────────────────
 
     private function fetchTrades($challengeId, $start, $end) {
-        $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,net_pnl,r_multiple,r_multiple_source,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id";
+        $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,net_pnl,r_multiple,r_multiple_source,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id,exit_reason,balance_at_entry,planned_risk_pct,actual_risk_pct,risk_deviation_pct,clean_rep";
         if ($challengeId) {
             $s = $this->db->prepare("SELECT $cols FROM trades WHERE user_id=? AND challenge_id=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date ASC, time_in ASC, id ASC");
             $s->execute([$this->uid, $challengeId, $start, $end]);
@@ -227,6 +239,116 @@ class ReviewEngineController {
             'avg_loss_r' => $losses > 0 ? round($lossRSum / $losses, 2) : 0,
             'r_estimated_pct' => $this->rEstimatedPct($closed),
         ];
+    }
+
+    /**
+     * Size Integrity metrics (v3.7.0 / v3.15.0 Phase 1). Winners/losers for dollars-per-R
+     * and size_skew are drawn from the RESOLVED population only (exit_reason IN
+     * ('Take Profit','Stop Loss')) — a manually-closed trade's R is not the R that was
+     * actually risked, so it can't inform how much a winner vs. a loser was sized. Ladder
+     * metrics (adherence/tier-breach/deviation) instead use every trade in scope with a
+     * backfilled actual_risk_pct ($allTrades, not $closed) — a sizing decision is real the
+     * moment the trade is opened, whether or not it's resolved yet.
+     *
+     * Every figure that can't be computed (its own n = 0, or no challenge in scope for the
+     * ladder-lookup figures) returns the literal string 'UNAVAILABLE', never a silent 0 —
+     * a rule reading one of these tokens is expected to refuse to fire rather than render
+     * "UNAVAILABLE" into a sentence (see ruleSizeSkew/ruleTierBreach/ruleLadderDrift below,
+     * each of which checks its own gating figure before firing).
+     */
+    private function computeSizeIntegrityMetrics($closed, $allTrades, $challenge) {
+        $NA = 'UNAVAILABLE';
+        $resolved = array_values(array_filter($closed, fn($t) => in_array($t['exit_reason'] ?? null, ['Take Profit', 'Stop Loss'], true)));
+        $winners = array_values(array_filter($resolved, fn($t) => $t['result'] === 'Win'));
+        $losers  = array_values(array_filter($resolved, fn($t) => $t['result'] === 'Loss'));
+
+        $winDollars = array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $winners));
+        $winR       = array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $winners));
+        $lossDollars = abs(array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $losers)));
+        $lossR       = abs(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $losers)));
+
+        $dprWinners = $winR > 0 ? round($winDollars / $winR, 2) : null;
+        $dprLosers  = $lossR > 0 ? round($lossDollars / $lossR, 2) : null;
+        $sizeSkew   = ($dprWinners !== null && $dprWinners > 0 && $dprLosers !== null) ? round($dprLosers / $dprWinners, 3) : null;
+
+        $totalR = round(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $resolved)), 2);
+        $totalDollars = round(array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $resolved)), 2);
+
+        // Sized trades: any trade in scope (open or closed) with a backfilled actual_risk_pct.
+        $sized = array_values(array_filter($allTrades, fn($t) => $t['actual_risk_pct'] !== null));
+        $sizedN = count($sized);
+        $withinTolerance = count(array_filter($sized, fn($t) => abs((float)$t['risk_deviation_pct']) <= 15));
+        $ladderAdherence = $sizedN > 0 ? round($withinTolerance / $sizedN * 100, 1) : null;
+
+        $breachCount = count(array_filter($sized, function ($t) {
+            if ($t['planned_risk_pct'] === null) return false;
+            return (float)$t['actual_risk_pct'] > (float)$t['planned_risk_pct'] * 1.15;
+        }));
+
+        $deviations = array_map(fn($t) => abs((float)$t['risk_deviation_pct']), array_values(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null)));
+        $worstDeviation = $deviations ? round(max($deviations), 2) : null;
+
+        $byMonth = [];
+        foreach ($sized as $t) {
+            if ($t['risk_deviation_pct'] === null || empty($t['trade_date'])) continue;
+            $m = substr($t['trade_date'], 0, 7);
+            if (!isset($byMonth[$m])) $byMonth[$m] = ['n' => 0, 'sum' => 0.0];
+            $byMonth[$m]['n']++;
+            $byMonth[$m]['sum'] += (float)$t['risk_deviation_pct'];
+        }
+        $deviationByMonth = [];
+        foreach ($byMonth as $m => $v) $deviationByMonth[] = ['month' => $m, 'avg_deviation_pct' => round($v['sum'] / $v['n'], 2), 'n' => $v['n']];
+        usort($deviationByMonth, fn($a, $b) => strcmp($a['month'], $b['month']));
+
+        // current_tier_pct / consecutive_stops_to_failure need a specific challenge's
+        // ladder and live balance — UNAVAILABLE for "All Combined" scope, where there is
+        // no single ladder to look up against.
+        $currentTierPct = null; $consecutiveStopsToFailure = null;
+        if ($challenge) {
+            $tiers = $this->getLadderTiers($challenge['id']);
+            $currentBalance = (float)($challenge['current_balance'] ?? 0);
+            $currentTierPct = $this->ladderLookup($tiers, $currentBalance);
+            $maxDd = (float)($challenge['max_drawdown_pct'] ?? 0);
+            $starting = (float)($challenge['starting_balance'] ?? 0);
+            if ($currentTierPct !== null && $currentTierPct > 0 && $maxDd > 0 && $starting > 0) {
+                $usedDollars = $starting * staticDrawdownPct($challenge) / 100;
+                $allowanceDollars = $starting * $maxDd / 100;
+                $remainingRoom = max(0, $allowanceDollars - $usedDollars);
+                $riskDollarsAtCurrentTier = $currentBalance * $currentTierPct / 100;
+                $consecutiveStopsToFailure = $riskDollarsAtCurrentTier > 0 ? round($remainingRoom / $riskDollarsAtCurrentTier, 1) : null;
+            }
+        }
+
+        return [
+            'dollars_per_R_winners' => $dprWinners ?? $NA,
+            'dollars_per_R_losers'  => $dprLosers ?? $NA,
+            'size_skew'             => $sizeSkew ?? $NA,
+            'resolved_n'            => count($resolved),
+            'total_R'               => $totalR,
+            'total_dollars'         => $totalDollars,
+            'ladder_adherence_rate' => $ladderAdherence ?? $NA,
+            'tier_breach_count'     => $sizedN > 0 ? $breachCount : $NA,
+            'worst_deviation'       => $worstDeviation ?? $NA,
+            'deviation_by_month'    => $deviationByMonth,
+            'sized_n'               => $sizedN,
+            'current_tier_pct'      => $currentTierPct ?? $NA,
+            'consecutive_stops_to_failure' => $consecutiveStopsToFailure ?? $NA,
+        ];
+    }
+
+    private function getLadderTiers($challengeId) {
+        $s = $this->db->prepare("SELECT lower_balance, upper_balance, risk_pct FROM risk_ladder_tiers WHERE challenge_id=? AND active=1 ORDER BY lower_balance ASC");
+        $s->execute([$challengeId]);
+        return $s->fetchAll();
+    }
+
+    private function ladderLookup($tiers, $balance) {
+        foreach ($tiers as $t) {
+            $lower = (float)$t['lower_balance'];
+            $upper = $t['upper_balance'] !== null ? (float)$t['upper_balance'] : null;
+            if ($balance >= $lower && ($upper === null || $balance < $upper)) return (float)$t['risk_pct'];
+        }
+        return null;
     }
 
     /**
@@ -911,6 +1033,50 @@ class ReviewEngineController {
             'detail' => "'{$t['name']}': expectancy " . ($t['expectancy_r'] >= 0 ? '+' : '') . "{$t['expectancy_r']}R over {$t['n']} trades. '{$b['name']}': " . ($b['expectancy_r'] >= 0 ? '+' : '') . "{$b['expectancy_r']}R over {$b['n']} trades." . $this->rCaveat(array_merge($byChallenge[$top], $byChallenge[$bottom])),
             'recommendation' => "Lean into whatever '{$t['name']}' is doing differently — sizing, setup selection, or pace.",
             'based_on_n' => $t['n'] + $b['n'], 'conclusive' => true,
+        ]];
+    }
+
+    // ── G. SIZE INTEGRITY (v3.7.0 / v3.15.0 Phase 1) ────────
+
+    private function ruleSizeSkew($size) {
+        if ($size['size_skew'] === 'UNAVAILABLE' || $size['resolved_n'] < self::MIN_SIZE_SKEW) return [];
+        if ($size['size_skew'] <= 1.15) return [];
+        $skewPct = round(($size['size_skew'] - 1) * 100, 1);
+        return [[
+            'severity' => 'alert', 'category' => 'risk',
+            'headline' => 'Losers are sized bigger than winners.',
+            'detail' => "Losers sized {$skewPct}% above winners — \$" . number_format($size['dollars_per_R_losers'], 2)
+                . " per R on losses against \$" . number_format($size['dollars_per_R_winners'], 2) . " on wins, across {$size['resolved_n']} resolved trades. Net "
+                . ($size['total_R'] >= 0 ? '+' : '') . "{$size['total_R']}R is " . ($size['total_R'] >= 0 ? 'positive' : 'negative') . "; net \$"
+                . number_format($size['total_dollars'], 2) . " is " . ($size['total_dollars'] >= 0 ? 'positive too' : 'not') . '.',
+            'recommendation' => "Size losers the same as winners — the setup isn't producing this gap, position sizing on losing trades is.",
+            'based_on_n' => $size['resolved_n'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleTierBreach($size, $challenge) {
+        if ($size['tier_breach_count'] === 'UNAVAILABLE' || $size['tier_breach_count'] < 1) return [];
+        $balance = number_format((float)($challenge['current_balance'] ?? 0), 2);
+        $tierPct = $size['current_tier_pct'] === 'UNAVAILABLE' ? '?' : $size['current_tier_pct'];
+        return [[
+            'severity' => 'alert', 'category' => 'risk',
+            'headline' => "{$size['tier_breach_count']} trade(s) breached the risk ladder.",
+            'detail' => "{$size['tier_breach_count']} trade(s) exceeded the ladder ceiling for their balance band. At \${$balance} the ladder prescribes {$tierPct}%.",
+            'recommendation' => 'Size to the ladder tier for your balance at entry — check the tier before sizing, not after.',
+            'based_on_n' => $size['sized_n'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleLadderDrift($size) {
+        if ($size['ladder_adherence_rate'] === 'UNAVAILABLE' || $size['sized_n'] < self::MIN_LADDER_DRIFT) return [];
+        if ($size['ladder_adherence_rate'] >= 85) return [];
+        $worst = $size['worst_deviation'] === 'UNAVAILABLE' ? '?' : $size['worst_deviation'];
+        return [[
+            'severity' => 'watch', 'category' => 'risk',
+            'headline' => 'Ladder adherence is slipping.',
+            'detail' => "Ladder held on {$size['ladder_adherence_rate']}% of {$size['sized_n']} sized trades. Worst deviation {$worst}%.",
+            'recommendation' => 'Recheck position size against the ladder tier before every entry, not just when balance is trending down.',
+            'based_on_n' => $size['sized_n'], 'conclusive' => true,
         ]];
     }
 

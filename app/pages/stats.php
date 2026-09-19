@@ -94,6 +94,11 @@
       <div class="stat-row"><span class="stat-label">Size Skew (losers ÷ winners)</span><span class="stat-val" id="si-skew">—</span></div>
       <div class="stat-row"><span class="stat-label">Resolved Trades</span><span class="stat-val" id="si-resolved-n">—</span></div>
       <div id="si-skew-note" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+      <!-- v3.16.0: dollars-per-R is Σ$ ÷ ΣR (a P&L-weighted harmonic mean of risk), not
+           AVG(risk_amount) -- one large trade dominates it the way it wouldn't dominate a
+           simple average. Stated explicitly so this figure is never read against, or
+           expected to match, an arithmetic-mean risk number elsewhere on this page. -->
+      <div style="font-size:10px;color:var(--text3);margin-top:8px">$ / R is Σ dollars ÷ Σ R across the resolved population — a P&amp;L-weighted harmonic mean of risk, not an arithmetic average. Not comparable to AVG(risk_amount).</div>
     </div>
     <div class="card">
       <!-- Ladder figures use every sized trade (actual_risk_pct not null), open or

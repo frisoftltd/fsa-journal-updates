@@ -81,6 +81,7 @@ function renderReviewMetrics(m) {
 const REVIEW_SEVERITY = {
     alert: { color: '#DC3545', bg: '#FDEAEA', label: 'ALERT' },
     watch: { color: '#F59E0B', bg: '#FEF3E2', label: 'WATCH' },
+    info:  { color: '#3B82F6', bg: '#EAF2FE', label: 'INFO' },
     good:  { color: '#0FA958', bg: '#E3F2E8', label: 'GOOD' },
 };
 

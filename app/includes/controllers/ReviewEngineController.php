@@ -1,15 +1,25 @@
 
 <?php
 /**
- * FundedControl — Behavioral Review Engine (v3.7.0, Size Integrity)
+ * FundedControl — Behavioral Review Engine (v3.8.0, Exit Quality)
  * Handles: get_review, get_review_periods
  * Deterministic PHP rules over real trade data. No external API calls.
  * Leaves ReviewController / weekly_reviews (manual review) untouched.
  *
- * v3.7.0 (v3.15.0 Phase 1) adds three rule methods (ruleSizeSkew/ruleTierBreach/
+ * v3.7.0 (v3.15.0 Phase 1) added three rule methods (ruleSizeSkew/ruleTierBreach/
  * ruleLadderDrift) and their supporting metrics over the new risk_ladder_tiers table and
  * trades.balance_at_entry/planned_risk_pct/actual_risk_pct/risk_deviation_pct/clean_rep
- * columns (2026_09_19_000*). Additive only — the existing 20 rule methods are unchanged.
+ * columns.
+ *
+ * v3.8.0 (v3.16.0 Phase 2) recalibrates those three (RISK_SIZE_SKEW threshold/severity,
+ * RISK_TIER_BREACH's month-named message, RISK_LADDER_DRIFT's threshold/over-under split)
+ * against real data, moves the ladder tier basis from balance_at_entry to the new
+ * balance_at_day_start (start-of-day, not exact-entry-time — see computePhase2Metrics'
+ * sibling migration comments for why), and adds fifteen more rule methods across
+ * Repetition, Exit Quality, Edge (recorded/estimated split), Cost, and Geometry. A fourth
+ * severity, 'info', is introduced for context that isn't a problem (see the $order map in
+ * getReview()). Additive only — no existing rule method (Phase 0's 20 or Phase 1's 3) was
+ * rewritten, only recalibrated where explicitly instructed.
  */
 require_once __DIR__ . '/../emotion_states.php';
 
@@ -92,6 +102,8 @@ class ReviewEngineController {
         $metrics = $this->computeMetrics($closed, $trades);
         $sizeMetrics = $this->computeSizeIntegrityMetrics($closed, $trades, $challenge);
         $metrics = array_merge($metrics, $sizeMetrics);
+        $phase2Metrics = $this->computePhase2Metrics($closed, $trades, $challenge, $sizeMetrics);
+        $metrics = array_merge($metrics, $phase2Metrics);
 
         $scope = ['challenge_id' => $challengeId, 'label' => $challenge ? $challenge['name'] : 'All Combined'];
 
@@ -131,10 +143,28 @@ class ReviewEngineController {
             !$challenge ? $this->ruleAggressiveVsReserved($closed, $challengeMap) : [],
             $this->ruleSizeSkew($sizeMetrics),
             $challenge ? $this->ruleTierBreach($sizeMetrics, $challenge) : [],
-            $this->ruleLadderDrift($sizeMetrics)
+            $this->ruleLadderDrift($sizeMetrics),
+            $this->ruleNoCleanReps($phase2Metrics),
+            $this->ruleTemplateExists($phase2Metrics),
+            $this->ruleRepFields($phase2Metrics),
+            $this->ruleNoDenominator(),
+            $this->ruleExitTargetShort($phase2Metrics),
+            $this->ruleExitQualityUnknown($phase2Metrics),
+            $this->ruleExitValidHeld($phase2Metrics),
+            $this->ruleEdgeRecordedOnly($phase2Metrics),
+            $this->ruleEdgeUnproven($phase2Metrics),
+            $this->ruleEdgeNegative($phase2Metrics),
+            $this->ruleEdgeInterventionPositive($phase2Metrics),
+            $this->ruleCostExceedsLoss($phase2Metrics),
+            $this->ruleCostDrag($phase2Metrics),
+            $this->ruleCostFlipped($phase2Metrics),
+            $challenge ? $this->ruleGeoRatioDrift($phase2Metrics) : []
         );
 
-        $order = ['alert' => 0, 'watch' => 1, 'good' => 2];
+        // 'info' added v3.16.0 -- a fourth severity for context that isn't a problem
+        // (recorded/estimated disclosures, sample-size notices) and shouldn't compete
+        // for attention with a real 'watch'/'alert' finding, but also isn't a 'good'.
+        $order = ['alert' => 0, 'watch' => 1, 'info' => 2, 'good' => 3];
         usort($insights, fn($a, $b) => $order[$a['severity']] <=> $order[$b['severity']]);
 
         $this->upsertReview($challengeId, $type, $periodStart, $periodEnd, json_encode($insights), json_encode($metrics));
@@ -193,7 +223,7 @@ class ReviewEngineController {
     // ── DATA FETCH ───────────────────────────────────────────
 
     private function fetchTrades($challengeId, $start, $end) {
-        $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,net_pnl,r_multiple,r_multiple_source,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id,exit_reason,balance_at_entry,planned_risk_pct,actual_risk_pct,risk_deviation_pct,clean_rep";
+        $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,pnl,net_pnl,fees,r_multiple,r_multiple_source,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id,exit_reason,stop_loss,take_profit,balance_at_entry,planned_risk_pct,actual_risk_pct,risk_deviation_pct,clean_rep,target_r,exit_quality";
         if ($challengeId) {
             $s = $this->db->prepare("SELECT $cols FROM trades WHERE user_id=? AND challenge_id=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date ASC, time_in ASC, id ASC");
             $s->execute([$this->uid, $challengeId, $start, $end]);
@@ -280,13 +310,31 @@ class ReviewEngineController {
         $withinTolerance = count(array_filter($sized, fn($t) => abs((float)$t['risk_deviation_pct']) <= 15));
         $ladderAdherence = $sizedN > 0 ? round($withinTolerance / $sizedN * 100, 1) : null;
 
-        $breachCount = count(array_filter($sized, function ($t) {
+        // v3.16.0: a bare breach count reads the same whether it's 11 breaches in one
+        // week or spread across four months -- so the breach set is also broken out by
+        // month for RISK_TIER_BREACH's message.
+        $breachedTrades = array_values(array_filter($sized, function ($t) {
             if ($t['planned_risk_pct'] === null) return false;
             return (float)$t['actual_risk_pct'] > (float)$t['planned_risk_pct'] * 1.15;
         }));
+        $breachCount = count($breachedTrades);
+        $breachByMonth = [];
+        foreach ($breachedTrades as $t) {
+            if (empty($t['trade_date'])) continue;
+            $m = substr($t['trade_date'], 0, 7);
+            $breachByMonth[$m] = ($breachByMonth[$m] ?? 0) + 1;
+        }
+        ksort($breachByMonth);
 
         $deviations = array_map(fn($t) => abs((float)$t['risk_deviation_pct']), array_values(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null)));
         $worstDeviation = $deviations ? round(max($deviations), 2) : null;
+
+        // v3.16.0: oversizing and undersizing are different failures (one burns the
+        // account faster than planned, the other under-uses an edge that's actually
+        // there) -- RISK_LADDER_DRIFT's message now splits them instead of reporting one
+        // adherence number.
+        $overTierCount  = count(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null && (float)$t['risk_deviation_pct'] > 15));
+        $underTierCount = count(array_filter($sized, fn($t) => $t['risk_deviation_pct'] !== null && (float)$t['risk_deviation_pct'] < -15));
 
         $byMonth = [];
         foreach ($sized as $t) {
@@ -328,8 +376,11 @@ class ReviewEngineController {
             'total_dollars'         => $totalDollars,
             'ladder_adherence_rate' => $ladderAdherence ?? $NA,
             'tier_breach_count'     => $sizedN > 0 ? $breachCount : $NA,
+            'tier_breach_by_month'  => $breachByMonth,
             'worst_deviation'       => $worstDeviation ?? $NA,
             'deviation_by_month'    => $deviationByMonth,
+            'over_tier_count'       => $sizedN > 0 ? $overTierCount : $NA,
+            'under_tier_count'      => $sizedN > 0 ? $underTierCount : $NA,
             'sized_n'               => $sizedN,
             'current_tier_pct'      => $currentTierPct ?? $NA,
             'consecutive_stops_to_failure' => $consecutiveStopsToFailure ?? $NA,
@@ -349,6 +400,130 @@ class ReviewEngineController {
             if ($balance >= $lower && ($upper === null || $balance < $upper)) return (float)$t['risk_pct'];
         }
         return null;
+    }
+
+    /** "2026-07" -> "July 2026", for the month-named breach lists added in v3.16.0. */
+    private function monthLabel($ym) {
+        $d = DateTime::createFromFormat('Y-m-d', "$ym-01");
+        return $d ? $d->format('F Y') : $ym;
+    }
+
+    /**
+     * v3.16.0 Phase 2 metrics: Repetition, Exit Quality, Edge (recorded/estimated split),
+     * Cost, and Geometry. Every figure with an empty denominator returns 'UNAVAILABLE',
+     * same convention as computeSizeIntegrityMetrics().
+     *
+     * fee_drag_R / fee_drag_pct and purchased_ratio / live_boundary_ratio / ratio_drift
+     * are not given explicit formulas anywhere in the briefings this was built from —
+     * only their conditions and message templates. Derived here, documented in CLAUDE.md
+     * v3.16.0: fee_drag_R converts the average fee into the same $-per-R unit
+     * dollars_per_R_winners already uses elsewhere on this account (how many R a typical
+     * fee costs); fee_drag_pct is the average fee as a % of the average winning trade;
+     * purchased_ratio is profit_target_amt ÷ max_loss_amt at the challenge's own stated
+     * terms; live_boundary_ratio is the same ratio recomputed against what's actually
+     * left — remaining distance to target ÷ remaining room before max loss — at the
+     * account's current balance.
+     */
+    private function computePhase2Metrics($closed, $allTrades, $challenge, $sizeMetrics) {
+        $NA = 'UNAVAILABLE';
+        $totalN = count($allTrades);
+
+        // ── Repetition ───────────────────────────────────────
+        $cleanRepTrades = array_values(array_filter($allTrades, fn($t) => (int)($t['clean_rep'] ?? 0) === 1));
+        $cleanReps = count($cleanRepTrades);
+        $cleanRepIds = $cleanRepTrades ? implode(', ', array_map(fn($t) => '#' . $t['id'], $cleanRepTrades)) : '';
+
+        $fieldLabels = ['stop_loss' => 'Stop Loss', 'take_profit' => 'Take Profit', 'setup_grade' => 'Setup Grade', 'emotion_tag' => 'Emotion Tag'];
+        $fieldCompleteness = [];
+        foreach ($fieldLabels as $col => $label) {
+            $filled = count(array_filter($allTrades, fn($t) => isset($t[$col]) && $t[$col] !== null && $t[$col] !== ''));
+            $fieldCompleteness[$label] = $totalN > 0 ? round($filled / $totalN * 100, 1) : 0.0;
+        }
+        $weakestField = null; $weakestFieldPct = null;
+        if ($fieldCompleteness) {
+            asort($fieldCompleteness);
+            $weakestField = array_key_first($fieldCompleteness);
+            $weakestFieldPct = $fieldCompleteness[$weakestField];
+        }
+
+        // ── Exit Quality ─────────────────────────────────────
+        $targetHitValid = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'target_hit_valid'));
+        $targetHitShort = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'target_hit_short'));
+        $stoppedShort   = array_values(array_filter($closed, fn($t) => ($t['exit_quality'] ?? null) === 'stopped_short'));
+        $unknownExit    = array_values(array_filter($allTrades, fn($t) => ($t['exit_quality'] ?? null) === null || ($t['exit_quality'] ?? null) === 'unknown'));
+
+        $shortN = count($targetHitShort) + count($stoppedShort);
+        $tpShortN = count($targetHitShort);
+        $avgShortR = $tpShortN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $targetHitShort)) / $tpShortN, 2) : null;
+        $unknownPct = $totalN > 0 ? round(count($unknownExit) / $totalN * 100, 1) : 0.0;
+        $validN = count($targetHitValid);
+        $avgValidR = $validN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $targetHitValid)) / $validN, 2) : null;
+
+        // ── Edge (recorded vs. estimated R) ───────────────────
+        $recorded  = array_values(array_filter($closed, fn($t) => ($t['r_multiple_source'] ?? null) !== 'estimated'));
+        $estimated = array_values(array_filter($closed, fn($t) => ($t['r_multiple_source'] ?? null) === 'estimated'));
+        $recordedN = count($recorded); $estimatedN = count($estimated);
+        $expectancyRecordedR = $recordedN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['r_multiple'] ?? 0), $recorded)) / $recordedN, 2) : null;
+        $pnlPerTrade = $recordedN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $recorded)) / $recordedN, 2) : null;
+
+        $resolvedForEdge = array_values(array_filter($closed, fn($t) => in_array($t['exit_reason'] ?? null, ['Take Profit', 'Stop Loss'], true)));
+        $manualForEdge   = array_values(array_filter($closed, fn($t) => ($t['exit_reason'] ?? null) === 'Manual Closing'));
+        $resolvedEdgeN = count($resolvedForEdge); $intervenedN = count($manualForEdge);
+        $avgPnlResolved = $resolvedEdgeN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $resolvedForEdge)) / $resolvedEdgeN, 2) : null;
+        $avgPnlManual   = $intervenedN > 0 ? round(array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $manualForEdge)) / $intervenedN, 2) : null;
+
+        // ── Cost ───────────────────────────────────────────────
+        $totalFeesTrades = round(array_sum(array_map(fn($t) => (float)($t['fees'] ?? 0), $closed)), 2);
+        $fundingAdj = $challenge ? round((float)($challenge['funding_adjustment'] ?? 0), 2) : 0.0;
+        $totalFees = round($totalFeesTrades + $fundingAdj, 2);
+        $tradingPnl = round(array_sum(array_map(fn($t) => (float)($t['pnl'] ?? 0), $closed)), 2);
+        $tradingPnlAbs = abs($tradingPnl);
+
+        $avgFeePerTrade = count($closed) > 0 ? ($totalFeesTrades / count($closed)) : null;
+        $dprWinners = is_numeric($sizeMetrics['dollars_per_R_winners'] ?? null) ? (float)$sizeMetrics['dollars_per_R_winners'] : null;
+        $feeDragR = ($avgFeePerTrade !== null && $dprWinners !== null && $dprWinners > 0) ? round($avgFeePerTrade / $dprWinners, 3) : null;
+
+        $winsForDrag = array_values(array_filter($closed, fn($t) => $t['result'] === 'Win'));
+        $avgWinDollars = $winsForDrag ? array_sum(array_map(fn($t) => (float)($t['net_pnl'] ?? 0), $winsForDrag)) / count($winsForDrag) : null;
+        $feeDragPct = ($avgFeePerTrade !== null && $avgWinDollars !== null && $avgWinDollars > 0) ? round($avgFeePerTrade / $avgWinDollars * 100, 1) : null;
+
+        $tradesFlipped = count(array_filter($closed, fn($t) => (float)($t['pnl'] ?? 0) > 0 && (float)($t['net_pnl'] ?? 0) < 0));
+
+        // ── Geometry ─────────────────────────────────────────
+        $purchasedRatio = null; $liveBoundaryRatio = null; $ratioDrift = null;
+        if ($challenge) {
+            $target = (float)($challenge['profit_target_amt'] ?? 0);
+            $maxLoss = (float)($challenge['max_loss_amt'] ?? 0);
+            if ($target > 0 && $maxLoss > 0) {
+                $purchasedRatio = round($target / $maxLoss, 3);
+                $netChange = (float)($challenge['current_balance'] ?? 0) - (float)($challenge['starting_balance'] ?? 0);
+                $remainingToTarget = $target - $netChange;
+                $remainingToFailure = $maxLoss + $netChange;
+                if ($remainingToFailure > 0 && $purchasedRatio > 0) {
+                    $liveBoundaryRatio = round($remainingToTarget / $remainingToFailure, 3);
+                    $ratioDrift = round($liveBoundaryRatio / $purchasedRatio, 3);
+                }
+            }
+        }
+
+        return [
+            // Repetition
+            'clean_reps' => $cleanReps, 'total_n' => $totalN, 'clean_rep_ids' => $cleanRepIds,
+            'field_completeness' => $weakestFieldPct ?? $NA, 'weakest_field' => $weakestField ?? $NA, 'weakest_field_pct' => $weakestFieldPct ?? $NA,
+            // Exit Quality
+            'short_n' => $shortN, 'tp_short_n' => $tpShortN, 'avg_short_r' => $avgShortR ?? $NA,
+            'unknown_pct' => $unknownPct, 'valid_n' => $validN, 'avg_valid_r' => $avgValidR ?? $NA,
+            // Edge
+            'recorded_n' => $recordedN, 'estimated_n' => $estimatedN,
+            'expectancy_recorded_R' => $expectancyRecordedR ?? $NA, 'pnl_per_trade' => $pnlPerTrade ?? $NA,
+            'avg_pnl_resolved' => $avgPnlResolved ?? $NA, 'avg_pnl_manual' => $avgPnlManual ?? $NA,
+            'resolved_n' => $resolvedEdgeN, 'intervened_n' => $intervenedN,
+            // Cost
+            'total_fees' => $totalFees, 'trading_pnl' => $tradingPnl, 'trading_pnl_abs' => $tradingPnlAbs,
+            'fee_drag_R' => $feeDragR ?? $NA, 'fee_drag_pct' => $feeDragPct ?? $NA, 'trades_flipped' => $tradesFlipped,
+            // Geometry
+            'purchased_ratio' => $purchasedRatio ?? $NA, 'live_boundary_ratio' => $liveBoundaryRatio ?? $NA, 'ratio_drift' => $ratioDrift ?? $NA,
+        ];
     }
 
     /**
@@ -1038,12 +1213,19 @@ class ReviewEngineController {
 
     // ── G. SIZE INTEGRITY (v3.7.0 / v3.15.0 Phase 1) ────────
 
+    /**
+     * v3.16.0 recalibration: 1.15 fired on artifact-level skew (1.08 in practice, once
+     * the start-of-day tier rebase and exit-quality work landed) -- raised to 1.25 and
+     * downgraded from 'alert' to 'info'. This is still worth surfacing (size skew is a
+     * real, checkable number) but it is no longer treated as an active problem on this
+     * account's actual data; it reads as a below-threshold data point, not a red banner.
+     */
     private function ruleSizeSkew($size) {
         if ($size['size_skew'] === 'UNAVAILABLE' || $size['resolved_n'] < self::MIN_SIZE_SKEW) return [];
-        if ($size['size_skew'] <= 1.15) return [];
+        if ($size['size_skew'] <= 1.25) return [];
         $skewPct = round(($size['size_skew'] - 1) * 100, 1);
         return [[
-            'severity' => 'alert', 'category' => 'risk',
+            'severity' => 'info', 'category' => 'risk',
             'headline' => 'Losers are sized bigger than winners.',
             'detail' => "Losers sized {$skewPct}% above winners — \$" . number_format($size['dollars_per_R_losers'], 2)
                 . " per R on losses against \$" . number_format($size['dollars_per_R_winners'], 2) . " on wins, across {$size['resolved_n']} resolved trades. Net "
@@ -1058,25 +1240,230 @@ class ReviewEngineController {
         if ($size['tier_breach_count'] === 'UNAVAILABLE' || $size['tier_breach_count'] < 1) return [];
         $balance = number_format((float)($challenge['current_balance'] ?? 0), 2);
         $tierPct = $size['current_tier_pct'] === 'UNAVAILABLE' ? '?' : $size['current_tier_pct'];
+        // v3.16.0: name which months carried the breaches -- 11 spread over 4 months
+        // reads as a persistent pattern; 11 in one week reads as a single bad stretch.
+        $months = $size['tier_breach_by_month'] ?? [];
+        $monthsText = $months
+            ? implode(', ', array_map(fn($m, $n) => $this->monthLabel($m) . " ({$n})", array_keys($months), array_values($months)))
+            : 'month unknown';
         return [[
             'severity' => 'alert', 'category' => 'risk',
             'headline' => "{$size['tier_breach_count']} trade(s) breached the risk ladder.",
-            'detail' => "{$size['tier_breach_count']} trade(s) exceeded the ladder ceiling for their balance band. At \${$balance} the ladder prescribes {$tierPct}%.",
+            'detail' => "{$size['tier_breach_count']} trade(s) exceeded the ladder ceiling for their balance band: {$monthsText}. At \${$balance} the ladder prescribes {$tierPct}%.",
             'recommendation' => 'Size to the ladder tier for your balance at entry — check the tier before sizing, not after.',
             'based_on_n' => $size['sized_n'], 'conclusive' => true,
         ]];
     }
 
+    /**
+     * v3.16.0 recalibration: <85% fired at 74.6% (the account's actual, start-of-day-
+     * rebased baseline) -- raised the trigger to <70 so this baseline itself doesn't read
+     * as a violation. Also splits the miss into over-tier (sized bigger than the ladder
+     * allowed — burns the account faster than planned) vs. under-tier (sized smaller —
+     * under-uses an edge that's actually there) — two different failures that a single
+     * adherence percentage collapsed into one number.
+     */
     private function ruleLadderDrift($size) {
         if ($size['ladder_adherence_rate'] === 'UNAVAILABLE' || $size['sized_n'] < self::MIN_LADDER_DRIFT) return [];
-        if ($size['ladder_adherence_rate'] >= 85) return [];
+        if ($size['ladder_adherence_rate'] >= 70) return [];
         $worst = $size['worst_deviation'] === 'UNAVAILABLE' ? '?' : $size['worst_deviation'];
+        $over = $size['over_tier_count'] === 'UNAVAILABLE' ? 0 : $size['over_tier_count'];
+        $under = $size['under_tier_count'] === 'UNAVAILABLE' ? 0 : $size['under_tier_count'];
         return [[
             'severity' => 'watch', 'category' => 'risk',
             'headline' => 'Ladder adherence is slipping.',
-            'detail' => "Ladder held on {$size['ladder_adherence_rate']}% of {$size['sized_n']} sized trades. Worst deviation {$worst}%.",
+            'detail' => "Ladder held on {$size['ladder_adherence_rate']}% of {$size['sized_n']} sized trades — {$over} sized over tier, {$under} sized under tier. Worst deviation {$worst}%.",
             'recommendation' => 'Recheck position size against the ladder tier before every entry, not just when balance is trending down.',
             'based_on_n' => $size['sized_n'], 'conclusive' => true,
+        ]];
+    }
+
+    // ── H. REPETITION (v3.8.0 / v3.16.0 Phase 2) ────────────
+
+    private function ruleNoCleanReps($p2) {
+        if ($p2['clean_reps'] >= 10) return [];
+        return [[
+            'severity' => 'alert', 'category' => 'repetition',
+            'headline' => 'Almost nothing on file is a clean repetition.',
+            'detail' => "{$p2['clean_reps']} of {$p2['total_n']} trades have stop, target and a resolved exit on file. Everything else is an outcome without a plan attached, and cannot be used to test the system.",
+            'recommendation' => 'Set stop and target before every entry and let the exit resolve on its own — that is what turns a trade into a usable data point.',
+            'based_on_n' => $p2['total_n'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleTemplateExists($p2) {
+        if ($p2['clean_reps'] < 1) return [];
+        return [[
+            'severity' => 'good', 'category' => 'repetition',
+            'headline' => "{$p2['clean_reps']} trade(s) recorded complete.",
+            'detail' => "{$p2['clean_reps']} trade(s) recorded complete: {$p2['clean_rep_ids']}. Whatever produced those is the process to repeat.",
+            'recommendation' => 'Look at exactly what was different about these trades — strategy, checklist, or timing — and repeat it deliberately.',
+            'based_on_n' => $p2['clean_reps'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleRepFields($p2) {
+        if ($p2['field_completeness'] === 'UNAVAILABLE' || $p2['field_completeness'] >= 70) return [];
+        return [[
+            'severity' => 'watch', 'category' => 'repetition',
+            'headline' => "{$p2['weakest_field']} is the weakest-recorded field.",
+            'detail' => "{$p2['weakest_field']} recorded on {$p2['weakest_field_pct']}% of eligible trades.",
+            'recommendation' => "Make {$p2['weakest_field']} a required field before a trade can be saved.",
+            'based_on_n' => $p2['total_n'], 'conclusive' => true,
+        ]];
+    }
+
+    /** Always fires -- no rejection/scan-denominator entity exists anywhere in this schema. */
+    private function ruleNoDenominator() {
+        return [[
+            'severity' => 'info', 'category' => 'repetition',
+            'headline' => 'Setups passed on are unrecorded.',
+            'detail' => 'No rejection log. Setups passed on are unrecorded, so trade frequency cannot be explained by what got rejected.',
+            'recommendation' => 'Log a one-line entry for a setup you looked at and passed on, even without the full trade form.',
+            'based_on_n' => 0, 'conclusive' => true,
+        ]];
+    }
+
+    // ── I. EXIT QUALITY (v3.8.0 / v3.16.0 Phase 2) ──────────
+
+    private function ruleExitTargetShort($p2) {
+        if ($p2['short_n'] < 1) return [];
+        $avgShort = $p2['avg_short_r'] === 'UNAVAILABLE' ? '?' : $p2['avg_short_r'];
+        return [[
+            'severity' => 'alert', 'category' => 'edge',
+            'headline' => "{$p2['short_n']} trade(s) had targets set below the 3:1 gate.",
+            'detail' => "{$p2['short_n']} trade(s) had targets set below the 3:1 gate — {$p2['tp_short_n']} of them reached that short target. A take-profit that pays {$avgShort}R was placed at roughly 1R.",
+            'recommendation' => 'Set targets at or above the 3:1 gate before entry — a target that pays 1R is a different trade than the one the rules describe.',
+            'based_on_n' => $p2['short_n'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleExitQualityUnknown($p2) {
+        if ($p2['unknown_pct'] <= 50) return [];
+        return [[
+            'severity' => 'watch', 'category' => 'edge',
+            'headline' => 'Target geometry is unknown on most trades.',
+            'detail' => "Target geometry unknown on {$p2['unknown_pct']}% of trades. Exit discipline cannot be measured on rows without a recorded target.",
+            'recommendation' => 'Record entry, stop and target on every trade going forward — this is the gap phase 1b closes going forward, not retroactively.',
+            'based_on_n' => $p2['total_n'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleExitValidHeld($p2) {
+        if ($p2['valid_n'] < 3) return [];
+        $avgValid = $p2['avg_valid_r'] === 'UNAVAILABLE' ? '?' : $p2['avg_valid_r'];
+        return [[
+            'severity' => 'good', 'category' => 'edge',
+            'headline' => "{$p2['valid_n']} trades reached a target set at or above the gate.",
+            'detail' => "{$p2['valid_n']} trades reached a target set at or above the gate, averaging {$avgValid}R.",
+            'recommendation' => 'This is the target geometry to standardize on — stop shortening targets to close trades faster.',
+            'based_on_n' => $p2['valid_n'], 'conclusive' => true,
+        ]];
+    }
+
+    // ── J. EDGE — RECORDED / ESTIMATED SPLIT (v3.8.0 / v3.16.0 Phase 2) ──
+
+    private function ruleEdgeRecordedOnly($p2) {
+        if ($p2['estimated_n'] < 1) return [];
+        return [[
+            'severity' => 'info', 'category' => 'edge',
+            'headline' => 'Expectancy excludes estimated-R rows.',
+            'detail' => "Expectancy computed on {$p2['recorded_n']} trades with recorded R. {$p2['estimated_n']} estimated rows excluded — their R is derived from P&L and adds nothing.",
+            'recommendation' => "",
+            'based_on_n' => $p2['recorded_n'], 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleEdgeUnproven($p2) {
+        if ($p2['recorded_n'] >= 40) return [];
+        return [[
+            'severity' => 'info', 'category' => 'edge',
+            'headline' => 'Not enough recorded-R trades to call an edge.',
+            'detail' => "{$p2['recorded_n']} trades with recorded R. Below 40, no expectancy estimate is load-bearing.",
+            'recommendation' => 'Keep logging real stops so recorded R accumulates — an estimated row never counts toward this.',
+            'based_on_n' => $p2['recorded_n'], 'conclusive' => false,
+        ]];
+    }
+
+    private function ruleEdgeNegative($p2) {
+        if ($p2['expectancy_recorded_R'] === 'UNAVAILABLE' || $p2['recorded_n'] < 25) return [];
+        if ($p2['expectancy_recorded_R'] >= -0.05) return [];
+        return [[
+            'severity' => 'watch', 'category' => 'edge',
+            'headline' => 'The strategy is not yet profitable on recorded R alone.',
+            'detail' => "{$p2['recorded_n']} recorded trades at {$p2['expectancy_recorded_R']}R, \$" . number_format($p2['pnl_per_trade'], 2) . ' per trade.',
+            'recommendation' => 'Do not scale size until recorded-R expectancy turns positive over a larger sample.',
+            'based_on_n' => $p2['recorded_n'], 'conclusive' => true,
+        ]];
+    }
+
+    /**
+     * The rule the brief calls out as the one it most wants on screen: it states, from
+     * the data, the opposite of the "the rules work, intervention hurts" reading a prior
+     * handover concluded. Deliberately has no minimum-n gate beyond both sides being
+     * non-empty (computePhase2Metrics guarantees avg_pnl_resolved/avg_pnl_manual are only
+     * non-'UNAVAILABLE' when their own count is > 0) -- if this stops being true as target
+     * geometry gets recorded (see EXIT_TARGET_SHORT/EXIT_QUALITY_UNKNOWN above), that
+     * reversal is itself the signal, not a reason to add a threshold that would hide it.
+     */
+    private function ruleEdgeInterventionPositive($p2) {
+        if ($p2['avg_pnl_resolved'] === 'UNAVAILABLE' || $p2['avg_pnl_manual'] === 'UNAVAILABLE') return [];
+        if (!($p2['avg_pnl_manual'] > $p2['avg_pnl_resolved'])) return [];
+        return [[
+            'severity' => 'alert', 'category' => 'edge',
+            'headline' => 'Manual intervention is currently outperforming the rules.',
+            'detail' => 'Trades left to resolve: $' . number_format($p2['avg_pnl_resolved'], 2) . " each across {$p2['resolved_n']}. Trades closed manually: \$" . number_format($p2['avg_pnl_manual'], 2) . " each across {$p2['intervened_n']}. Intervention is currently outperforming the rules.",
+            'recommendation' => 'Investigate what the manual closes are doing differently before assuming discipline means leaving every trade to resolve on its own.',
+            'based_on_n' => $p2['resolved_n'] + $p2['intervened_n'], 'conclusive' => true,
+        ]];
+    }
+
+    // ── K. COST (v3.8.0 / v3.16.0 Phase 2, as originally specified) ──
+
+    private function ruleCostExceedsLoss($p2) {
+        if (!($p2['total_fees'] > $p2['trading_pnl_abs'])) return [];
+        return [[
+            'severity' => 'alert', 'category' => 'cost',
+            'headline' => 'Fees and funding exceed the trading loss itself.',
+            'detail' => '$' . number_format($p2['total_fees'], 2) . ' in fees and funding against $' . number_format($p2['trading_pnl_abs'], 2) . ' of trading loss. Costs are the larger number.',
+            'recommendation' => 'Reduce trade frequency or fee tier before anything else — costs are currently the dominant loss driver, not the setup.',
+            'based_on_n' => 1, 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleCostDrag($p2) {
+        if ($p2['fee_drag_R'] === 'UNAVAILABLE' || $p2['fee_drag_R'] <= 0.04) return [];
+        $dragPct = $p2['fee_drag_pct'] === 'UNAVAILABLE' ? '?' : $p2['fee_drag_pct'];
+        return [[
+            'severity' => 'watch', 'category' => 'cost',
+            'headline' => 'Fees are a meaningful drag per trade.',
+            'detail' => "{$p2['fee_drag_R']}R per trade in fees — {$dragPct}% of a typical winner.",
+            'recommendation' => 'Check whether lot size or trade frequency can come down without changing the setup.',
+            'based_on_n' => 1, 'conclusive' => true,
+        ]];
+    }
+
+    private function ruleCostFlipped($p2) {
+        if ($p2['trades_flipped'] < 1) return [];
+        return [[
+            'severity' => 'info', 'category' => 'cost',
+            'headline' => "{$p2['trades_flipped']} trade(s) turned into a loss after fees.",
+            'detail' => "{$p2['trades_flipped']} trade(s) gross-positive, net-negative after fees.",
+            'recommendation' => '',
+            'based_on_n' => $p2['trades_flipped'], 'conclusive' => true,
+        ]];
+    }
+
+    // ── L. GEOMETRY (v3.8.0 / v3.16.0 Phase 2, as originally specified) ──
+
+    private function ruleGeoRatioDrift($p2) {
+        if ($p2['ratio_drift'] === 'UNAVAILABLE' || $p2['ratio_drift'] <= 1.3) return [];
+        return [[
+            'severity' => 'watch', 'category' => 'risk',
+            'headline' => 'The path to target is harder than the challenge you bought.',
+            'detail' => "Purchased at {$p2['purchased_ratio']}:1. Now {$p2['live_boundary_ratio']}:1 — {$p2['ratio_drift']}× harder than the challenge you bought.",
+            'recommendation' => "Treat the remaining distance to target as the real target — don't anchor to the original profit goal as if nothing has changed.",
+            'based_on_n' => 1, 'conclusive' => true,
         ]];
     }
 

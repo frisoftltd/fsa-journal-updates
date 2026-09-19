@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.15.0 |
+| Current Version | v3.16.0 |
 
 ### Tech Stack
 
@@ -214,7 +214,8 @@ notes, screenshot, screenshots (JSON, up to 4, added later — screenshot kept f
 strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3.5.0),
 source, r_multiple_source (added v3.12.0),
 exit_reason (added v3.14.0),
-balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_rep (added v3.15.0)
+balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_rep (added v3.15.0),
+balance_at_day_start, target_r, exit_quality (added v3.16.0)
 ```
 > `balance_at_entry`/`planned_risk_pct`/`actual_risk_pct`/`risk_deviation_pct`/`clean_rep`
 > (all `NULL`-able, no defaults) back the Size Integrity feature — see the v3.15.0 section
@@ -222,7 +223,27 @@ balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_r
 > when `stop_loss` is null (true for all 59 of challenge 6's rows), and the deliberate
 > scope boundary that `TradeController::saveTrade()`/`BitfundedImportController::confirm()`
 > do **not** populate these columns going forward — they're backfilled once, for challenge
-> 6's existing history, not computed live yet.
+> 6's existing history, not computed live yet. **As of v3.16.0, `planned_risk_pct` is
+> computed from `balance_at_day_start`, not `balance_at_entry`** — `balance_at_entry`
+> stays stored (still a real fact — the balance at the trade's own entry time) but is no
+> longer the tier-lookup basis. See the v3.16.0 section below for why.
+>
+> `balance_at_day_start` — the running balance before the first trade of each
+> `trade_date` (identical for every trade sharing that date), added v3.16.0 specifically
+> to be the ladder's tier-lookup basis instead of `balance_at_entry`.
+>
+> `target_r` — `(take_profit − entry_price) ÷ (entry_price − stop_loss)`, signed, no
+> direction branch. Worked correctly for both Long and Short by construction (verified by
+> hand for both before backfilling) and — because it's signed rather than `ABS()`'d —
+> exposes a stop/target on the wrong side of entry for the stated direction as a negative
+> value instead of silently masking it the way `CalculatorController`'s existing `rr_ratio`
+> calculation does (see the spec-gap audit's defect #6).
+>
+> `exit_quality` — `ENUM`-shaped `VARCHAR(20)`: `target_hit_valid` / `target_hit_short` /
+> `stopped_valid` / `stopped_short` / `manual_close` / `unknown`. Derived from `target_r`
+> and `exit_reason` — `exit_reason` is Bitfunded's own label (what happened), `exit_quality`
+> is a judgement against the account's own gate (whether what happened was disciplined).
+> See the v3.16.0 section below for the finding this surfaced.
 > `source` is `ENUM('manual','import') NOT NULL DEFAULT 'manual'` — distinguishes hand-logged
 > trades from ones backfilled from a broker's own trade history (see "The Journal Was a
 > Winner-Weighted Subset" below). The default means no code change was needed in
@@ -1868,6 +1889,117 @@ challenge 6 until a follow-up wires the same computation into the live save/impo
 flagged here the same way v3.14.0 flagged the equivalent gap for `r_multiple`/
 `risk_amount` on matched import rows (closed two releases later, in v3.14.1, once it was
 actually needed).
+
+### v3.16.0 Phase 2: Recalibration, Start-of-Day Tier Basis, and the Exit-Quality Gap
+
+**Three v3.15.0 rules were firing on artifacts, not real problems, and got recalibrated
+against the account's actual, now-settled data rather than the numbers they shipped
+against.** `RISK_SIZE_SKEW` fired at 1.15 against a real skew of 1.08 — threshold raised
+to 1.25, and downgraded from `alert` to a new `info` severity (see below), since a skew
+this close to 1 is a data point, not an active problem. `RISK_LADDER_DRIFT` fired at <85%
+against a real adherence of 74.6% — threshold lowered to <70%, and its message now splits
+over-tier vs. under-tier counts (`tier_breach_by_month`'s sibling, `over_tier_count`/
+`under_tier_count`), since sizing too big and sizing too small are different failures that
+one adherence percentage was collapsing into one number. `RISK_TIER_BREACH` keeps its
+threshold but now names which months the breaches fall in
+(`computeSizeIntegrityMetrics()`'s new `tier_breach_by_month`) — 11 breaches in one bad
+week reads differently from 11 spread across four months.
+
+**A fourth severity, `'info'`, joins `alert`/`watch`/`good`.** Downgrading
+`RISK_SIZE_SKEW` from critical exposed that this engine only had three severity levels,
+conflating "you should act on this" (`watch`) with "here's a disclosure that isn't a
+problem" (recorded/estimated splits, sample-size notices). `js/review.js`'s
+`REVIEW_SEVERITY` gains a blue `INFO` style; `getReview()`'s sort order is
+`alert → watch → info → good`.
+
+**Tier basis moves from `balance_at_entry` to `balance_at_day_start`.** 27 of challenge
+6's 59 trades sat within $250 of the $9,500 ladder boundary. Under an at-entry basis, a
+trade's own tier could flip mid-session purely because an earlier same-day trade happened
+to close first and cross the boundary — the rule the trader is measured against moving
+under them, not a rule they were actually held to going into the trade. `trades.
+balance_at_day_start` (new, v3.16.0) is the running balance before the *first* trade of
+each `trade_date`, identical for every trade sharing that date.
+`2026_09_19_0006_rebase_challenge6_tier_basis_to_day_start.sql` recomputes
+`planned_risk_pct` and `risk_deviation_pct` for all 59 rows against this new basis.
+`balance_at_entry` is untouched and stays stored — it's still a real fact about the
+account's balance at that exact moment — it's just no longer what `planned_risk_pct` is
+computed from. **The real ladder-adherence baseline for this account, post-rebase, is
+whatever this migration reports** — the pre-rebase 74.6%-ish figure from v3.15.0 was
+computed against the wrong basis and should not be quoted going forward.
+
+**Exit quality — the finding that matters most this release.** `trades.exit_reason` is
+Bitfunded's own label for *what happened* (`Take Profit`, `Stop Loss`, `Manual Closing`) —
+it says nothing about whether what happened reflects the account's own rules. Checked
+directly: three trades labeled `Take Profit` paid 0.88R, 0.94R, and 1.01R — meaning their
+targets were placed at roughly 1R against a strategy that requires ≥2.5–3:1 at the gate.
+That failure was structurally invisible under `exit_reason` alone; a trade that hits a
+too-close target looks identical in that column to one that hit a properly-placed target.
+`trades.target_r` — `(take_profit − entry_price) ÷ (entry_price − stop_loss)`, signed, no
+direction branch — and `trades.exit_quality` (derived from `target_r` × `exit_reason`:
+`target_hit_valid`/`target_hit_short`/`stopped_valid`/`stopped_short`/`manual_close`/
+`unknown`) make this checkable per trade instead of invisible. Most of challenge 6's 59
+rows land on `unknown` (no stop/target on file at all, same root cause as `actual_risk_pct`
+falling back to `risk_amount` in v3.15.0) — expected, and disclosed via
+`EXIT_QUALITY_UNKNOWN` rather than hidden, not a defect in this release's derivation.
+
+**The direction-blind geometry defect flagged in the spec-gap audit (defect #6) is worked
+around here, not fixed at its root.** `target_r`'s signed formula was checked by hand for
+both Long and Short before backfilling (Long: target above entry, stop below — positive ÷
+positive; Short: target below entry, stop above — negative ÷ negative — both land on the
+same positive sign for a correctly-placed trade) and, as a side effect, a trade whose
+stop/target sit on the *wrong* side of entry for its stated direction now produces a
+visibly negative `target_r` instead of `CalculatorController`'s existing `rr_ratio` (which
+still uses `ABS()` on both legs and would show the same broken trade as a normal-looking
+positive ratio). `CalculatorController.php` itself was not touched this release — this is
+a second, independent computation of a similar concept, not a fix to the first one.
+
+**Fifteen new rule methods, additive — `ReviewEngineController.php` v3.7.0 → v3.8.0.**
+Repetition (now the account's weakest pillar): `REP_NO_CLEAN_REPS`, `REP_TEMPLATE_EXISTS`,
+`REP_FIELDS` (weakest of stop_loss/take_profit/setup_grade/emotion_tag completeness —
+no explicit field list was given, this session chose those four as the core discipline
+fields), `REP_NO_DENOMINATOR` (unconditional — no rejection-log entity exists anywhere in
+this schema, confirmed by the spec-gap audit, so this fires every review by design).
+Exit Quality: `EXIT_TARGET_SHORT`, `EXIT_QUALITY_UNKNOWN`, `EXIT_VALID_HELD`. Edge,
+recalibrated for the recorded/estimated split: `EDGE_RECORDED_ONLY`, `EDGE_UNPROVEN`,
+`EDGE_NEGATIVE`, `EDGE_INTERVENTION_POSITIVE` — the last one deliberately has no
+minimum-sample gate beyond both sides being non-empty, since the brief this was built from
+was explicit that this rule states, from the data, the *opposite* of what a prior handover
+concluded (manual intervention currently outperforming trades left to resolve), and that a
+future reversal as target geometry gets recorded is itself the signal, not something to
+suppress behind a threshold. Cost (`COST_EXCEEDS_LOSS`, `COST_DRAG`, `COST_FLIPPED`) and
+Geometry (`GEO_RATIO_DRIFT`) as originally specified.
+
+**Two formulas this session had to derive, not just read off a spec — flagged for
+review, not silently assumed correct.** Neither briefing this was built from gave an
+explicit formula for `fee_drag_R`/`fee_drag_pct` or `purchased_ratio`/
+`live_boundary_ratio`/`ratio_drift` — only their trigger conditions and message
+templates.
+- `fee_drag_R` = average fee per closed trade ÷ `dollars_per_R_winners` (the same $-per-R
+  conversion rate the Size Integrity panel already established, v3.15.0) — converts a
+  dollar fee into "how many R that costs," in the same unit the rest of this account's
+  risk metrics already use. `fee_drag_pct` = average fee ÷ average winning trade's dollar
+  P&L × 100.
+- `purchased_ratio` = `challenges.profit_target_amt ÷ challenges.max_loss_amt` — the
+  challenge's own stated terms (e.g. 800/1000 = 0.8 for challenge 6). `live_boundary_ratio`
+  recomputes the same ratio against what's actually left at the current balance: remaining
+  distance to target (`profit_target_amt − net change since start`) ÷ remaining room
+  before max loss (`max_loss_amt + net change since start`, since a negative net change
+  both grows the distance to target and shrinks the room to failure). `ratio_drift` =
+  `live_boundary_ratio ÷ purchased_ratio`. Sanity-checked against challenge 6's real
+  numbers before shipping (≈1.8× at the account's current balance) — a plausible,
+  explainable figure, not an arbitrary one, but still a derived formula rather than a
+  quoted spec and worth Acrob's sign-off.
+
+**Deferred, not shipped this release: item 6 (CadenceGate).** The v3.16.0 briefing
+described this as "as specified in the original §6, with one amendment" — that original
+§6 text was never provided in this session (only fragments: the period selector already
+on `pages/review.php`; an action-selection/verification design from an earlier, shelved
+table-driven RuleEngine amendment that was never built; and this release's own explicit
+monthly-lock rule, "until `clean_reps >= 30`, monthly reviews render findings but all
+rule-change recommendations stay locked, with the lock reason naming the clean-rep
+count"). Rather than reconstruct a gating mechanism the briefing referred to as already
+precisely specified, this was held back pending the actual text. Everything else in the
+v3.16.0 briefing shipped in this release.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

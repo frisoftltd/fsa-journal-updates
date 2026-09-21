@@ -168,7 +168,12 @@ class TradeController {
             }
         }
 
-        $cols = ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
+        // v3.17.0 — planned_margin joins this list as an ordinary pre-entry field, exactly
+        // like stop_loss/take_profit: the Auto Risk Calculator's margin output carries
+        // into this form and rides through add/update the same way. count($cols) below
+        // is what keeps the INSERT branch's placeholder math correct automatically as
+        // this list grows — see the v3.16.2 fix for why that matters.
+        $cols = ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure','planned_margin'];
 
         // v3.16.2 — everything from here on touches the database on behalf of add_trade/
         // update_trade. Before this, an uncaught PDOException (e.g. the placeholder-count

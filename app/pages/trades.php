@@ -13,7 +13,7 @@
     <div style="flex:1"></div>
     <button class="btn btn-ghost btn-sm" onclick="document.getElementById('import-modal').classList.add('open')">📥 Import</button>
     <button class="btn btn-ghost btn-sm" onclick="openPairsModal()">⚙️ Pairs</button>
-    <button class="btn btn-success" onclick="openChecklist()">+ New Trade</button>
+    <button class="btn btn-success" id="new-trade-btn" onclick="openChecklist()">+ New Trade</button>
   </div>
   <div class="card">
     <div class="table-wrap">

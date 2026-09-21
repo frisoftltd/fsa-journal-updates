@@ -154,6 +154,35 @@ function staticDrawdownPct(array $challenge): float {
 }
 
 /**
+ * v3.17.0 (Auto Risk Calculator) — the account balance at which this challenge fails its
+ * Maximum Loss rule. $challenge must already be enrichChallenge()'d: max_drawdown_pct is
+ * read post-enrichment specifically so a challenge whose criteria are stated as a currency
+ * amount (max_loss_amt, e.g. Bitfunded's $1,000-per-stage rule) is honored via the same
+ * amount-to-percentage conversion enrichChallenge() already does for every other consumer
+ * of max_drawdown_pct — this function does not re-read max_loss_amt itself, to avoid a
+ * second, independently-maintained copy of that preference rule.
+ */
+function failureBalance(array $challenge): float {
+    $starting = (float)($challenge['starting_balance'] ?? 0);
+    $maxDrawdownPct = (float)($challenge['max_drawdown_pct'] ?? 0);
+    return round($starting * (1 - $maxDrawdownPct / 100), 2);
+}
+
+/**
+ * v3.17.0 (Auto Risk Calculator) — [Monday, Sunday] of the week containing $date
+ * (Y-m-d), inclusive on both ends. PHP's 'N' format (ISO-8601 day-of-week, 1=Monday,
+ * 7=Sunday) makes this a plain offset rather than a special-cased "what if today is
+ * Sunday" branch.
+ */
+function weekBounds(string $date): array {
+    $d = new DateTime($date);
+    $dow = (int)$d->format('N');
+    $monday = (clone $d)->modify('-' . ($dow - 1) . ' days')->format('Y-m-d');
+    $sunday = (clone $d)->modify('+' . (7 - $dow) . ' days')->format('Y-m-d');
+    return [$monday, $sunday];
+}
+
+/**
  * Read JSON POST body
  */
 function jsonInput() {

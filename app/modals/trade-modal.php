@@ -98,6 +98,13 @@
             </div>
             <div id="sizing-panel-warnings" style="margin-top:8px"></div>
           </div>
+          <!-- v3.17.0: unlike Planned Entry/Lot Size above, this one IS saved (trades.
+               planned_margin, added to TradeController::saveTrade()'s $cols) — it's the
+               Auto Risk Calculator's margin_usd output, carried over so what was actually
+               planned survives past this session. Pre-filled automatically when the
+               calculator page hands one off (js/trades.js, one-shot via sessionStorage);
+               always editable, always optional. -->
+          <div class="form-group" style="margin-bottom:12px"><label>Planned Margin ($) <span style="font-weight:400;color:var(--text3)">— from Risk Calculator, optional</span></label><input type="number" step="0.01" id="f-planned_margin" name="planned_margin" placeholder="e.g. 1210.19"></div>
           <label style="display:block">Setup Quality (grade the SETUP, not the outcome)</label>
           <div id="grade-grid" style="display:flex;gap:6px;margin-top:4px">
             <button type="button" class="btn btn-ghost btn-sm grade-pill" data-value="A" onclick="selectGrade('A')">A</button>

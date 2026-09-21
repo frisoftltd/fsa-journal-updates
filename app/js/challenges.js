@@ -51,7 +51,7 @@ async function loadChallenges(){
 function openChallengeModal(data=null){
     document.getElementById('ch-id').value=data?.id||'';
     document.getElementById('challenge-modal-title').textContent=data?'✏️ EDIT CHALLENGE':'🏆 NEW CHALLENGE';
-    const fields=['name','prop_firm','challenge_phase','starting_balance','max_drawdown_pct','drawdown_type','daily_loss_limit','risk_per_trade_pct','profit_target_pct','status'];
+    const fields=['name','prop_firm','challenge_phase','starting_balance','max_drawdown_pct','drawdown_type','daily_loss_limit','risk_per_trade_pct','profit_target_pct','default_leverage','status'];
     if(data){
         fields.forEach(k=>{ const el=document.getElementById('ch-'+k); if(el&&data[k]!==null) el.value=data[k]; });
     } else {
@@ -64,6 +64,7 @@ function openChallengeModal(data=null){
         document.getElementById('ch-daily_loss_limit').value='500';
         document.getElementById('ch-risk_per_trade_pct').value='0.5';
         document.getElementById('ch-profit_target_pct').value='8';
+        document.getElementById('ch-default_leverage').value='';
         document.getElementById('ch-status').value='active';
     }
     document.getElementById('challenge-modal').classList.add('open');
@@ -77,7 +78,7 @@ function editChallenge(id){
 async function saveChallenge(){
     const id=document.getElementById('ch-id').value;
     const data={};
-    ['name','prop_firm','challenge_phase','starting_balance','max_drawdown_pct','drawdown_type','daily_loss_limit','risk_per_trade_pct','profit_target_pct','status'].forEach(k=>{
+    ['name','prop_firm','challenge_phase','starting_balance','max_drawdown_pct','drawdown_type','daily_loss_limit','risk_per_trade_pct','profit_target_pct','default_leverage','status'].forEach(k=>{
         data[k]=document.getElementById('ch-'+k)?.value||null;
     });
     if(!data.name){toast('Challenge name is required','error');return;}

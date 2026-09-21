@@ -18,6 +18,34 @@ async function loadTrades() {
     if(params.length) url+='&'+params.join('&');
     allTrades = await api(url);
     renderTradesTable(allTrades);
+    refreshNewTradeGate();
+}
+
+// v3.17.0 — trade-limits gate for "+ New Trade". Single source of truth is
+// CalculatorController::getRiskStatus() (get_risk_status) — the same endpoint the Risk
+// Calculator page's status strip reads, so the button and the strip can never disagree
+// about whether a new trade is currently allowed. window._riskStopReason is also checked
+// inside openChecklist() itself, not just reflected in this button's disabled state, so
+// the gate holds even if something else ever triggers that flow.
+window._riskStopReason = null;
+async function refreshNewTradeGate(){
+    const btn = document.getElementById('new-trade-btn');
+    if (!btn) return;
+    let status;
+    try { status = await api('get_risk_status'); } catch (e) { return; }
+    if (!status || status.error) return;
+    window._riskStopReason = status.stopped ? status.reason : null;
+    if (status.stopped) {
+        btn.disabled = true;
+        btn.textContent = 'STOP — no trade';
+        btn.title = 'STOP — no trade: ' + status.reason;
+        btn.style.background = 'var(--red)';
+    } else {
+        btn.disabled = false;
+        btn.textContent = '+ New Trade';
+        btn.title = '';
+        btn.style.background = '';
+    }
 }
 
 async function loadPairs() {
@@ -281,7 +309,7 @@ function openTradeModal(data=null) {
     initJournalSections(data);
     renderExecutionSummary(data);
     if(data){
-        const fields=['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes'];
+        const fields=['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','planned_margin'];
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
         selectGrade(data.setup_grade||null);
         // Show existing screenshots
@@ -300,6 +328,16 @@ function openTradeModal(data=null) {
         const today=new Date().toISOString().split('T')[0];
         document.getElementById('f-trade_date').value=today;
         selectGrade(null);
+        // v3.17.0 — one-shot handoff from the Risk Calculator page: "Use in Trade Form"
+        // stashes its computed margin_usd here, and only a brand-new trade ever picks it
+        // up (an edit's own saved planned_margin, handled above, must never be clobbered
+        // by a stale calculator session). Removed immediately so it can't leak into a
+        // second, unrelated trade added later in the same session.
+        const pendingMargin = sessionStorage.getItem('fc_pending_planned_margin');
+        if (pendingMargin) {
+            document.getElementById('f-planned_margin').value = pendingMargin;
+            sessionStorage.removeItem('fc_pending_planned_margin');
+        }
     }
     document.getElementById('trade-modal').classList.add('open');
     document.getElementById('f-planned-entry').value = '';
@@ -821,7 +859,7 @@ async function saveTrade() {
         // three-phase trade_journal below replaced them on the form (the columns still
         // exist for historical trades, just nothing writes to them anymore).
         const data = {};
-        ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','setup_grade'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
+        ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','setup_grade','planned_margin'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
         data.trade_variables = collectTradeVariables();
         data.trade_journal = collectTradeJournal();
         if(id) {
@@ -847,6 +885,7 @@ async function saveTrade() {
 // Renders from the active challenge's default strategy's 'gate' variables
 // (criteria/timeframe/role/sort_order) — no hardcoded rule set here.
 async function openChecklist(){
+    if (window._riskStopReason) { toast('STOP — no trade: ' + window._riskStopReason, 'error'); return; }
     const wrap = document.getElementById('checklist-items');
     wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:4px 0 10px">Loading checklist…</div>';
     document.getElementById('checklist-popup').classList.add('open');

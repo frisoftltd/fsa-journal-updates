@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.16.4 |
+| Current Version | v3.17.0 |
 
 ### Tech Stack
 
@@ -164,8 +164,18 @@ daily_loss_limit, risk_per_trade_pct, profit_target_pct,
 status (active/completed/failed), is_active (0/1), created_at,
 default_strategy_id (added v3.5.0 — links to strategies.id),
 funding_adjustment, profit_target_amt, max_loss_amt (added v3.13.0),
-drawdown_type (added v3.14.7)
+drawdown_type (added v3.14.7),
+default_leverage (added v3.17.0)
 ```
+> `default_leverage` (`DECIMAL(6,2) NULL`) — not one of the two migrations the v3.17.0
+> briefing named (`planned_margin`, `challenge_limits`); added anyway because the
+> briefing's own input list requires it ("Leverage: default from challenge settings,
+> editable") and no column held a default before this release — the old calculator page
+> just had a bare, always-blank leverage input. Purely additive (nullable, no rename, no
+> drop), so it stays inside the briefing's own "Additive. No table renames, no column
+> drops" constraint even though it wasn't itself enumerated. `NULL` means no default is
+> set; the calculator's Leverage field then starts blank rather than showing a guessed
+> number.
 > `current_balance` was **dropped** in v3.13.0 — it was a stored column nothing ever
 > recalculated, and it drifted silently for five weeks on the Bitfunded Altcoin challenge
 > (see the v3.13.0 section below). Balance is now always
@@ -215,8 +225,19 @@ strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure (added v3
 source, r_multiple_source (added v3.12.0),
 exit_reason (added v3.14.0),
 balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_rep (added v3.15.0),
-balance_at_day_start, target_r, exit_quality (added v3.16.0)
+balance_at_day_start, target_r, exit_quality (added v3.16.0),
+planned_margin (added v3.17.0)
 ```
+> `planned_margin` (`DECIMAL(12,2) NULL`) — the Auto Risk Calculator's `margin_usd`
+> output, carried into the trade form and saved as an ordinary pre-entry field alongside
+> `stop_loss`/`take_profit`. `NULL` means no calculator output was ever attached to this
+> trade, not a recorded zero — every pre-v3.17.0 row stays `NULL`, this is a
+> going-forward field with no backfill. `BitfundedImportController::confirm()` never
+> mentions this column in either of its own `UPDATE`/`INSERT` statements, so an import
+> can never overwrite what was planned before entry — same contract `stop_loss`/
+> `take_profit` already have. `CalculatorController::autoRiskPreview()`'s
+> `margin_in_use` (`Σ planned_margin WHERE challenge_id=? AND result='Open'`) is this
+> column's only other reader.
 > `balance_at_entry`/`planned_risk_pct`/`actual_risk_pct`/`risk_deviation_pct`/`clean_rep`
 > (all `NULL`-able, no defaults) back the Size Integrity feature — see the v3.15.0 section
 > below for the exact backfill formulas, why `actual_risk_pct` falls back to `risk_amount`
@@ -304,6 +325,24 @@ FK: challenge_id -> challenges(id) ON DELETE CASCADE
 > below. Other challenges have no rows here yet, so every ladder-derived figure
 > (`planned_risk_pct`, `risk_deviation_pct`, tier-breach/adherence metrics) stays `NULL`/
 > `UNAVAILABLE` for them until their own ladder is seeded.
+
+**challenge_limits** (added v3.17.0)
+```sql
+id, challenge_id, max_trades_day, max_trades_week, max_losses_day, daily_loss_usd,
+created_at
+UNIQUE KEY (challenge_id)
+FK: challenge_id -> challenges(id) ON DELETE CASCADE
+```
+> Daily/weekly trade limits as data, same convention as `risk_ladder_tiers` — replaces
+> the hardcoded "Max 2 trades/day | Stop if daily limit hit | Stop after 3 consecutive
+> losses" notice bar `pages/calculator.php` used to render regardless of what a
+> challenge's real limits were. One row per challenge (`UNIQUE KEY`, unlike
+> `risk_ladder_tiers`'s multiple-tiers-per-challenge shape) — there's no tiering concept
+> here, just one set of limits. Every column is nullable independently: a `NULL` limit is
+> "not tracked" for that one dimension, never a zero that would mean "no trades allowed."
+> Seeded for challenge 6: 2 trades/day, 4/week, 2 losses/day, $500 daily loss.
+> `CalculatorController::getRiskStatus()` is the only reader, computing live counts
+> against these limits and a single stop reason (see the v3.17.0 section below).
 
 **strategy_tests**
 ```sql
@@ -430,6 +469,7 @@ trades (1) ──→ (many) trade_checkins               [FK CASCADE]
 trade_checkins (1) ──→ (many) trade_checkin_actions [FK CASCADE]
 users (1) ──→ (many) pairs
 challenges (1) ──→ (many) risk_ladder_tiers
+challenges (1) ──→ (1) challenge_limits
 users (1) ──→ (many) strategy_tests
 users (1) ──→ (many) weekly_reviews
 users (1) ──→ (many) ai_reviews
@@ -2360,6 +2400,101 @@ in the same request, automatically.
   `UPDATE` never references that table) and moves `exit_quality` from `'open'` to a real
   computed value in the same request.
 
+### v3.17.0: Auto Risk Calculator — Stop % In, Everything Else Derived
+
+`pages/calculator.php` rebuilt from a manual, disconnected form (typed balance, typed
+risk %, a Calculate button, three hardcoded Recovery/Normal/Passing cards, a static "Max
+2 trades/day" notice bar) into a live tool where **stop loss % is the only required
+input** — balance, risk %, and every limit/margin figure come from the active challenge,
+`risk_ladder_tiers`, and trades already taken.
+
+**Schema — three migrations, one more than the briefing enumerated.** `trades.
+planned_margin` and `challenge_limits` (+ seed) were the two the briefing named;
+`challenges.default_leverage` was added because the briefing's own input list requires it
+("Leverage: default from challenge settings, editable") and nothing held a default
+before this release. All three are additive only (nullable columns / a new table, no
+rename, no drop), so this stays inside the briefing's own "Additive" constraint even
+though the third migration wasn't itself listed — see §3 above for all three columns'
+full documentation.
+
+**Chained rounding, confirmed by hand against the briefing's own worked example before
+writing any code.** `risk_usd = round(balance × risk_pct ÷ 100, 2)`, then
+`position_usd = round(risk_usd ÷ (stop_pct ÷ 100), 2)` — using the *rounded* `risk_usd`,
+not the raw one — then `margin_usd = round(position_usd ÷ leverage, 2)`, again from the
+rounded `position_usd`. Balance 9741.78, stop 1.61%, leverage 5: computing `position_usd`
+from the unrounded `risk_usd` (97.4178) gives $6,051.11, not the briefing's stated
+$6,050.93; computing it from the rounded $97.42 gives exactly $6,050.93, and from there
+$1,210.19 for margin — both match. Verified with a standalone script against these exact
+numbers before shipping, not assumed from the formula list alone.
+
+**`failureBalance()` (new, `helpers.php`)** — the account balance at which a challenge
+fails its Maximum Loss rule: `starting_balance × (1 − max_drawdown_pct ÷ 100)`, reading
+`max_drawdown_pct` *after* `enrichChallenge()` so a challenge whose criteria are a
+currency amount (`max_loss_amt`, e.g. Bitfunded's per-stage dollar figure) is honored via
+the same amount-to-percentage preference `enrichChallenge()` already applies everywhere
+else, rather than a second, independently-maintained copy of that rule. `room_usd =
+balance − failure_balance`; `stops_to_fail = room_usd ÷ risk_usd`.
+
+**`weekBounds()` (new, `helpers.php`)** — `[Monday, Sunday]` of the week containing a
+given date, via PHP's ISO-8601 `'N'` day-of-week format (1=Monday, 7=Sunday) as a plain
+offset, no Sunday special case. Backs `trades_week` in `getRiskStatus()` below.
+
+**`CalculatorController::autoRiskPreview()`** (new, `auto_risk_preview`) — the live
+outputs. Leverage falls back to the challenge's `default_leverage` when not typed;
+`quantity` only computes when an entry price is given; `margin_in_use` is `Σ
+planned_margin WHERE challenge_id=? AND result='Open'` and `available_margin = balance −
+margin_in_use`, per the briefing exactly. `margin_ok` is `false` whenever the computed
+`margin_usd` exceeds `available_margin` — the frontend renders this as "STOP — not enough
+margin" in place of the normal output grid, distinct from the trade-limits stop below.
+
+**`CalculatorController::getRiskStatus()`** (new, `get_risk_status`) — one endpoint
+backing three UI surfaces at once: the calculator page's status strip, its Risk Rules
+panel (ladder tiers, replacing the three hardcoded cards), and the "+ New Trade" button's
+gate on the Trades page (`js/trades.js::refreshNewTradeGate()`), so all three can never
+disagree about whether a new trade is currently allowed. Returns `trades_today`,
+`trades_week`, `losses_today`, `daily_pnl`, the `challenge_limits` row (any `NULL` column
+is "not tracked," never a zero), the full `risk_ladder_tiers` list with an `is_current`
+flag per tier, and a single `stopped`/`reason` pair — checked in order (daily trades →
+weekly trades → daily losses → daily loss $), first breach wins, chosen as "the most
+actionable reason first" rather than a claimed severity ranking, since the briefing
+didn't specify what happens when more than one limit is breached simultaneously.
+
+**Daily P&L's amber/red styling is a derived interpretation, not a specified formula.**
+"Each item amber at one below its limit, red at the limit" reads literally for the three
+count-based limits (`trades_today`, `trades_week`, `losses_today` — implemented exactly:
+`count === limit − 1` → amber, `count >= limit` → red). Daily P&L is a dollar figure, not
+a count, so "one below" doesn't apply the same way; `js/calculator.js::renderCalcStatus()`
+uses red at-or-past the `daily_loss_usd` threshold (the actual stop condition) and amber
+inside the last 20% of room before it. Flagged here as a judgment call, not a quoted
+spec, the same way v3.16.0's `fee_drag_R`/`purchased_ratio` formulas were flagged when
+the briefing gave trigger conditions but not the exact derivation.
+
+**Planned Margin reaching the trade form.** The briefing states "the calculator's margin
+output carries into the Log Trade form and is saved with the pre-entry record" without
+specifying the transfer mechanism. Implemented as: `planned_margin` joins
+`TradeController::saveTrade()`'s `$cols` as an ordinary pre-entry field (same treatment
+as `stop_loss`/`take_profit` — rides through `add`/`update`, never touched by
+`BitfundedImportController`), a visible, always-editable "Planned Margin ($)" input was
+added to the trade form's existing Pre-Trade Sizing panel, and a new "Use in Trade Form
+→" button on the calculator's output card stashes the computed `margin_usd` into
+`sessionStorage` for one-shot pickup — `openTradeModal()` (`js/trades.js`) consumes and
+clears it, and only for a brand-new trade, never for an edit (an edit shows its own
+already-saved `planned_margin` instead, read the normal way every other pre-entry field
+is). If this reading of "carries into" is wrong — e.g. if the intent was a fully
+prefilled, non-editable field, or automatic navigation without the explicit button — that
+narrows to a small follow-up, not a schema change: the column and the required
+`saveTrade()` plumbing are already correct either way.
+
+**"The Log Trade button shows the same warning"** interpreted as the Trades page's
+"+ New Trade" button specifically (there's no button literally labeled "Log Trade" in
+this codebase) — not the trade-modal's own Save/Update button, since blocking an *edit*
+of an already-logged trade over today's *new*-trade limits would be a different, harder
+to justify rule the briefing didn't ask for. `refreshNewTradeGate()` disables the button,
+relabels it "STOP — no trade," and sets its `title` to the full reason whenever
+`get_risk_status` reports `stopped: true`; `openChecklist()` additionally checks
+`window._riskStopReason` itself as a second gate, so the stop holds even if something
+else ever reaches that function directly.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -2486,7 +2621,10 @@ const resp = await fetch('includes/api.php?action=add_trade', { method: 'POST', 
 | `delete_trade` | POST | TradeController | Delete trade + screenshot |
 | `get_stats` | GET | StatsController | Full stats for active challenge |
 | `get_alerts` | GET | AlertController | Today's risk alerts |
-| `calculate_risk` | POST | CalculatorController | Position size calculator |
+| `calculate_risk` | POST | CalculatorController | Position size calculator (legacy, not wired to the UI — see §11) |
+| `size_preview` | POST | CalculatorController | Trade-form pre-trade sizing panel (v3.16.1 B4) |
+| `auto_risk_preview` | POST | CalculatorController | Auto Risk Calculator live outputs (v3.17.0) |
+| `get_risk_status` | GET | CalculatorController | Trade-limits status + ladder tiers (v3.17.0) |
 | `get_pairs` | GET | PairController | List active pairs |
 | `add_pair` | POST | PairController | Add trading pair |
 | `delete_pair` | POST | PairController | Soft-delete pair |
@@ -2833,16 +2971,19 @@ only the human-facing label changed. Also note: the dynamic pre-trade checklist 
 the same `input_type`, but that popup never writes to `trade_variables` at all — cosmetically
 inconsistent, not a data-integrity concern.
 
-### Note: `calculate_risk` / `CalculatorController.php` is not wired to the UI
+### Note: `calculate_risk` specifically (not `CalculatorController.php` as a whole) is still not wired to the UI
 
-The Risk Calculator page (`pages/calculator.php`) calls `calcSimple()` (`js/calculator.js`), a
-purely client-side, percentage-based calculation (balance/stop-loss %/risk %/leverage — no entry,
-stop, or target prices, no direction). It never calls the API. `calculate_risk` →
-`CalculatorController::calculate()` is still registered in `router.php` and reachable by a direct
-API call, and as of v3.9.0 it validates that a stop/target sits on the correct side of entry for
-the given direction — but nothing in the current UI exercises that code path. If a future release
-wires a price-based calculator into the UI, it already has this validation; if not, don't assume
-`CalculatorController.php` is being exercised by manual testing of the Risk Calculator page.
+**Superseded by v3.17.0 for the page as a whole** — `pages/calculator.php` is no longer the
+disconnected, client-side `calcSimple()` this note originally described; see the v3.17.0 section
+above. `js/calculator.js` now calls `auto_risk_preview`/`get_risk_status` live on every input.
+
+What's still true: `calculate_risk` → `CalculatorController::calculate()` — the original,
+price-based (entry/stop/target/direction) calculation, registered in `router.php` since before
+v3.9.0 — remains reachable only by a direct API call. Nothing in the current UI exercises it;
+`sizePreview()` (v3.16.1 B4, the trade form's own pre-trade panel) and `autoRiskPreview()`
+(v3.17.0, the calculator page) are both separate, newer computations, not built on top of
+`calculate()`. Don't assume `calculate()` specifically is being exercised by manual testing of
+the Risk Calculator page.
 
 ---
 

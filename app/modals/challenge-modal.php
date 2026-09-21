@@ -21,6 +21,10 @@
       <div class="form-group"><label>Daily Loss Limit ($)</label><input type="number" step="0.01" id="ch-daily_loss_limit" value="500"></div>
       <div class="form-group"><label>Risk Per Trade (%)</label><input type="number" step="0.01" id="ch-risk_per_trade_pct" value="0.5"></div>
       <div class="form-group"><label>Profit Target (%)</label><input type="number" step="0.1" id="ch-profit_target_pct" value="8"></div>
+      <!-- v3.17.0: the Auto Risk Calculator's Leverage input defaults to this and stays
+           editable there — this is a default, not a hard cap, so it's left NULL/blank
+           (never a guessed number) until a value is actually set here. -->
+      <div class="form-group"><label>Default Leverage (x)</label><input type="number" step="0.01" id="ch-default_leverage" placeholder="e.g. 5"></div>
       <div class="form-group"><label>Status</label><select id="ch-status"><option value="active">Active</option><option value="completed">Completed</option><option value="failed">Failed</option></select></div>
     </div>
     <div class="form-actions">

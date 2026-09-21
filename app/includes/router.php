@@ -31,6 +31,8 @@ $routes = [
     // Calculator
     'calculate_risk'        => ['CalculatorController', 'calculate'],
     'size_preview'          => ['CalculatorController', 'sizePreview'],
+    'auto_risk_preview'     => ['CalculatorController', 'autoRiskPreview'],
+    'get_risk_status'       => ['CalculatorController', 'getRiskStatus'],
     // Pairs
     'get_pairs'             => ['PairController', 'getAll'],
     'add_pair'              => ['PairController', 'add'],

@@ -142,6 +142,19 @@ function viewTrade(id) {
             <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Trade Journal</div>
             ${renderJournalView(t.trade_journal)}
         </div>` : ''}
+        ${t.trade_checkins && t.trade_checkins.length ? `
+        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Check-In History (During Open Position)</div>
+            <div style="display:flex;flex-direction:column;gap:6px">
+                ${t.trade_checkins.map(c => {
+                    const parts = [];
+                    if (c.actions && c.actions.length) parts.push(c.actions.map(journalActionLabel).join(', '));
+                    if (c.emotion_code) parts.push(emotionLabel(c.emotion_code));
+                    if (c.tempted_text) parts.push(`"${c.tempted_text}"`);
+                    return `<div style="font-size:12px;color:var(--text2)"><span style="font-family:var(--font-mono);color:var(--text3)">${formatCheckinTime(c.checked_at)}</span> — ${parts.join(' · ') || '<em>No details</em>'}</div>`;
+                }).join('')}
+            </div>
+        </div>` : ''}
     `;
     document.getElementById('view-trade-title').textContent = `Trade #${t.id} — ${t.pair} ${t.direction} — ${t.trade_date}`;
     document.getElementById('view-trade-modal').classList.add('open');
@@ -250,6 +263,12 @@ function openTradeModal(data=null) {
     document.getElementById('trade-form').reset();
     document.getElementById('trade-id').value=data?.id||'';
     document.getElementById('screenshot-current').innerHTML='';
+    // v3.16.4: this button previously always read "Save Trade" regardless of whether an
+    // existing trade was being edited — a real bug, not cosmetic, since it gave no signal
+    // that reopening trade 123 and clicking it would update that row rather than create
+    // a new one.
+    const saveBtn = document.getElementById('save-trade-btn');
+    if (saveBtn) saveBtn.textContent = data ? 'Update Trade' : 'Save Trade';
     // Clear file inputs
     for (let i = 1; i <= 4; i++) {
         const inp = document.getElementById('f-screenshot_' + i);
@@ -472,10 +491,22 @@ function initJournalSections(data){
 
     renderEmotionGrid('pre_entry', byPhase.pre_entry?.emotion_code || null);
     document.getElementById('f-journal-note-pre_entry').value = byPhase.pre_entry?.note || '';
+    // v3.16.4: pre-entry is locked once the trade has actually closed — it records what
+    // was planned before entry, and TradeController::saveJournal() silently drops a
+    // pre_entry submission server-side once closed regardless of what this sends, so this
+    // is UX signal, not the enforcement point. 'Open'/blank/unset all still count as open.
+    lockPreEntry(!!data && ['Win','Loss','Break Even'].includes(data.result));
 
-    renderActionsGrid(byPhase.during?.actions || []);
-    renderEmotionGrid('during', byPhase.during?.emotion_code || null);
-    document.getElementById('f-journal-note-during').value = byPhase.during?.note || '';
+    // v3.16.4: During's check-ins are append-only (trade_checkins), returned newest-first
+    // by get_trades — [0] is the latest, which is what the form preloads. Saving with
+    // these fields unchanged from the latest check-in creates no new row (see
+    // TradeController::saveCheckin()); changing them and saving does.
+    const checkins = data?.trade_checkins || [];
+    const latestCheckin = checkins[0] || null;
+    renderActionsGrid(latestCheckin?.actions || []);
+    renderEmotionGrid('during', latestCheckin?.emotion_code || null);
+    document.getElementById('f-journal-note-during').value = latestCheckin?.tempted_text || '';
+    renderCheckinTimeline(checkins);
 
     renderExitTypeSelect(byPhase.post_close?.exit_type || null);
     renderEmotionGrid('post_close', byPhase.post_close?.emotion_code || null);
@@ -485,6 +516,53 @@ function initJournalSections(data){
     if (gp === 1 || gp === '1') toggleGoodProcess(1);
     else if (gp === 0 || gp === '0') toggleGoodProcess(0);
     document.getElementById('f-journal-note-post_close').value = byPhase.post_close?.note || '';
+}
+
+// v3.16.4 — visual/interactive lock only; TradeController::saveJournal() is the real
+// enforcement point (a locked pre_entry submission is silently dropped server-side
+// regardless of what gets sent). stop_loss/take_profit use readonly, never disabled —
+// a disabled input is excluded from FormData entirely, and v3.16.1 B3 requires both of
+// them on every save, including a closed trade's edits that have nothing to do with
+// pre_entry (notes, strategy, post_close, a new check-in).
+function lockPreEntry(locked){
+    const badge = document.getElementById('journal-pre_entry-locked-badge');
+    if (badge) badge.style.display = locked ? 'inline' : 'none';
+    ['f-stop_loss','f-take_profit','f-journal-note-pre_entry'].forEach(id=>{
+        const el = document.getElementById(id);
+        if (el) el.readOnly = locked;
+    });
+    document.querySelectorAll('#grade-grid .grade-pill, #emotion-grid-pre_entry .emotion-pill, #emotion-grid-pre_entry .emotion-info-btn, #emotion-clear-btn-pre_entry').forEach(b=>{
+        b.disabled = locked;
+        b.style.opacity = locked ? '0.6' : '';
+        b.style.cursor = locked ? 'not-allowed' : '';
+    });
+}
+
+function formatCheckinTime(ts){
+    if (!ts) return '';
+    const d = new Date(ts.replace(' ', 'T'));
+    if (isNaN(d.getTime())) return ts;
+    return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+}
+
+// v3.16.4 — read-only, newest-first history of every During check-in on this trade.
+// Nothing here is editable: a previous check-in is never edited or deleted from this
+// form (see CLAUDE.md v3.16.4) — this is a record of what was actually selected at each
+// point in time, not a second edit surface for the same data.
+function renderCheckinTimeline(checkins){
+    const wrap = document.getElementById('checkin-timeline-wrap');
+    const list = document.getElementById('checkin-timeline');
+    if (!checkins || !checkins.length) { wrap.style.display = 'none'; list.innerHTML = ''; return; }
+    list.innerHTML = checkins.map(c => {
+        const parts = [];
+        if (c.actions && c.actions.length) parts.push(c.actions.map(journalActionLabel).join(', '));
+        if (c.emotion_code) parts.push(emotionLabel(c.emotion_code));
+        if (c.tempted_text) parts.push(`"${c.tempted_text}"`);
+        return `<div style="font-size:12px;color:var(--text2);padding:6px 8px;background:var(--bg3);border-radius:6px">
+            <span style="font-family:var(--font-mono);color:var(--text3)">${formatCheckinTime(c.checked_at)}</span> — ${parts.join(' · ') || '<em>No details</em>'}
+        </div>`;
+    }).join('');
+    wrap.style.display = 'block';
 }
 
 // Reads window._journalState plus the three free-text fields into the payload shape

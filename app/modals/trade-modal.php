@@ -65,7 +65,7 @@
 
         <div class="section-divider"></div>
         <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="toggleJournalSection('pre_entry')">
-          <span>Pre-Entry Journal</span>
+          <span>Pre-Entry Journal <span id="journal-pre_entry-locked-badge" style="display:none;font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0">— locked, trade is closed</span></span>
           <span id="journal-chevron-pre_entry" style="font-size:11px">▸</span>
         </div>
         <div class="form-group full" id="journal-body-pre_entry" style="display:none">
@@ -120,6 +120,12 @@
           <span>During Open Position <span style="font-weight:400;color:var(--text3);text-transform:none;letter-spacing:0">— optional, only if you came back to check</span></span>
           <span id="journal-chevron-during" style="font-size:11px">▸</span>
         </div>
+        <!-- v3.16.4: each save here appends a new row to trade_checkins rather than
+             overwriting a single trade_journal row — see CLAUDE.md's v3.16.4 section.
+             The fields below always show the LATEST check-in's selections (preloaded by
+             initJournalSections()); changing them and saving creates a new one, leaving
+             them unchanged creates nothing. The full history renders read-only in
+             #checkin-timeline just below, newest first. -->
         <div class="form-group full" id="journal-body-during" style="display:none">
           <label style="display:block">What have I done since entry?</label>
           <div id="actions-grid" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
@@ -131,6 +137,11 @@
           <button type="button" id="emotion-clear-btn-during" onclick="clearEmotion('during')" class="emotion-clear-link" style="display:none">✕ Clear selection</button>
 
           <div style="margin-top:12px"><label>What am I tempted to do right now?</label><textarea id="f-journal-note-during" rows="2"></textarea></div>
+
+          <div id="checkin-timeline-wrap" style="display:none;margin-top:14px">
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:6px">Check-in history</div>
+            <div id="checkin-timeline" style="display:flex;flex-direction:column;gap:6px"></div>
+          </div>
         </div>
 
         <div class="section-divider"></div>
@@ -203,7 +214,7 @@
     </form>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="document.getElementById('trade-modal').classList.remove('open')">Cancel</button>
-      <button class="btn btn-primary" onclick="saveTrade()">Save Trade</button>
+      <button class="btn btn-primary" id="save-trade-btn" onclick="saveTrade()">Save Trade</button>
     </div>
   </div>
 </div>

@@ -49,6 +49,20 @@ class TradeController {
             $journalAvailable = false;
         }
 
+        // v3.16.4 — During Open Position's check-ins live in their own append-only table
+        // (trade_checkins/trade_checkin_actions), separate from trade_journal's single
+        // upserted row per phase — see the migration and saveCheckin() below for why.
+        // Newest first: index 0 is what the form preloads, the full list is what the
+        // read-only timeline renders. Same defensive degrade-to-empty pattern as
+        // trade_journal above — a missing/broken table must not take get_trades down.
+        $checkinsAvailable = true;
+        try {
+            $tc = $this->db->prepare("SELECT id, checked_at, emotion_code, tempted_text FROM trade_checkins WHERE trade_id=? ORDER BY checked_at DESC, id DESC");
+            $tca = $this->db->prepare("SELECT action_code FROM trade_checkin_actions WHERE checkin_id=?");
+        } catch (PDOException $e) {
+            $checkinsAvailable = false;
+        }
+
         foreach ($trades as &$t) {
             if (!empty($t['screenshots'])) {
                 $t['screenshots_data'] = json_decode($t['screenshots'], true) ?: [];
@@ -76,6 +90,22 @@ class TradeController {
                     $t['trade_journal'] = $journal;
                 } catch (PDOException $e) {
                     $journalAvailable = false;
+                }
+            }
+
+            $t['trade_checkins'] = [];
+            if ($checkinsAvailable) {
+                try {
+                    $tc->execute([$t['id']]);
+                    $checkins = $tc->fetchAll();
+                    foreach ($checkins as &$c) {
+                        $tca->execute([$c['id']]);
+                        $c['actions'] = array_column($tca->fetchAll(), 'action_code');
+                    }
+                    unset($c);
+                    $t['trade_checkins'] = $checkins;
+                } catch (PDOException $e) {
+                    $checkinsAvailable = false;
                 }
             }
         }
@@ -212,14 +242,27 @@ class TradeController {
     }
 
     /**
-     * Three-phase trade journal (v3.11.0): one row per trade per phase, upserted here in
-     * the same request as the trade itself — same bundled-save pattern as trade_variables
-     * above, so a new trade's journal entry can use the just-created trade id without a
-     * second round trip.
+     * Pre-entry / post-close halves of the three-phase trade journal (v3.11.0): one row
+     * per trade per phase, upserted here in the same request as the trade itself — same
+     * bundled-save pattern as trade_variables above, so a new trade's journal entry can
+     * use the just-created trade id without a second round trip.
+     *
+     * v3.16.4 — During moved out of this table entirely (see saveCheckin() below); this
+     * method now only ever touches phase IN ('pre_entry','post_close'). A 'during' entry
+     * in the incoming payload is routed to saveCheckin() instead of being skipped.
      *
      * A phase with nothing answered is deleted rather than left as a stale empty row —
-     * the ABSENCE of a 'during' row is the signal that the trader never returned to the
-     * chart mid-trade; a phase must never be marked "skipped" instead.
+     * this was originally written so the ABSENCE of a 'during' row could signal "never
+     * checked in"; that meaning now lives in trade_checkins having zero rows instead, but
+     * the same empty-means-delete rule is still correct for pre_entry/post_close.
+     *
+     * v3.16.4 — pre_entry is locked once the trade has actually closed: it records what
+     * was planned before entry, and editing it in hindsight would let a plan be rewritten
+     * to match the outcome. 'Open'/NULL/unset all still count as open, the same
+     * closed-trades-only test (result IN ('Win','Loss','Break Even')) used everywhere
+     * else in this codebase. A locked pre_entry submission is silently ignored, not
+     * errored — the rest of the save (notes, strategy, post_close, check-ins) must still
+     * go through.
      *
      * created_at is never touched here: it's excluded from the ON DUPLICATE KEY UPDATE
      * clause below, so MariaDB leaves it as originally set. updated_at needs no code at
@@ -230,8 +273,11 @@ class TradeController {
         if (is_string($entries)) $entries = json_decode($entries, true) ?: [];
         if (!is_array($entries)) return;
 
-        $validPhases = ['pre_entry', 'during', 'post_close'];
         $validActionCodes = array_column(journalActions(), 'code');
+
+        $rs = $this->db->prepare("SELECT result FROM trades WHERE id=?");
+        $rs->execute([$tradeId]);
+        $isClosed = in_array($rs->fetchColumn(), ['Win', 'Loss', 'Break Even'], true);
 
         $upsert = $this->db->prepare(
             "INSERT INTO trade_journal (trade_id, phase, emotion_code, note, exit_type, good_process)
@@ -239,13 +285,17 @@ class TradeController {
              ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id), emotion_code=VALUES(emotion_code), note=VALUES(note), exit_type=VALUES(exit_type), good_process=VALUES(good_process)"
         );
         $deleteEmpty = $this->db->prepare("DELETE FROM trade_journal WHERE trade_id=? AND phase=?");
-        $deleteActions = $this->db->prepare("DELETE FROM trade_journal_actions WHERE journal_id=?");
-        $insertAction = $this->db->prepare("INSERT INTO trade_journal_actions (journal_id, action_code) VALUES (?,?)");
 
         foreach ($entries as $entry) {
             if (!is_array($entry)) continue;
             $phase = $entry['phase'] ?? '';
-            if (!in_array($phase, $validPhases, true)) continue;
+
+            if ($phase === 'during') {
+                $this->saveCheckin($tradeId, $entry, $validActionCodes);
+                continue;
+            }
+            if (!in_array($phase, ['pre_entry', 'post_close'], true)) continue;
+            if ($phase === 'pre_entry' && $isClosed) continue;
 
             $emotionCode = trim((string)($entry['emotion_code'] ?? '')) ?: null;
             $note = trim((string)($entry['note'] ?? '')) ?: null;
@@ -253,23 +303,70 @@ class TradeController {
             $goodProcessRaw = $entry['good_process'] ?? null;
             $goodProcess = ($phase === 'post_close' && $goodProcessRaw !== null && $goodProcessRaw !== '')
                 ? (int)!!$goodProcessRaw : null;
-            $actions = ($phase === 'during' && is_array($entry['actions'] ?? null))
-                ? array_values(array_unique(array_intersect($entry['actions'], $validActionCodes)))
-                : [];
 
-            $hasContent = $emotionCode !== null || $note !== null || $exitType !== null || $goodProcess !== null || !empty($actions);
+            $hasContent = $emotionCode !== null || $note !== null || $exitType !== null || $goodProcess !== null;
             if (!$hasContent) {
                 $deleteEmpty->execute([$tradeId, $phase]);
                 continue;
             }
 
             $upsert->execute([$tradeId, $phase, $emotionCode, $note, $exitType, $goodProcess]);
-            $journalId = $this->db->lastInsertId();
+        }
+    }
 
-            if ($phase === 'during') {
-                $deleteActions->execute([$journalId]);
-                foreach ($actions as $code) $insertAction->execute([$journalId, $code]);
-            }
+    /**
+     * v3.16.4 — During Open Position's check-ins are append-only, not upserted: this is
+     * the fix for the reported bug (a second check-in silently overwrote the first, and
+     * — because trade_journal's UNIQUE KEY (trade_id, phase) meant there was only ever
+     * one row to read back — reopening a trade could show the During section blank if
+     * that one row's own reload path lagged behind a save). Every call here compares the
+     * submitted selections against the trade's own latest check-in (if any) and only
+     * inserts a new trade_checkins row when something actually differs. Saving the rest
+     * of the trade form — notes, strategy, pre_entry, post_close — with the During
+     * section untouched must never create a phantom check-in; that's what the comparison
+     * against $latest is for, not just a "has content" check on its own.
+     *
+     * $entry is the same shape collectTradeJournal() has always sent for the during
+     * phase — {phase:'during', emotion_code, note, actions} — 'note' here is what's
+     * displayed as "What am I tempted to do right now?" and stored as
+     * trade_checkins.tempted_text; the wire field name didn't need to change to rename
+     * the column.
+     */
+    private function saveCheckin($tradeId, $entry, $validActionCodes) {
+        $emotionCode = trim((string)($entry['emotion_code'] ?? '')) ?: null;
+        $temptedText = trim((string)($entry['note'] ?? '')) ?: null;
+        $actions = is_array($entry['actions'] ?? null)
+            ? array_values(array_unique(array_intersect($entry['actions'], $validActionCodes)))
+            : [];
+        sort($actions);
+
+        $hasContent = $emotionCode !== null || $temptedText !== null || !empty($actions);
+        if (!$hasContent) return;
+
+        $ls = $this->db->prepare("SELECT id, emotion_code, tempted_text FROM trade_checkins WHERE trade_id=? ORDER BY checked_at DESC, id DESC LIMIT 1");
+        $ls->execute([$tradeId]);
+        $latest = $ls->fetch();
+
+        $latestActions = [];
+        if ($latest) {
+            $la = $this->db->prepare("SELECT action_code FROM trade_checkin_actions WHERE checkin_id=? ORDER BY action_code");
+            $la->execute([$latest['id']]);
+            $latestActions = array_column($la->fetchAll(), 'action_code');
+        }
+
+        $unchanged = $latest
+            && $latest['emotion_code'] === $emotionCode
+            && $latest['tempted_text'] === $temptedText
+            && $latestActions === $actions;
+        if ($unchanged) return;
+
+        $ins = $this->db->prepare("INSERT INTO trade_checkins (trade_id, emotion_code, tempted_text) VALUES (?,?,?)");
+        $ins->execute([$tradeId, $emotionCode, $temptedText]);
+        $checkinId = $this->db->lastInsertId();
+
+        if ($actions) {
+            $insertAction = $this->db->prepare("INSERT INTO trade_checkin_actions (checkin_id, action_code) VALUES (?,?)");
+            foreach ($actions as $code) $insertAction->execute([$checkinId, $code]);
         }
     }
 

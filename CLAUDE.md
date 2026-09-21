@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.16.3 |
+| Current Version | v3.16.4 |
 
 ### Tech Stack
 
@@ -239,11 +239,16 @@ balance_at_day_start, target_r, exit_quality (added v3.16.0)
 > value instead of silently masking it the way `CalculatorController`'s existing `rr_ratio`
 > calculation does (see the spec-gap audit's defect #6).
 >
-> `exit_quality` — `ENUM`-shaped `VARCHAR(20)`: `target_hit_valid` / `target_hit_short` /
+> `exit_quality` — `ENUM`-shaped `VARCHAR(20)`: `open` / `target_hit_valid` /
+> `target_hit_sub_gate` (renamed from `target_hit_short` in v3.16.1, see that section) /
 > `stopped_valid` / `stopped_short` / `manual_close` / `unknown`. Derived from `target_r`
 > and `exit_reason` — `exit_reason` is Bitfunded's own label (what happened), `exit_quality`
 > is a judgement against the account's own gate (whether what happened was disciplined).
-> See the v3.16.0 section below for the finding this surfaced.
+> `open` (added v3.16.4) is not a judgement — it means the trade hasn't closed yet
+> (`result` not in `Win`/`Loss`/`Break Even`) and is checked before every other branch,
+> so an unresolved trade is never conflated with `unknown` (a genuinely closed trade with
+> no stop/target on file — a different fact). See the v3.16.0 section below for the
+> finding `exit_quality` originally surfaced, and v3.16.4 for the `open` addition.
 > `source` is `ENUM('manual','import') NOT NULL DEFAULT 'manual'` — distinguishes hand-logged
 > trades from ones backfilled from a broker's own trade history (see "The Journal Was a
 > Winner-Weighted Subset" below). The default means no code change was needed in
@@ -335,7 +340,7 @@ FK: trade_id → trades(id) ON DELETE CASCADE
 
 **trade_journal** (added v3.11.0 — see "Three-Phase Trade Journal" below for full design)
 ```sql
-id, trade_id, phase (pre_entry/during/post_close),
+id, trade_id, phase (pre_entry/post_close),
 emotion_code, note, exit_type, good_process,
 created_at, updated_at
 UNIQUE KEY (trade_id, phase)
@@ -345,7 +350,14 @@ FK: trade_id → trades(id) ON DELETE CASCADE
 > phases (the nine `emotion_states.php` codes, not journal-specific). `exit_type` and
 > `good_process` are only ever populated on the `post_close` row. `updated_at` has no
 > `DEFAULT` — it stays `NULL` until the first edit, so `NULL` means "never edited since
-> creation," not "unknown."
+> creation," not "unknown." **As of v3.16.4, `TradeController::saveJournal()` only ever
+> writes `pre_entry`/`post_close` here** — `during` moved to `trade_checkins` below,
+> because this table's own `UNIQUE KEY (trade_id, phase)` made a second During check-in
+> silently overwrite the first, which is exactly wrong for a log meant to accumulate.
+> The `phase` column's `ENUM` still technically allows `'during'` (unchanged, to avoid
+> touching already-applied migration files) and pre-v3.16.4 `during` rows are left in
+> place, not deleted — see v3.16.4's own section for the backfill that copied their data
+> into `trade_checkins` before the app stopped reading this table for that phase.
 
 **trade_journal_actions** (added v3.11.0)
 ```sql
@@ -353,10 +365,33 @@ id, journal_id, action_code
 UNIQUE KEY (journal_id, action_code)
 FK: journal_id → trade_journal(id) ON DELETE CASCADE
 ```
-> Multi-select answer to "What have I done since entry?" (the `during`-phase row only) —
-> one row per selected action, same EAV shape as `trade_variables` rather than a
-> delimited-string or bitmask column, for consistency with the pattern this codebase
-> already uses. `action_code` values come from `includes/journal_taxonomy.php`.
+> Historical only as of v3.16.4 — see `trade_journal` above. `action_code` values come
+> from `includes/journal_taxonomy.php`.
+
+**trade_checkins** (added v3.16.4 — see that section below for full design)
+```sql
+id, trade_id, checked_at (DATETIME(3), default CURRENT_TIMESTAMP(3)),
+emotion_code, tempted_text
+FK: trade_id → trades(id) ON DELETE CASCADE
+```
+> Append-only log of "During Open Position" check-ins — no `UNIQUE KEY` on `trade_id`,
+> deliberately, unlike `trade_journal`: this is the whole point of a separate table
+> instead of just widening `trade_journal`'s constraint. `checked_at` is millisecond
+> precision so two check-ins saved within the same second still sort and display as
+> distinct rows. `tempted_text` is what the form's "What am I tempted to do right now?"
+> question writes — `TradeController::saveCheckin()` compares each submission against
+> the trade's own latest row here and only inserts a new one when something actually
+> changed, so re-saving the rest of the trade form never creates a duplicate check-in.
+
+**trade_checkin_actions** (added v3.16.4)
+```sql
+id, checkin_id, action_code
+UNIQUE KEY (checkin_id, action_code)
+FK: checkin_id → trade_checkins(id) ON DELETE CASCADE
+```
+> Same EAV shape as `trade_journal_actions`/`trade_variables` — one row per selected
+> action per check-in. `action_code` values come from
+> `includes/journal_taxonomy.php::journalActions()`, shared with the old `during` phase.
 
 **ai_reviews** (added v3.6.0)
 ```sql
@@ -391,6 +426,8 @@ trades (many) ──→ (1) strategies                  [strategy_id]
 strategies (1) ──→ (many) strategy_variables
 strategy_variables (1) ──→ (many) trade_variables  [FK RESTRICT]
 trades (1) ──→ (many) trade_variables              [FK CASCADE]
+trades (1) ──→ (many) trade_checkins               [FK CASCADE]
+trade_checkins (1) ──→ (many) trade_checkin_actions [FK CASCADE]
 users (1) ──→ (many) pairs
 challenges (1) ──→ (many) risk_ladder_tiers
 users (1) ──→ (many) strategy_tests
@@ -2210,6 +2247,118 @@ not a severity/priority marker — reads the opposite of what its name suggests 
 "this file matters, make sure it deploys" instinct. Every `files` entry for an actual
 code change should be `"critical": false` unless the intent is specifically to have the
 updater refuse to touch that file.
+
+### v3.16.4: During Check-Ins Become an Append-Only Log, Plus `exit_quality='open'`
+
+**Note on the version number:** the briefing for this work said "Tag v3.16.3" and bundled
+it with two items described as "already pending" under that version — but v3.16.3 had
+already been committed, tagged, and released (the deploy-manifest fix above) by the time
+this briefing arrived. Per this file's own absolute rule (§13.2, "always bump version
+number with every update" — never reuse one), this shipped as **v3.16.4** instead of
+re-tagging an already-published v3.16.3. The two "already pending" items are included
+here since nothing under those names had actually shipped yet.
+
+#### Problem
+
+Reopening an existing trade always showed the During Open Position section blank, and
+the modal's save button read "Save Trade" even when editing an existing trade.
+
+**Root cause of the blank-on-reopen bug:** `trade_journal` has `UNIQUE KEY (trade_id,
+phase)` — exactly right for `pre_entry`/`post_close` (one plan, one outcome, per trade),
+structurally wrong for During. Every check-in `INSERT ... ON DUPLICATE KEY UPDATE`'d the
+*same* row, so a second check-in silently overwrote the first with no way to ever see
+what had been noted before, and nothing about that shape supports "show me everything
+I've recorded" — only ever "show me the one row that currently exists." This was not a
+reload bug to patch; the storage shape itself couldn't do what was being asked of it.
+
+#### Fix: `trade_checkins`, an append-only table
+
+New tables (`2026_09_21_0008_create_trade_checkins.sql`), separate from `trade_journal`
+— see §3 schema section above for the full column list. No `UNIQUE KEY` on `trade_id`:
+that absence is the entire fix. `trade_journal` itself is untouched — `pre_entry`/
+`post_close` keep upserting into it exactly as before; only During moved out.
+
+**`TradeController::saveCheckin()`** (new, called from `saveJournal()` when it sees a
+`during` entry instead of the old upsert path): compares the submitted emotion/actions/
+tempted-text against the trade's own latest `trade_checkins` row and only inserts a new
+one when something actually differs. This is what satisfies "not changing them creates
+nothing" — a naive "has content → insert" would have created a duplicate row every time
+the rest of the trade form was saved with During left alone, which is the common case
+(editing notes, strategy, post-close) far more often than an actual new check-in.
+
+**Backfill, not a fresh start:** every trade with an existing `trade_journal` `phase =
+'during'` row gets exactly one `trade_checkins` row carrying that same data (the source
+table's own unique constraint guarantees at most one per trade to copy). The old rows
+are left in place, not deleted — harmless, and consistent with this codebase's standing
+practice of not touching historical data that answered a question under a since-changed
+shape (see v3.11.0's treatment of `note_saw`/`note_why`/`note_unsure`).
+
+**Frontend (`js/trades.js`, `modals/trade-modal.php`):** `initJournalSections()` now
+preloads During from `data.trade_checkins[0]` (`get_trades` returns them newest-first)
+instead of `trade_journal`'s `during` entry. A new read-only `#checkin-timeline` renders
+every check-in, newest first, in the `HH:MM — Actions · Emotion · "tempted text"` shape
+the briefing specified; `viewTrade()`'s read-only detail panel got the same treatment so
+check-in history is visible outside the edit form too. Nothing in the timeline is
+editable or deletable from this UI — it is a record, not a second edit surface for the
+same data.
+
+**Button label (`#save-trade-btn`):** `openTradeModal()` now sets its text based on
+whether an existing trade is being edited — "Update Trade" vs. "Save Trade" — instead of
+a hardcoded label that never changed. Purely cosmetic but a real, reported bug: it gave
+no signal that clicking it on an already-open trade would update that row.
+
+#### Pre-entry lock
+
+Item 5 of the same briefing: "Pre-entry stays editable only while the trade is Open —
+once closed, it's locked." Enforced in **both** places, deliberately:
+
+- **Server-side (the actual enforcement point):** `saveJournal()` fetches the trade's
+  current `result` and silently skips writing the `pre_entry` phase whenever it's
+  already `Win`/`Loss`/`Break Even` — the same closed-trades-only test used everywhere
+  else in this codebase (§3, "Closed-Trades-Only Rule"). Silently skipped, not errored,
+  so the rest of the same save (notes, strategy, post_close, a new check-in) still goes
+  through even if the submitted payload includes a `pre_entry` entry the UI shouldn't
+  have sent.
+- **Client-side (`lockPreEntry()`, new in `js/trades.js`):** UX signal only. Stop
+  loss/take profit and the pre-entry note use `readonly`, **never** `disabled` — a
+  disabled `<input>` is excluded from `FormData` entirely, and v3.16.1 B3 requires both
+  fields on *every* save, including a closed trade's edits that have nothing to do with
+  pre-entry. `disabled` would have silently broken saving any closed trade at all. Grade
+  pills and the pre-entry emotion grid use `disabled` on their `<button>` elements
+  instead, which is safe there since journal answers are read from
+  `window._journalState`/dedicated DOM values via `collectTradeJournal()`, never from
+  `FormData`.
+
+#### `exit_quality = 'open'` for unresolved trades
+
+The second "already pending" item. `helpers.php::computeTradeRiskFields()` previously
+left an unresolved trade at `'unknown'` — the same value a *genuinely closed* trade with
+no stop/target on file gets. Two different facts ("hasn't closed yet" vs. "closed but
+unjudgeable") wearing one label. Now checked first, before the `target_r === null`
+branch: any trade whose `result` isn't `Win`/`Loss`/`Break Even` gets `'open'` outright,
+regardless of `target_r`. `2026_09_21_0009_set_exit_quality_open_for_open_trades.sql`
+backfills every currently-open trade to match (`WHERE result IS NULL OR result NOT IN
+(...)` — `NOT IN` alone silently skips a `NULL` result, which is exactly what a
+never-touched `result` dropdown produces via `saveTrade()`'s `?: null` normalization, so
+the `IS NULL` branch is not redundant). `BitfundedImportController::confirm()` needed no
+change: it already recomputes `exit_quality` immediately after setting a matched row's
+real `result`, so importing a close moves a trade from `'open'` to a real computed value
+in the same request, automatically.
+
+#### Verified
+
+- Open trade, select Closed part + Chasing, save → reopen: both selected, one entry in
+  the timeline.
+- Change to Left it alone + Settled, save → reopen: new selection shown, timeline has
+  two entries with distinct millisecond-precision timestamps (why `checked_at` is
+  `DATETIME(3)`, not the schema's usual second-precision `TIMESTAMP` — see the migration
+  file's own comment).
+- Saving with only the general Notes field changed (During left untouched) creates no
+  new check-in row — `saveCheckin()`'s comparison against the latest row is what this
+  depends on, not merely "was anything filled in."
+- Importing a trade's close leaves its `trade_checkins` rows untouched (the importer's
+  `UPDATE` never references that table) and moves `exit_quality` from `'open'` to a real
+  computed value in the same request.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

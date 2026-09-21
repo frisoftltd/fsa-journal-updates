@@ -281,7 +281,17 @@ function computeTradeRiskFields(PDO $db, int $tradeId): array {
 
     // v3.16.1 A3(a): 'target_hit_sub_gate' (renamed from 'target_hit_short' — see
     // 2026_09_19_0007) for a Take Profit exit whose target_r sits below the 2.5 gate.
-    if ($exitReason === 'Manual Closing') {
+    //
+    // v3.16.4: an unresolved trade (result not yet Win/Loss/Break Even — the same
+    // closed-trades-only test used everywhere else in this codebase) gets 'open', checked
+    // first and before target_r's null check specifically. Before this, a trade that
+    // hadn't closed yet and a trade that HAD closed but had no stop/target on file both
+    // landed on the same 'unknown' — two different facts wearing one label. 'open' is not
+    // a judgement (there's nothing to judge yet); it only ever means "ask again once this
+    // closes."
+    if (!in_array($t['result'], ['Win', 'Loss', 'Break Even'], true)) {
+        $out['exit_quality'] = 'open';
+    } elseif ($exitReason === 'Manual Closing') {
         $out['exit_quality'] = 'manual_close';
     } elseif ($out['target_r'] === null) {
         $out['exit_quality'] = 'unknown';

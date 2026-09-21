@@ -1,29 +1,13 @@
 {
-    "current_version": "3.16.1",
-    "release_date": "2026-09-19",
+    "current_version": "3.16.2",
+    "release_date": "2026-09-21",
     "changelog": [
-        "Fix (A1): EXIT_TARGET_SHORT was wrong -- verified against live data, the four target_hit_short trades averaged 2.343R and returned +$665.62, the account's largest single contributor. The v3.16.0 claim that take-profits were 'paying 1R' traced to three estimated-R rows (gross P&L / risk_amount, which carries no information). Rewritten to fire on stopped_short only (severity warning), reporting target_r -- the planned geometry -- not r_multiple, the realized outcome",
-        "Add (A2): EXIT_NO_TARGET -- the largest, previously-unreported finding. Fires whenever any trade has no target on file, severity critical, pushed first in the insights list so it leads the panel. Expected on challenge 6: 27 trades, -$1,150.31, -$42.60 each. Carries 'action'/'verify' fields (informational only -- not wired to an automatic verification check; that mechanism, CadenceGate, is still deferred pending its own spec)",
-        "Rename (A3a): exit_quality value 'target_hit_short' -> 'target_hit_sub_gate' -- 2.35R is not a short outcome, it's the account's best-performing bucket. The 2.5 target_r gate threshold is unchanged; only the label stops implying these trades were errors",
-        "Add (A4): NO_ACTIVITY insight ('No trades closed. Nothing to review.') for a period with zero trades, replacing a blank panel -- two daily reviews (Sep 17, 19) previously rendered nothing",
-        "Fix (A5): ladder-adherence tolerance widened +/-15% -> +/-20%. Post-rebase adherence was 71.2% against RISK_LADDER_DRIFT's 70% threshold -- 1.2 points of margin that would flicker the rule on single trades. 14 over-tier / 3 under-tier out of 59 is a real pattern; the tolerance widens rather than the threshold moving to 75",
-        "Add (B1): TradeController::saveTrade() now computes and persists balance_at_day_start/planned_risk_pct/actual_risk_pct/risk_deviation_pct/target_r/clean_rep/exit_quality on every insert and update, via new shared helpers.php::computeTradeRiskFields()/persistTradeRiskFields(). Ladder tier always reads risk_ladder_tiers WHERE active=1 live -- never hardcoded. entry_price/lot_size are still not collected by this form (unchanged since v3.14.0), so actual_risk_pct/target_r/exit_quality stay null until a real fill lands via import; balance_at_day_start/planned_risk_pct/clean_rep populate immediately since they only need trade_date/challenge_id/stop/target/journal",
-        "Add (B2): BitfundedImportController recomputes actual_risk_pct/target_r/clean_rep/exit_quality via the same shared helper immediately after each matched-row UPDATE or new-row INSERT, now that real fill data exists. Never writes to stop_loss/take_profit -- whatever was set pre-entry (B1) or left null (an unattended new import) stays exactly as it was",
-        "Add (B3): stop_loss and take_profit are now required on every trade save (add and update) -- TradeController::saveTrade() rejects the request outright rather than warning. Applies to editing existing trades too, including historical rows that predate this change",
-        "Add (B4): pre-trade sizing panel on the trade form -- start-of-day balance, ladder tier, prescribed risk ($), entered risk (from planned entry/lot size), deviation %, target R, plus two non-blocking inline warnings (deviation beyond +/-20%, target_r < 3.0). New CalculatorController::sizePreview() (size_preview route) backs it. Planned entry price / planned lot size are deliberately NOT persisted to trades.entry_price/lot_size -- ephemeral planning inputs only, read once per preview and discarded; the real values still come exclusively from the Bitfunded importer on close"
+        "Fix: TradeController::saveTrade()'s INSERT branch (add_trade) has thrown PDOException SQLSTATE[HY093] on every new-trade save since v3.14.0 -- the trailing placeholder count ($ph) was left at count($cols)+4 when v3.14.0 dropped pnl/net_pnl/r_multiple from the appended columns, leaving 2 unbound '?' tokens in the VALUES clause against 19 real bound values. Corrected to count($cols)+2, matching the 2 columns (screenshot, screenshots) actually appended beyond $cols. The update_trade path was checked too and was already correct -- this was INSERT-only",
+        "Add: add_trade/update_trade are now wrapped in try/catch -- any exception from here on (the DB writes, trade_variables, trade_journal, the v3.16.1 risk-field computation) returns HTTP 500 with {\"success\":false,\"error\":\"<message>\"} instead of an uncaught PDOException producing an empty response body, which the frontend was surfacing as 'Unexpected end of JSON input'",
+        "Verify: pre-tag, built the exact bound-params arrays saveTrade()/persistTradeRiskFields() produce for an Open trade (stop+target set, no entry_price/lot_size -- this form has never collected those, since v3.14.0) and for editing an existing closed imported trade (all seven v3.16.1 risk fields real), and asserted placeholder count === bound param count for every statement in both cases. Confirmed computeTradeRiskFields() already keeps all seven keys present with null values rather than omitting them when entry_price/lot_size are null -- no change needed there, just verified"
     ],
     "files": [
-        {"path": "migrations/2026_09_19_0007_rename_target_hit_short_to_sub_gate.sql", "critical": false},
-        {"path": "includes/helpers.php", "critical": false},
-        {"path": "includes/controllers/ReviewEngineController.php", "critical": false},
-        {"path": "includes/controllers/StatsController.php", "critical": false},
-        {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
-        {"path": "includes/controllers/CalculatorController.php", "critical": false},
-        {"path": "includes/router.php", "critical": false},
-        {"path": "modals/trade-modal.php", "critical": false},
-        {"path": "js/trades.js", "critical": false},
-        {"path": "js/review.js", "critical": false}
+        {"path": "includes/controllers/TradeController.php", "critical": true}
     ],
     "db_migrations": []
 }

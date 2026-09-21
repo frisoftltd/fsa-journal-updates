@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.16.1 |
+| Current Version | v3.16.2 |
 
 ### Tech Stack
 
@@ -2112,6 +2112,74 @@ columns going forward — the app was measuring dead history, not live behavior.
 addressed in this release either — no further text was provided this session. `action`/
 `verify` fields now exist as plain data on `EXIT_NO_TARGET`'s insight, which is as far as
 this release goes without that spec.
+
+### v3.16.2: The INSERT Branch Has Thrown HY093 on Every New Trade Since v3.14.0
+
+Live error log, 2026-09-19 11:12 onward, repeating: `PDOException SQLSTATE[HY093]` at
+`TradeController.php:160`, called from `saveTrade() ← add() ← router.php:70`. Frontend
+symptom: the trade form's save request came back with an empty body, which `fetch`'s
+`.json()` then failed to parse as `"Unexpected end of JSON input"` — a swallowed 500, not
+a validation error.
+
+**Root cause, confirmed against the file history, not guessed.** `saveTrade()`'s INSERT
+branch builds its placeholder string as `$ph = implode(',', array_fill(0, count($cols) +
+N, '?'))`, where `N` is meant to be the number of columns appended to `$cols` beyond
+`user_id`/`challenge_id` (already covered by the two literal `?`s in `"VALUES
+(?,?,{$ph})"`). Before v3.14.0, `N` was `5` — correct, since five columns
+(`pnl,net_pnl,r_multiple,screenshot,screenshots`) were appended then. v3.14.0
+(`a38cd0b`) removed `pnl`/`net_pnl`/`r_multiple` from what gets appended (execution
+fields moved exclusively to `BitfundedImportController`, per that release's whole
+division-of-responsibility design) and correctly updated `$allcols`/`$vals` to match —
+but left `$ph` at `count($cols) + 4` instead of recalculating it to `+ 2` for the two
+columns (`screenshot`, `screenshots`) actually still appended. The result: the literal
+SQL carried 21 `?` tokens (2 explicit + 19 from `$ph`) against 19 named columns and 19
+bound values — a mismatch PDO catches at `execute()` time regardless of driver, every
+single time `add_trade` runs. Reproduced locally against a synthetic column/value count
+check (SQLite driver unavailable in this environment, but the count mismatch — 19 named
+columns, 21 placeholder tokens, 19 bound values — is what PDO's own HY093 message
+literally describes, independent of backend). `update_trade`'s `UPDATE` branch was
+checked against the same failure mode and was already correct — this bug was
+INSERT-only, which is why only brand-new trades were affected, not edits.
+
+**Why this took until v3.16.1 shipped to surface, not v3.14.0 itself:** this account's
+trade history is dominated by the Bitfunded paste importer (`BitfundedImportController`,
+a separate, correctly-built INSERT/UPDATE pair — checked and confirmed unaffected, see
+below), not manual `add_trade`. v3.16.1 B3 made `stop_loss`/`take_profit` required on
+every save, which is what prompted logging new trades by hand starting 2026-09-19 —
+the first real exercise of this exact code path since the bug was introduced two
+releases earlier.
+
+**Fix:** `$ph`'s formula corrected to `count($cols) + 2`, matching the two columns
+(`screenshot`, `screenshots`) actually appended beyond `$cols` in the INSERT branch.
+
+**`add_trade`/`update_trade` now wrapped in try/catch.** Everything from the INSERT/
+UPDATE through `persistTradeRiskFields()` (the v3.16.1 B1 risk-field computation, and
+the `trade_variables`/`trade_journal` bundled writes) runs inside one try block; any
+`Throwable` returns HTTP 500 with `{"success":false,"error":"<message>"}` instead of an
+uncaught exception producing an empty body. This is a safety net for the *next* unknown
+defect in this path, not a fix for this one specifically — the placeholder bug above is
+fixed at its root, not merely caught and reported.
+
+**Verified before tagging, per this release's own instruction that v3.16.1 shipped
+without this step.** Built the exact bound-params arrays `saveTrade()`/
+`persistTradeRiskFields()` produce for two cases and asserted placeholder count equals
+bound param count for every statement in both:
+- **A new Open trade** — stop/target set, no `entry_price`/`lot_size` (this form has
+  never collected either, since v3.14.0). Confirmed the INSERT's 19 placeholders match
+  19 bound values, and confirmed `computeTradeRiskFields()` already returns all seven
+  risk-field keys with explicit `null` values (never omits a key) when `entry_price`/
+  `lot_size` are null — no code change was needed there, this was a verification of
+  existing, already-correct behavior, not a second bug.
+- **An edit of an existing closed imported trade** — all seven v3.16.1 risk fields real
+  (non-null). Confirmed the `UPDATE`'s 19 placeholders match 19 bound values, and
+  `persistTradeRiskFields()`'s 8 placeholders match 8 bound values.
+
+`BitfundedImportController.php`'s own INSERT/UPDATE statements (the `matched`/`new`
+branches in `confirm()`) were checked against the same class of bug on the way to
+confirming this was INSERT-only in `TradeController` — both are correctly matched (15
+placeholders / 15 params for the new-row INSERT; 11–13 placeholders / matching params
+for the matched-row UPDATE depending on whether the optional `r_multiple`/`risk_amount`
+clause fires) and needed no change.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

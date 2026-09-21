@@ -140,54 +140,73 @@ class TradeController {
 
         $cols = ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure'];
 
-        if ($isUpdate) {
-            $trade_id = validId($d['id'] ?? 0);
-            if (!$trade_id) jsonError('Invalid trade ID');
-            $update_vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
-            $update_vals[] = $singleScreenshot;
-            $update_vals[] = $screenshotsJson;
-            $update_vals[] = $trade_id;
-            $update_vals[] = $this->uid;
-            $sets = implode(',', array_map(fn($c) => "$c=?", $cols));
-            $sets .= ",screenshot=?,screenshots=?";
-            $this->db->prepare("UPDATE trades SET $sets WHERE id=? AND user_id=?")->execute($update_vals);
-            $finalTradeId = $trade_id;
-        } else {
-            $vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
-            $vals = array_merge([$this->uid, $chId], $vals, [$singleScreenshot, $screenshotsJson]);
-            $ph = implode(',', array_fill(0, count($cols) + 4, '?'));
-            $allcols = implode(',', $cols) . ",screenshot,screenshots";
-            $this->db->prepare("INSERT INTO trades (user_id,challenge_id,$allcols) VALUES (?,?,{$ph})")->execute($vals);
-            $finalTradeId = $this->db->lastInsertId();
-        }
-
-        // Persist strategy variable values (delete-then-insert, scoped to this trade)
-        $tradeVars = $d['trade_variables'] ?? [];
-        if (is_string($tradeVars)) $tradeVars = json_decode($tradeVars, true) ?: [];
-        if (is_array($tradeVars)) {
-            $this->db->prepare("DELETE FROM trade_variables WHERE trade_id=?")->execute([$finalTradeId]);
-            $insertVar = $this->db->prepare("INSERT INTO trade_variables (trade_id,variable_id,value) VALUES (?,?,?)");
-            foreach ($tradeVars as $tv) {
-                $variableId = validId($tv['variable_id'] ?? 0);
-                if (!$variableId) continue;
-                $value = $tv['value'] ?? null;
-                if ($value === '') $value = null;
-                $insertVar->execute([$finalTradeId, $variableId, $value]);
+        // v3.16.2 — everything from here on touches the database on behalf of add_trade/
+        // update_trade. Before this, an uncaught PDOException (e.g. the placeholder-count
+        // bug just above, or any future one) bubbled past router.php with no handler,
+        // producing an empty response body — the frontend's fetch then fails JSON.parse
+        // with "Unexpected end of JSON input" instead of showing the real error. Caught
+        // here and reported as JSON instead, same shape as a normal failed save.
+        try {
+            if ($isUpdate) {
+                $trade_id = validId($d['id'] ?? 0);
+                if (!$trade_id) jsonError('Invalid trade ID');
+                $update_vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
+                $update_vals[] = $singleScreenshot;
+                $update_vals[] = $screenshotsJson;
+                $update_vals[] = $trade_id;
+                $update_vals[] = $this->uid;
+                $sets = implode(',', array_map(fn($c) => "$c=?", $cols));
+                $sets .= ",screenshot=?,screenshots=?";
+                $this->db->prepare("UPDATE trades SET $sets WHERE id=? AND user_id=?")->execute($update_vals);
+                $finalTradeId = $trade_id;
+            } else {
+                $vals = array_map(fn($k) => ($d[$k] ?? null) ?: null, $cols);
+                $vals = array_merge([$this->uid, $chId], $vals, [$singleScreenshot, $screenshotsJson]);
+                // This was count($cols)+4, left over from before v3.14.0 removed
+                // pnl/net_pnl/r_multiple from the trailing column set. Only screenshot and
+                // screenshots are appended beyond $cols now, so $ph must supply exactly
+                // count($cols)+2 placeholders — the extra 2 tokens the old formula
+                // produced had no bound value behind them, which is what threw HY093 on
+                // every insert.
+                $ph = implode(',', array_fill(0, count($cols) + 2, '?'));
+                $allcols = implode(',', $cols) . ",screenshot,screenshots";
+                $this->db->prepare("INSERT INTO trades (user_id,challenge_id,$allcols) VALUES (?,?,{$ph})")->execute($vals);
+                $finalTradeId = $this->db->lastInsertId();
             }
+
+            // Persist strategy variable values (delete-then-insert, scoped to this trade)
+            $tradeVars = $d['trade_variables'] ?? [];
+            if (is_string($tradeVars)) $tradeVars = json_decode($tradeVars, true) ?: [];
+            if (is_array($tradeVars)) {
+                $this->db->prepare("DELETE FROM trade_variables WHERE trade_id=?")->execute([$finalTradeId]);
+                $insertVar = $this->db->prepare("INSERT INTO trade_variables (trade_id,variable_id,value) VALUES (?,?,?)");
+                foreach ($tradeVars as $tv) {
+                    $variableId = validId($tv['variable_id'] ?? 0);
+                    if (!$variableId) continue;
+                    $value = $tv['value'] ?? null;
+                    if ($value === '') $value = null;
+                    $insertVar->execute([$finalTradeId, $variableId, $value]);
+                }
+            }
+
+            $this->saveJournal($finalTradeId, $d['trade_journal'] ?? null);
+
+            // v3.16.1 B1 — computed AFTER saveJournal() specifically so clean_rep's "a
+            // pre-entry record exists" check sees the trade_journal row this same request
+            // may have just written; computing it any earlier would miss a brand-new
+            // trade's own first pre-entry journal entry. Degrades gracefully: entry_price/
+            // lot_size are normally still null at this point (this form has had no
+            // execution inputs since v3.14.0), so actual_risk_pct/target_r/exit_quality
+            // stay null here and only become real once BitfundedImportController
+            // recomputes them from a real fill (v3.16.1 B2) —
+            // balance_at_day_start/planned_risk_pct/clean_rep, which only need
+            // trade_date/challenge_id/stop/target/journal, populate immediately.
+            persistTradeRiskFields($this->db, $finalTradeId, computeTradeRiskFields($this->db, $finalTradeId));
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+            exit;
         }
-
-        $this->saveJournal($finalTradeId, $d['trade_journal'] ?? null);
-
-        // v3.16.1 B1 — computed AFTER saveJournal() specifically so clean_rep's "a
-        // pre-entry record exists" check sees the trade_journal row this same request
-        // may have just written; computing it any earlier would miss a brand-new trade's
-        // own first pre-entry journal entry. Degrades gracefully: entry_price/lot_size
-        // are normally still null at this point (this form has had no execution inputs
-        // since v3.14.0), so actual_risk_pct/target_r/exit_quality stay null here and
-        // only become real once BitfundedImportController recomputes them from a real
-        // fill (v3.16.1 B2) — balance_at_day_start/planned_risk_pct/clean_rep, which only
-        // need trade_date/challenge_id/stop/target/journal, populate immediately.
-        persistTradeRiskFields($this->db, $finalTradeId, computeTradeRiskFields($this->db, $finalTradeId));
 
         jsonResponse(['success' => true, 'id' => $finalTradeId]);
     }

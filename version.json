@@ -1,13 +1,12 @@
 {
-    "current_version": "3.16.2",
+    "current_version": "3.16.3",
     "release_date": "2026-09-21",
     "changelog": [
-        "Fix: TradeController::saveTrade()'s INSERT branch (add_trade) has thrown PDOException SQLSTATE[HY093] on every new-trade save since v3.14.0 -- the trailing placeholder count ($ph) was left at count($cols)+4 when v3.14.0 dropped pnl/net_pnl/r_multiple from the appended columns, leaving 2 unbound '?' tokens in the VALUES clause against 19 real bound values. Corrected to count($cols)+2, matching the 2 columns (screenshot, screenshots) actually appended beyond $cols. The update_trade path was checked too and was already correct -- this was INSERT-only",
-        "Add: add_trade/update_trade are now wrapped in try/catch -- any exception from here on (the DB writes, trade_variables, trade_journal, the v3.16.1 risk-field computation) returns HTTP 500 with {\"success\":false,\"error\":\"<message>\"} instead of an uncaught PDOException producing an empty response body, which the frontend was surfacing as 'Unexpected end of JSON input'",
-        "Verify: pre-tag, built the exact bound-params arrays saveTrade()/persistTradeRiskFields() produce for an Open trade (stop+target set, no entry_price/lot_size -- this form has never collected those, since v3.14.0) and for editing an existing closed imported trade (all seven v3.16.1 risk fields real), and asserted placeholder count === bound param count for every statement in both cases. Confirmed computeTradeRiskFields() already keeps all seven keys present with null values rather than omitting them when entry_price/lot_size are null -- no change needed there, just verified"
+        "Fix: v3.16.2's own release entry marked includes/controllers/TradeController.php \"critical\": true in version.json's files list. In this codebase's updater.php, critical:true means \"protected -- never auto-overwrite\" (apply's loop skips any such file with an Skipped (protected) log line, by design, for something like a config.php-adjacent file that must never be clobbered) -- the opposite of what was intended here. The result: the last Update Now run backed up the old file, skipped downloading the new one, and still wrote local version.json to 3.16.2 -- so the site reported itself as v3.16.2 while still running the pre-v3.16.2 TradeController.php, HY093 and all. Corrected to \"critical\": false, the same flag every other file in this project's release history has always used. Bumped to v3.16.3 (not re-tagged onto v3.16.2) specifically so the updater's version_compare() sees a real increase and re-downloads the file -- v3.16.2 and v3.16.3 would otherwise compare equal and the update would silently never re-offer itself",
+        "No code changes beyond the fix above -- TradeController.php itself is unchanged from v3.16.2's commit (the HY093 placeholder fix and the add_trade/update_trade try/catch both already exist in that file; the file just never reached the server). Run Check for Updates / Update Now again after this release; this time the log should read '✅ Updated: includes/controllers/TradeController.php', not '⏭ Skipped (protected)'"
     ],
     "files": [
-        {"path": "includes/controllers/TradeController.php", "critical": true}
+        {"path": "includes/controllers/TradeController.php", "critical": false}
     ],
     "db_migrations": []
 }

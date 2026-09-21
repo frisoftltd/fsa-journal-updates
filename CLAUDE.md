@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.16.2 |
+| Current Version | v3.16.3 |
 
 ### Tech Stack
 
@@ -2180,6 +2180,36 @@ confirming this was INSERT-only in `TradeController` — both are correctly matc
 placeholders / 15 params for the new-row INSERT; 11–13 placeholders / matching params
 for the matched-row UPDATE depending on whether the optional `r_multiple`/`risk_amount`
 clause fires) and needed no change.
+
+### v3.16.3: v3.16.2 Never Actually Reached the Server — a `version.json` Mistake, Not a Code One
+
+v3.16.2's own `files` entry for `TradeController.php` was written as `{"path":
+"includes/controllers/TradeController.php", "critical": true}`. In `updater.php`'s
+`apply` handler, `critical: true` means **skip this file, never auto-overwrite it** —
+the loop backs it up and logs `⏭ Skipped (protected)` rather than downloading it (this
+flag exists for a file like `config.php` that must never be clobbered by the updater;
+every real code file in this project's history, `TradeController.php` included in every
+prior release, has always shipped with `critical: false`). Running Update Now against
+v3.16.2 did exactly that: backed up the old file, skipped downloading the fixed one,
+then still wrote local `version.json` to `current_version: "3.16.2"` (the last step of
+`apply` regardless of skips) — so the live site reported itself as v3.16.2 while its
+`TradeController.php` was still the pre-v3.16.2 file, HY093 and all. **The v3.16.2 code
+fix itself was correct and is unchanged; only its own deploy manifest was wrong.**
+
+Fixed by flipping `critical` to `false` — but that alone isn't sufficient to redeploy:
+`updater.php`'s `check` action compares versions with `version_compare()`, and local was
+already sitting at exactly `3.16.2` after the failed apply, so silently re-shipping the
+corrected manifest as `3.16.2` again would compare equal to itself and never re-offer an
+update. Bumped to **v3.16.3** specifically so `has_update` evaluates true and the updater
+actually re-downloads the file on the next Update Now. No `TradeController.php` code
+changed in this release — the HY093 placeholder fix and the try/catch wrapper documented
+under v3.16.2 above are exactly what ships once this version is applied.
+
+**Lesson:** `critical` in this schema is an updater deploy flag (protect vs. overwrite),
+not a severity/priority marker — reads the opposite of what its name suggests for a
+"this file matters, make sure it deploys" instinct. Every `files` entry for an actual
+code change should be `"critical": false` unless the intent is specifically to have the
+updater refuse to touch that file.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

@@ -85,4 +85,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
     });
 
     showPage('dashboard');
+    // v3.17.1 — the topbar "+ Trade" button (#topbar-trade-btn) is present on every page,
+    // not just Trades, so its STOP gate needs an initial check here rather than only ever
+    // running from loadTrades(). refreshNewTradeGate() lives in js/trades.js.
+    refreshNewTradeGate();
 });

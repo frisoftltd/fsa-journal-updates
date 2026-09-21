@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.17.1 |
+| Current Version | v3.17.2 |
 
 ### Tech Stack
 
@@ -2533,6 +2533,86 @@ section exists to record that the trace was actually done, not assumed, per this
 project's standing rule that a "Verify" instruction gets a real check — a code-path trace
 in this case, since this environment has no live browser/DB to click through (§13 rule
 4), the same limitation already noted for other UI-only verifications in this file.
+
+### v3.17.2: STOP Actually Blocks New Trades — Amended Calculator STOP State, Server-Side Enforcement
+
+**Note on the version number** — this briefing asked to tag it as v3.17.1, but v3.17.1
+(the banner removal and pluralization fix, above) had already shipped by the time this
+work started. Same situation as v3.16.3/v3.16.4: per this file's own rule against
+reusing a version number, this shipped as **v3.17.2**.
+
+**Problem this closes:** through v3.17.1, "STOP — no trade" was purely a frontend
+convenience — `refreshNewTradeGate()` disabled the "+ New Trade" button, but nothing
+stopped `add_trade` itself from a stale open form, a second tab, or a direct API call.
+There was also a second, ungated entry point this project hadn't accounted for:
+`index.php`'s global topbar "+ Trade" button (present on every page, calling
+`openTradeModal()` directly, bypassing `openChecklist()` entirely — the only place the
+v3.17.0/v3.17.1 gate had ever been wired in).
+
+**`helpers.php::tradeLimitStatus()`** (new) — the four-condition STOP check, extracted
+verbatim out of `CalculatorController::getRiskStatus()` into a shared function returning
+both the live counts (for display) and the `stopped`/`reason` pair (for gating), so
+`TradeController::saveTrade()` can enforce the *exact* rule the calculator's status strip
+shows, not a second copy that could drift. `getRiskStatus()` now calls this once and
+merges its result with challenge-specific fields (ladder tiers, open positions, margin).
+
+**Server-side block (`TradeController::saveTrade()`).** For `!$isUpdate` (add_trade
+only — an edit is never blocked, per the briefing's own "only new entries are blocked"),
+checked before anything else — before `$_POST`/JSON parsing, before the stop_loss/
+take_profit required check — and rejects with exactly `{"success":false,"error":"STOP —
+{reason}"}` via a plain `jsonResponse()`, not `jsonError()` (whose `{"error":...}` shape
+lacks the `success` key the briefing specified). No HTTP status change — `jsonResponse()`
+defaults to 200, consistent with every other validation-style rejection in this
+controller (e.g. the stop_loss/take_profit check just below it). Skipped entirely when
+there's no active challenge (`$chId` falsy) — the same graceful-degradation the rest of
+this controller already affords a challenge-less trade.
+
+**Both "+ New Trade" and "+ Trade" now gated the same way.** `js/trades.js::
+refreshNewTradeGate()` disables and relabels both `#new-trade-btn` (Trades page) and the
+new `#topbar-trade-btn` id on `index.php`'s global button, called once at app init
+(`js/app.js`'s `DOMContentLoaded` handler) so the topbar button has a correct state
+before the user ever visits the Trades page, and again after every `loadTrades()` (i.e.
+after every save). Button label is the literal `STOP — {reason}` text the briefing
+specified, not a generic "STOP — no trade" with the reason only in the tooltip (the
+earlier, now-superseded v3.17.0/v3.17.1 behavior). `openTradeModal()` itself also checks
+`window._riskStopReason` directly, guarded by `!data` (a brand-new trade, never an edit)
+— this is what makes the topbar button safe even though it calls `openTradeModal()`
+directly rather than going through `openChecklist()`'s own check, and it's what protects
+any *future* caller of `openTradeModal(null)` too, without needing its own copy of the
+guard.
+
+**Deliberately NOT wired into the calculator page's own status fetch.** The calculator
+lets a user browse a challenge other than the truly active one via `#calc-challenge`,
+without switching which challenge is active. `refreshNewTradeGate()` always calls
+`get_risk_status` with no `challenge_id` (defaulting server-side to the active
+challenge) specifically so the global "+ New Trade"/"+ Trade" gate can never be
+contaminated by whichever challenge happens to be selected in the calculator's dropdown
+— a real correctness risk that was checked and avoided, not an oversight.
+
+**Calculator STOP state, amended.** Previously (v3.17.0/v3.17.1), any limit breach
+replaced the entire "Live Outputs" card with a STOP message — balance, margin in use,
+available margin, and the ladder/status strip all lived inside that same swapped
+container structurally, so the STOP display and the amended one below happened to look
+similar but for the wrong reason. `pages/calculator.php` now places balance, risk %,
+**Margin in Use**, and **Available Margin** in the Inputs card (all four are stop%-
+independent — margin in use only ever needs the challenge and today's open positions,
+never what's typed into Stop Loss %), and adds a new always-visible **Open Positions**
+card (pair, direction, date, planned margin per row — exactly what `margin_in_use` sums,
+so a trader can see *why* available margin is what it is, not just the total). Only
+`#calc-results-inner` — the stop%-dependent sizing numbers (risk, position, margin,
+quantity) and "Use in Trade Form →" — swaps to the STOP message; everything else renders
+unconditionally in `runCalcUpdate()` before the `if (status.stopped)` branch is ever
+reached. Distinct from the pre-existing §2 margin-only STOP (`margin_ok`, "not enough
+margin for *this* trade") — unchanged, still renders inside the same swapped
+`#calc-results-inner`, since it's a per-sizing check, not a trade-limits gate.
+
+**`CalculatorController::getRiskStatus()`'s new `open_positions`/`margin_in_use`/
+`available_margin` fields** — one query (`SELECT ... WHERE challenge_id=? AND
+result='Open'`) backs both the Open Positions list and `margin_in_use`
+(`array_sum(array_column($openPositions, 'planned_margin'))`, treating a `NULL`
+`planned_margin` as 0 via PHP's normal `array_sum()` behavior — the same convention
+`autoRiskPreview()`'s SQL `COALESCE(SUM(...),0)` already uses for this same figure, kept
+consistent rather than reintroducing a second computation of it).
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

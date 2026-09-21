@@ -183,6 +183,75 @@ function weekBounds(string $date): array {
 }
 
 /**
+ * v3.17.1 — live trade-limit counts (today's trades, this week's trades, today's losses,
+ * today's net P&L) against challenge_limits, plus a single STOP reason if any configured
+ * limit has been reached. Extracted from CalculatorController::getRiskStatus() (v3.17.0)
+ * so TradeController::saveTrade() can enforce the exact same rule server-side, rather
+ * than a second, independently-maintained copy of the four-condition check — one place
+ * that decides "can a new trade be logged right now," the same principle as
+ * ladderTierForBalance() being the one place that reads the ladder.
+ *
+ * A limit column that's NULL (no challenge_limits row at all, or an individual NULL
+ * column) is "not tracked" — it can never trigger a stop, same "absence of information
+ * is not a recorded zero" convention as everywhere else limits appear in this codebase.
+ *
+ * Checked in order, first breach wins: daily trades, weekly trades, daily losses, daily
+ * loss $ — "the most actionable reason first," not a claimed severity ranking, since
+ * neither the v3.17.0 nor v3.17.1 briefing specified what happens when more than one
+ * limit is breached at once.
+ */
+function tradeLimitStatus(PDO $db, int $challengeId): array {
+    $ls = $db->prepare("SELECT max_trades_day, max_trades_week, max_losses_day, daily_loss_usd FROM challenge_limits WHERE challenge_id=?");
+    $ls->execute([$challengeId]);
+    $limits = $ls->fetch() ?: ['max_trades_day' => null, 'max_trades_week' => null, 'max_losses_day' => null, 'daily_loss_usd' => null];
+
+    $today = date('Y-m-d');
+    [$monday, $sunday] = weekBounds($today);
+
+    $td = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND trade_date=?");
+    $td->execute([$challengeId, $today]);
+    $tradesToday = (int)$td->fetchColumn();
+
+    $tw = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND trade_date BETWEEN ? AND ?");
+    $tw->execute([$challengeId, $monday, $sunday]);
+    $tradesWeek = (int)$tw->fetchColumn();
+
+    $ld = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND result='Loss' AND trade_date=?");
+    $ld->execute([$challengeId, $today]);
+    $lossesToday = (int)$ld->fetchColumn();
+
+    $pl = $db->prepare("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE challenge_id=? AND trade_date=?");
+    $pl->execute([$challengeId, $today]);
+    $dailyPnl = round((float)$pl->fetchColumn(), 2);
+
+    $reason = null;
+    if ($limits['max_trades_day'] !== null && $tradesToday >= (int)$limits['max_trades_day']) {
+        $reason = "daily trade limit reached ({$tradesToday}/{$limits['max_trades_day']})";
+    } elseif ($limits['max_trades_week'] !== null && $tradesWeek >= (int)$limits['max_trades_week']) {
+        $reason = "weekly trade limit reached ({$tradesWeek}/{$limits['max_trades_week']})";
+    } elseif ($limits['max_losses_day'] !== null && $lossesToday >= (int)$limits['max_losses_day']) {
+        $reason = "daily loss-count limit reached ({$lossesToday}/{$limits['max_losses_day']})";
+    } elseif ($limits['daily_loss_usd'] !== null && $dailyPnl <= -1 * (float)$limits['daily_loss_usd']) {
+        $reason = 'daily loss limit reached ($' . number_format(abs($dailyPnl), 2) . ' / $' . number_format((float)$limits['daily_loss_usd'], 2) . ')';
+    }
+
+    return [
+        'limits' => [
+            'max_trades_day' => $limits['max_trades_day'] !== null ? (int)$limits['max_trades_day'] : null,
+            'max_trades_week' => $limits['max_trades_week'] !== null ? (int)$limits['max_trades_week'] : null,
+            'max_losses_day' => $limits['max_losses_day'] !== null ? (int)$limits['max_losses_day'] : null,
+            'daily_loss_usd' => $limits['daily_loss_usd'] !== null ? (float)$limits['daily_loss_usd'] : null,
+        ],
+        'trades_today' => $tradesToday,
+        'trades_week' => $tradesWeek,
+        'losses_today' => $lossesToday,
+        'daily_pnl' => $dailyPnl,
+        'stopped' => $reason !== null,
+        'reason' => $reason,
+    ];
+}
+
+/**
  * Read JSON POST body
  */
 function jsonInput() {

@@ -134,6 +134,22 @@ class TradeController {
         $ch = getActiveChallenge();
         $chId = $ch['id'] ?? null;
 
+        // v3.17.1 — registering a NEW trade is blocked while any trade limit is reached;
+        // editing an existing one (check-ins, planned_margin, notes, closing) is always
+        // allowed, per the briefing's own "only new entries are blocked." This is the
+        // real enforcement point — the "+ New Trade"/"+ Trade" button disabling in
+        // js/trades.js is only a UX convenience and can't be trusted on its own (a stale
+        // open form, a direct API call, or a second browser tab could all reach here with
+        // the button never having been re-checked). helpers.php::tradeLimitStatus() is
+        // the exact same check CalculatorController::getRiskStatus() uses, so this can
+        // never disagree with what the calculator's status strip is showing.
+        if (!$isUpdate && $chId) {
+            $status = tradeLimitStatus($this->db, (int)$chId);
+            if ($status['stopped']) {
+                jsonResponse(['success' => false, 'error' => "STOP — {$status['reason']}"]);
+            }
+        }
+
         $isForm = !empty($_FILES) || !empty($_POST);
         $d = $isForm ? $_POST : jsonInput();
 

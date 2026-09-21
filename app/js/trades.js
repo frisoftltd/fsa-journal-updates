@@ -21,31 +21,36 @@ async function loadTrades() {
     refreshNewTradeGate();
 }
 
-// v3.17.0 — trade-limits gate for "+ New Trade". Single source of truth is
-// CalculatorController::getRiskStatus() (get_risk_status) — the same endpoint the Risk
-// Calculator page's status strip reads, so the button and the strip can never disagree
-// about whether a new trade is currently allowed. window._riskStopReason is also checked
-// inside openChecklist() itself, not just reflected in this button's disabled state, so
-// the gate holds even if something else ever triggers that flow.
+// v3.17.0/v3.17.1 — trade-limits gate for "+ New Trade" (Trades page) and "+ Trade" (the
+// global topbar button, index.php, present on every page). Single source of truth is
+// CalculatorController::getRiskStatus() (get_risk_status), always called with no
+// challenge_id so it's scoped to the truly active challenge — deliberately NOT reused
+// from the calculator page's own status fetch, since that page lets a user browse a
+// *different* challenge's numbers without switching which one is active, and this gate
+// must never reflect anything but the challenge a new trade would actually be logged
+// against. window._riskStopReason is also checked inside openChecklist() and
+// openTradeModal() themselves, not just reflected in these buttons' disabled state, so
+// the gate holds even if something else ever reaches those functions directly — this is
+// UX signal only, though: TradeController::saveTrade()'s own server-side check (via the
+// same helpers.php::tradeLimitStatus()) is the real, bypass-proof enforcement.
 window._riskStopReason = null;
 async function refreshNewTradeGate(){
-    const btn = document.getElementById('new-trade-btn');
-    if (!btn) return;
     let status;
     try { status = await api('get_risk_status'); } catch (e) { return; }
     if (!status || status.error) return;
     window._riskStopReason = status.stopped ? status.reason : null;
-    if (status.stopped) {
-        btn.disabled = true;
-        btn.textContent = 'STOP — no trade';
-        btn.title = 'STOP — no trade: ' + status.reason;
-        btn.style.background = 'var(--red)';
-    } else {
-        btn.disabled = false;
-        btn.textContent = '+ New Trade';
-        btn.title = '';
-        btn.style.background = '';
-    }
+    const label = status.stopped ? `STOP — ${status.reason}` : null;
+    [
+        { id: 'new-trade-btn', normalText: '+ New Trade' },
+        { id: 'topbar-trade-btn', normalText: '+ Trade' },
+    ].forEach(({ id, normalText }) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.disabled = status.stopped;
+        btn.textContent = status.stopped ? label : normalText;
+        btn.title = status.stopped ? label : '';
+        btn.style.background = status.stopped ? 'var(--red)' : '';
+    });
 }
 
 async function loadPairs() {
@@ -287,6 +292,13 @@ function lightboxGoTo(idx) {
 
 // ── TRADE MODAL ─────────────────────────────────────────
 function openTradeModal(data=null) {
+    // v3.17.1 — the STOP gate applies only to registering a NEW trade; editing an
+    // existing one (data present — check-ins, planned_margin, notes, closing) is always
+    // allowed regardless of any limit, per the briefing's "only new entries are blocked."
+    // Guarded here, not just at each caller (openChecklist(), the topbar "+ Trade"
+    // button), so every path that can reach a brand-new trade form — present or future —
+    // is covered by one check instead of needing its own copy of it.
+    if (!data && window._riskStopReason) { toast('STOP — ' + window._riskStopReason, 'error'); return; }
     loadPairs();
     document.getElementById('trade-form').reset();
     document.getElementById('trade-id').value=data?.id||'';
@@ -885,7 +897,7 @@ async function saveTrade() {
 // Renders from the active challenge's default strategy's 'gate' variables
 // (criteria/timeframe/role/sort_order) — no hardcoded rule set here.
 async function openChecklist(){
-    if (window._riskStopReason) { toast('STOP — no trade: ' + window._riskStopReason, 'error'); return; }
+    if (window._riskStopReason) { toast('STOP — ' + window._riskStopReason, 'error'); return; }
     const wrap = document.getElementById('checklist-items');
     wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:4px 0 10px">Loading checklist…</div>';
     document.getElementById('checklist-popup').classList.add('open');

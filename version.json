@@ -1,14 +1,22 @@
 {
-    "current_version": "3.17.1",
+    "current_version": "3.17.2",
     "release_date": "2026-09-21",
     "changelog": [
-        "Delete: the dashboard's '🚨 3 consecutive losses -- review your setups before the next trade' banner (AlertController::getAlerts(), the non-same-day branch of the consecutive-losses check) and its logic -- not replaced. The calculator's live status strip (v3.17.0) is now the one place trade-limit signals live. The separate same-day '🛑 3 consecutive losses TODAY' danger banner was not named in this briefing and is kept",
-        "Fix: the Current Streak card read '4 Losss' for a 4-loss streak -- plain +'s' doesn't pluralize 'Loss'. Now 'Losses' for a loss streak, 'Wins' (already correct) for a win streak",
-        "Verify: an existing Open trade's planned_margin field (added v3.17.0) correctly shows blank -- not hidden, not locked -- when editing a trade saved before that column existed, so a margin can be entered retroactively. No code change was needed: the field was never part of TradeController::saveJournal()'s pre-entry lock (that only applies once a trade closes) and openTradeModal()'s population loop already leaves it blank rather than erroring on a null value"
+        "Note: this briefing asked for v3.17.1, but that version had already shipped (banner removal + streak typo fix) by the time this work started -- shipped as v3.17.2 instead, per the standing rule against reusing a version number",
+        "Add: registering a NEW trade is now blocked server-side while any trade limit is reached, not just via the frontend button state. New helpers.php::tradeLimitStatus() (extracted from CalculatorController::getRiskStatus(), shared) is called from TradeController::saveTrade() for add_trade only -- editing an existing trade (check-ins, planned_margin, notes, closing) is never blocked. Rejects with exactly {\"success\":false,\"error\":\"STOP -- {reason}\"} before any DB write, so it can't be bypassed from a stale open form, a second tab, or a direct API call",
+        "Fix: index.php's global topbar '+ Trade' button (present on every page, calls openTradeModal() directly) had no STOP gate at all -- only the Trades page's '+ New Trade' (via openChecklist()) did. Both buttons are now gated identically by js/trades.js::refreshNewTradeGate(), labelled with the literal 'STOP -- {reason}' text, called at app init so the topbar button is correct before the Trades page is ever visited. openTradeModal() itself also checks window._riskStopReason directly (guarded to only a brand-new trade, data=null), covering any future caller the same way",
+        "Amend: the calculator's STOP state no longer hides everything. Balance, Risk %, Margin in Use, Available Margin, the new Open Positions list, and the status strip all stay visible during a STOP -- only the stop%-dependent sizing numbers (risk, position, margin, quantity) and 'Use in Trade Form ->' disappear, replaced by the STOP message inside the Live Outputs card specifically",
+        "Add: Open Positions list on the calculator page (pair, direction, date, planned margin per row) -- exactly what the existing Margin in Use figure sums, now visible as line items, not just a total. Backed by a new open_positions field on get_risk_status, computed from the same query as margin_in_use/available_margin"
     ],
     "files": [
-        {"path": "includes/controllers/AlertController.php", "critical": false},
-        {"path": "js/dashboard.js", "critical": false}
+        {"path": "includes/helpers.php", "critical": false},
+        {"path": "includes/controllers/CalculatorController.php", "critical": false},
+        {"path": "includes/controllers/TradeController.php", "critical": false},
+        {"path": "pages/calculator.php", "critical": false},
+        {"path": "js/calculator.js", "critical": false},
+        {"path": "js/trades.js", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "index.php", "critical": false}
     ],
     "db_migrations": []
 }

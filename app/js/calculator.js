@@ -84,13 +84,32 @@ function renderCalcStatus(status){
     const stopEl = document.getElementById('calc-status-stop');
     const normalEl = document.getElementById('calc-status-normal');
     if (status.stopped) {
-        stopEl.textContent = `STOP — no trade: ${status.reason}`;
+        stopEl.textContent = `STOP — ${status.reason}`;
         stopEl.style.display = 'block';
         normalEl.style.display = 'none';
     } else {
         stopEl.style.display = 'none';
         normalEl.style.display = 'flex';
     }
+}
+
+// v3.17.1 §3 — always rendered, including during a STOP: this is exactly what
+// margin_in_use above sums, so a trader can see WHY available margin is what it is, not
+// just the total. No positions -> a plain "no open positions" line, not an empty card.
+function renderOpenPositions(positions){
+    const wrap = document.getElementById('calc-open-positions');
+    if (!positions || !positions.length) {
+        wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px 0">No open positions.</div>';
+        return;
+    }
+    wrap.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px">` + positions.map(p => {
+        const dirColor = p.direction === 'Long' ? 'var(--green)' : 'var(--red)';
+        const margin = p.planned_margin != null ? '$' + p.planned_margin.toFixed(2) : '—';
+        return `<div style="display:flex;justify-content:space-between;align-items:center;background:var(--bg3);border-radius:6px;padding:8px 12px;font-size:12px">
+            <span><span style="color:${dirColor};font-weight:600">${p.direction}</span> ${p.pair} <span style="color:var(--text3)">— ${p.trade_date}</span></span>
+            <span style="font-family:var(--font-head)">${margin}</span>
+        </div>`;
+    }).join('') + `</div>`;
 }
 
 // Replaces the three hardcoded Recovery/Normal/Passing cards — those showed a ladder that
@@ -159,19 +178,26 @@ async function runCalcUpdate(){
     const status = await api('get_risk_status&challenge_id=' + challengeId);
     if (!status || status.error) return;
 
+    // v3.17.1 §3 — these five stay visible in every state, STOP included: status strip,
+    // ladder tiers/Risk Rules panel, balance, risk %, margin in use, available margin,
+    // and the open-positions list. Nothing below this point touches any of them again.
     renderCalcStatus(status);
     renderLadderTiers(status.ladder_tiers);
+    renderOpenPositions(status.open_positions);
     document.getElementById('calc-balance-display').textContent = '$' + status.balance_at_day_start.toFixed(2);
+    document.getElementById('calc-margin-in-use-display').textContent = '$' + status.margin_in_use.toFixed(2);
+    document.getElementById('calc-available-margin-display').textContent = '$' + status.available_margin.toFixed(2);
     const currentTier = (status.ladder_tiers || []).find(t => t.is_current);
     document.getElementById('calc-risk-pct-display').textContent = currentTier ? currentTier.risk_pct + '%' : '—';
 
-    // §5: any limit reached hides the calculator's own numbers entirely, distinct from
-    // the §2 margin-only STOP (rendered inside renderCalcOutputs() via margin_ok) — a
-    // trade-limits stop is about whether a NEW trade can be logged at all today, not
-    // about this specific trade's sizing.
+    // §3/§5: any limit reached hides only the stop%-dependent sizing numbers (risk,
+    // position, margin, quantity) and "Use in Trade Form →" — everything rendered above
+    // this point stays visible. Distinct from the §2 margin-only STOP (rendered inside
+    // renderCalcOutputs() via margin_ok): a trade-limits stop is about whether a NEW
+    // trade can be logged at all today, not about this specific trade's sizing.
     if (status.stopped) {
         document.getElementById('calc-results-inner').innerHTML =
-            `<div style="color:var(--red);font-family:var(--font-head);font-size:14px;text-align:center;padding:30px 0">STOP — no trade: ${status.reason}</div>`;
+            `<div style="color:var(--red);font-family:var(--font-head);font-size:14px;text-align:center;padding:30px 0">STOP — ${status.reason}</div>`;
         return;
     }
 

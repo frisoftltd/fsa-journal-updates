@@ -89,7 +89,7 @@ $u = currentUser();
     </div>
     <div class="topbar-right">
       <span style="font-size:11px;color:var(--text3);display:none" id="today-info">Today: <span id="today-pnl" style="color:var(--green)">$0</span></span>
-      <button class="btn btn-primary btn-sm" onclick="openTradeModal()">+ Trade</button>
+      <button class="btn btn-primary btn-sm" id="topbar-trade-btn" onclick="openTradeModal()">+ Trade</button>
       <button class="btn btn-ghost btn-sm" onclick="exportPDF()">🖨 PDF</button>
     </div>
   </div>

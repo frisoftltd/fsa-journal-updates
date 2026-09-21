@@ -189,16 +189,13 @@ class CalculatorController {
     }
 
     /**
-     * v3.17.0 — trade-limits config (challenge_limits) plus today's/this-week's live
-     * counts against it, and a single computed stop reason if any limit has been reached.
-     * Backs both the calculator page's status strip and the "+ New Trade" button's own
-     * gate on the Trades page — one source of truth for "can a new trade be logged right
-     * now," not two independently-computed copies.
-     *
-     * A limit column that's NULL (no row at all, or an individual NULL column) is treated
-     * as "not tracked" — it can never trigger a stop and is omitted from the amber/red
-     * styling the frontend applies, same "absence of information is not a recorded zero"
-     * convention as everywhere else limits/counts appear in this codebase.
+     * v3.17.0/v3.17.1 — trade-limits config plus live counts (via helpers.php::
+     * tradeLimitStatus(), shared with TradeController::saveTrade()'s server-side block),
+     * the ladder tiers, and — new in v3.17.1 — margin_in_use/available_margin/
+     * open_positions, so the calculator's "always visible during STOP" panel (balance,
+     * margin in use, available margin, open-positions list, status strip) has everything
+     * it needs from one call, independent of whether a stop % has even been typed yet.
+     * Also backs the "+ New Trade"/"+ Trade" button gates on every page.
      */
     public function getRiskStatus() {
         $d = $_GET;
@@ -215,34 +212,13 @@ class CalculatorController {
             $challengeId = (int)$ch['id'];
         }
 
-        $ls = $db->prepare("SELECT max_trades_day, max_trades_week, max_losses_day, daily_loss_usd FROM challenge_limits WHERE challenge_id=?");
-        $ls->execute([$challengeId]);
-        $limits = $ls->fetch() ?: ['max_trades_day' => null, 'max_trades_week' => null, 'max_losses_day' => null, 'daily_loss_usd' => null];
-
         $today = date('Y-m-d');
-        [$monday, $sunday] = weekBounds($today);
-
-        $td = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND trade_date=?");
-        $td->execute([$challengeId, $today]);
-        $tradesToday = (int)$td->fetchColumn();
-
-        $tw = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND trade_date BETWEEN ? AND ?");
-        $tw->execute([$challengeId, $monday, $sunday]);
-        $tradesWeek = (int)$tw->fetchColumn();
-
-        $ld = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND result='Loss' AND trade_date=?");
-        $ld->execute([$challengeId, $today]);
-        $lossesToday = (int)$ld->fetchColumn();
-
-        $pl = $db->prepare("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE challenge_id=? AND trade_date=?");
-        $pl->execute([$challengeId, $today]);
-        $dailyPnl = round((float)$pl->fetchColumn(), 2);
+        $balanceToday = balanceAtDayStart($db, $challengeId, $today);
 
         // v3.17.0 — same tiers ladderTierForBalance() reads, exposed here so the
         // calculator page's Risk Rules panel can render them (replacing the three
         // hardcoded Recovery/Normal/Passing cards, which showed a ladder that didn't
         // match this challenge's real one) instead of a second endpoint just for this.
-        $balanceToday = balanceAtDayStart($db, $challengeId, $today);
         $lt = $db->prepare("SELECT lower_balance, upper_balance, risk_pct FROM risk_ladder_tiers WHERE challenge_id=? AND active=1 ORDER BY lower_balance ASC");
         $lt->execute([$challengeId]);
         $tiers = array_map(function ($t) use ($balanceToday) {
@@ -256,36 +232,34 @@ class CalculatorController {
             ];
         }, $lt->fetchAll());
 
-        // Checked in this order and the first breach found wins — trades-today is the
-        // most immediate gate a trader hits, daily loss the most severe, so this reads as
-        // "the most actionable reason first," not a strict severity ranking.
-        $reason = null;
-        if ($limits['max_trades_day'] !== null && $tradesToday >= (int)$limits['max_trades_day']) {
-            $reason = "daily trade limit reached ({$tradesToday}/{$limits['max_trades_day']})";
-        } elseif ($limits['max_trades_week'] !== null && $tradesWeek >= (int)$limits['max_trades_week']) {
-            $reason = "weekly trade limit reached ({$tradesWeek}/{$limits['max_trades_week']})";
-        } elseif ($limits['max_losses_day'] !== null && $lossesToday >= (int)$limits['max_losses_day']) {
-            $reason = "daily loss-count limit reached ({$lossesToday}/{$limits['max_losses_day']})";
-        } elseif ($limits['daily_loss_usd'] !== null && $dailyPnl <= -1 * (float)$limits['daily_loss_usd']) {
-            $reason = 'daily loss limit reached ($' . number_format(abs($dailyPnl), 2) . ' / $' . number_format((float)$limits['daily_loss_usd'], 2) . ')';
-        }
+        // v3.17.1 — open positions + margin_in_use computed from the same result set:
+        // margin_in_use is just planned_margin summed over exactly the rows the
+        // open-positions list already needs to show. array_sum() treats a NULL
+        // planned_margin as 0, matching the SQL COALESCE(SUM(...),0) convention used
+        // for this same figure inside autoRiskPreview().
+        $op = $db->prepare("SELECT id, pair, direction, trade_date, planned_margin FROM trades WHERE challenge_id=? AND result='Open' ORDER BY trade_date DESC, id DESC");
+        $op->execute([$challengeId]);
+        $openPositions = array_map(function ($t) {
+            return [
+                'id' => (int)$t['id'],
+                'pair' => $t['pair'],
+                'direction' => $t['direction'],
+                'trade_date' => $t['trade_date'],
+                'planned_margin' => $t['planned_margin'] !== null ? (float)$t['planned_margin'] : null,
+            ];
+        }, $op->fetchAll());
+        $marginInUse = round(array_sum(array_column($openPositions, 'planned_margin')), 2);
+        $availableMargin = round($balanceToday - $marginInUse, 2);
 
-        jsonResponse([
+        $status = tradeLimitStatus($db, $challengeId);
+
+        jsonResponse(array_merge($status, [
             'challenge_id' => $challengeId,
             'balance_at_day_start' => $balanceToday,
             'ladder_tiers' => $tiers,
-            'limits' => [
-                'max_trades_day' => $limits['max_trades_day'] !== null ? (int)$limits['max_trades_day'] : null,
-                'max_trades_week' => $limits['max_trades_week'] !== null ? (int)$limits['max_trades_week'] : null,
-                'max_losses_day' => $limits['max_losses_day'] !== null ? (int)$limits['max_losses_day'] : null,
-                'daily_loss_usd' => $limits['daily_loss_usd'] !== null ? (float)$limits['daily_loss_usd'] : null,
-            ],
-            'trades_today' => $tradesToday,
-            'trades_week' => $tradesWeek,
-            'losses_today' => $lossesToday,
-            'daily_pnl' => $dailyPnl,
-            'stopped' => $reason !== null,
-            'reason' => $reason,
-        ]);
+            'open_positions' => $openPositions,
+            'margin_in_use' => $marginInUse,
+            'available_margin' => $availableMargin,
+        ]));
     }
 }

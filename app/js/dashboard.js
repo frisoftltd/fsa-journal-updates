@@ -64,7 +64,10 @@ async function loadDashboard() {
 
     const str = s.streak||{};
     const strEl = document.getElementById('kpi-streak');
-    if(strEl) strEl.textContent = str.current ? `${str.current} ${str.type}${str.current>1?'s':''}` : '—';
+    // v3.17.1: plain +'s' gave "4 Losss" — "Loss" doesn't pluralize by suffix alone.
+    // "Win" -> "Wins" was already correct; only the Loss case needed the irregular form.
+    const streakLabel = str.type === 'Loss' ? 'Loss' + (str.current>1?'es':'') : str.type + (str.current>1?'s':'');
+    if(strEl) strEl.textContent = str.current ? `${str.current} ${streakLabel}` : '—';
 
     destroyCharts('donut','line','barPnl','barFib','barSession','drawdown');
     const co = chartOpts();

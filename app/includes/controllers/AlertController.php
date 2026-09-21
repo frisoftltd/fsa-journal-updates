@@ -50,19 +50,22 @@ class AlertController {
 
         if ($tc >= 2) $alerts[] = ['type' => 'info', 'icon' => 'ℹ️', 'msg' => 'You have taken ' . $tc . ' trades today — max recommended is 2'];
 
-        // Consecutive losses — check last 3 results with dates
+        // Consecutive losses — TODAY only, as of v3.17.1. The non-same-day "🚨 3
+        // consecutive losses — review your setups before the next trade" warning (this
+        // controller's original v3.4.4 behavior) is deleted, not replaced: the
+        // calculator's live status strip (Losses today X/Y, driven by
+        // challenge_limits — see CLAUDE.md v3.17.0) is now the one place trade-limit
+        // signals live. The same-day 🛑 danger banner below is a different, more urgent
+        // signal (an active losing streak right now, not a lookback across days) and was
+        // not named in the v3.17.1 briefing, so it's kept.
         $last3 = $this->db->prepare("SELECT result, trade_date FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND result IN ('Win','Loss') ORDER BY trade_date DESC, id DESC LIMIT 3");
         $last3->execute([$this->uid, $chId]);
         $r3 = $last3->fetchAll();
         if (count($r3) >= 3 && $r3[0]['result'] === 'Loss' && $r3[1]['result'] === 'Loss' && $r3[2]['result'] === 'Loss') {
-            // Check if all 3 losses were today
             $todayDate = date('Y-m-d');
             $allToday = ($r3[0]['trade_date'] === $todayDate && $r3[1]['trade_date'] === $todayDate && $r3[2]['trade_date'] === $todayDate);
-
             if ($allToday) {
                 $alerts[] = ['type' => 'danger', 'icon' => '🛑', 'msg' => '3 consecutive losses TODAY — stop trading, protect your account'];
-            } else {
-                $alerts[] = ['type' => 'warning', 'icon' => '🚨', 'msg' => '3 consecutive losses — review your setups before the next trade'];
             }
         }
 

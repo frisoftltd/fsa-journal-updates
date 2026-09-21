@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.17.0 |
+| Current Version | v3.17.1 |
 
 ### Tech Stack
 
@@ -2494,6 +2494,45 @@ relabels it "STOP — no trade," and sets its `title` to the full reason wheneve
 `get_risk_status` reports `stopped: true`; `openChecklist()` additionally checks
 `window._riskStopReason` itself as a second gate, so the stop holds even if something
 else ever reaches that function directly.
+
+### v3.17.1: One of Two Consecutive-Losses Banners Deleted, a Pluralization Typo, One Verify-Only Item
+
+**`AlertController::getAlerts()`'s consecutive-losses check has produced two different
+messages since v3.4.4** — a same-day `🛑 3 consecutive losses TODAY — stop trading,
+protect your account` (danger) and a non-same-day `🚨 3 consecutive losses — review your
+setups before the next trade` (warning), both from the same "last 3 results, all Loss"
+query, branching only on whether all three fell on today's date. This release deletes
+**only the 🚨 warning branch and its logic** — the briefing quoted that exact message and
+gave the reason ("the live status strip on the calculator is the one place for trade
+limits," referring to v3.17.0's `challenge_limits`-driven strip) — leaving the 🛑
+same-day danger banner untouched, since it wasn't named and signals something the
+calculator's strip doesn't cover in the same way (an active streak happening *right now*,
+not a configured daily-loss-count limit). **If the intent was to delete both banners**,
+that's a one-line follow-up (drop the remaining `if ($allToday)` block too) — flagged
+here rather than guessed at, the same way this file flags every reading of an ambiguous
+instruction.
+
+**Streak pluralization.** `js/dashboard.js`'s Current Streak card built its label as
+`${str.type}${str.current>1?'s':''}` — correct for `'Win'` → `'Wins'`, wrong for
+`'Loss'` → `'Losss'` (three esses: `'Loss'` already ends in `'ss'`, and appending a bare
+`'s'` doesn't pluralize an irregular-looking word correctly). Fixed to special-case
+`'Loss'` → `'Losses'`, leaving `'Win'` → `'Wins'` exactly as it already was — that half
+was never broken, per the briefing's own parenthetical confirming it.
+
+**Verified, not fixed: `planned_margin` on an existing Open trade.** Traced
+`openTradeModal()`'s data-population loop and `lockPreEntry()` (both `js/trades.js`)
+against a trade saved before v3.17.0, where `planned_margin` is `NULL`: the field is
+never wrapped in a result-based visibility check (it renders inside the same
+always-present, collapsed-by-default Pre-Entry Journal section every trade has), and it
+was deliberately left out of `lockPreEntry()`'s locked-field list when that function was
+written — even if it had been included, `lockPreEntry()` only locks a *closed* trade's
+pre-entry fields, and an Open trade is never locked in the first place. A `NULL` value
+correctly leaves the input blank (`data[k]!==null` guards the assignment) rather than
+rendering the literal string `"null"` or erroring. No code change was needed; this
+section exists to record that the trace was actually done, not assumed, per this
+project's standing rule that a "Verify" instruction gets a real check — a code-path trace
+in this case, since this environment has no live browser/DB to click through (§13 rule
+4), the same limitation already noted for other UI-only verifications in this file.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

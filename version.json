@@ -1,31 +1,14 @@
 {
-    "current_version": "3.17.0",
+    "current_version": "3.17.1",
     "release_date": "2026-09-21",
     "changelog": [
-        "Add: Auto Risk Calculator (pages/calculator.php rebuilt). Stop loss % is now the only required input -- balance (today's balance_at_day_start), risk % (ladder tier), and every output update live with no Calculate button. New CalculatorController::autoRiskPreview() (auto_risk_preview) computes risk_usd/position_usd/margin_usd/quantity/room_usd/stops_to_fail, rounding at each step (risk_usd, then position_usd, then margin_usd) -- verified against the briefing's own worked example, which only matches under chained rounding, not a single round-at-the-end pass",
-        "Add: trades.planned_margin DECIMAL(12,2) NULL -- the calculator's margin_usd output, saved as an ordinary pre-entry field (joins TradeController::saveTrade()'s $cols alongside stop_loss/take_profit) and never touched by BitfundedImportController. A new 'Use in Trade Form' button on the calculator hands the computed margin off to a fresh Add Trade via a one-shot sessionStorage value; the trade form also gained a visible, always-editable Planned Margin ($) field. Existing rows stay NULL -- this is a going-forward field, not backfilled",
-        "Add: margin bookkeeping. margin_in_use = SUM(planned_margin) for this challenge's Open trades; available_margin = balance - margin_in_use. The calculator shows 'STOP -- not enough margin' in place of its normal outputs whenever the computed margin exceeds available margin",
-        "Add: challenge_limits table (max_trades_day, max_trades_week, max_losses_day, daily_loss_usd), seeded for challenge 6 (2/4/2/$500). New CalculatorController::getRiskStatus() (get_risk_status) computes live trades-today/trades-this-week/losses-today/daily-P&L counts against these limits, plus a single stop reason (first breach wins: daily trades, then weekly trades, then daily losses, then daily loss $) -- one endpoint backing the calculator's status strip, its Risk Rules panel, and the '+ New Trade' button's own gate on the Trades page, so none of the three can disagree",
-        "Delete: the three hardcoded Recovery/Normal/Passing cards and the static 'Max 2 trades/day | ...' notice bar on the calculator page -- both showed numbers that didn't match a given challenge's real ladder/limits. Replaced with tiers rendered live from risk_ladder_tiers (current tier highlighted) and a live status strip (Today X/Y, Week X/Y, Losses today X/Y, Daily P&L $Z; amber one below a count limit, red at it) that shows 'STOP -- no trade: {reason}' and hides the calculator's numbers whenever any limit is reached",
-        "Add: challenges.default_leverage DECIMAL(6,2) NULL -- not one of the two migrations the briefing named, added because its own input list requires a leverage default ('default from challenge settings, editable') and no column held one before this release. Purely additive; exposed in the challenge add/edit form as 'Default Leverage (x)'",
-        "Fix: '+ New Trade' on the Trades page now disables and reads 'STOP -- no trade: {reason}' whenever any trade limit is reached, backed by the same get_risk_status endpoint the calculator uses -- openChecklist() also checks this server-confirmed state directly as a second gate"
+        "Delete: the dashboard's '🚨 3 consecutive losses -- review your setups before the next trade' banner (AlertController::getAlerts(), the non-same-day branch of the consecutive-losses check) and its logic -- not replaced. The calculator's live status strip (v3.17.0) is now the one place trade-limit signals live. The separate same-day '🛑 3 consecutive losses TODAY' danger banner was not named in this briefing and is kept",
+        "Fix: the Current Streak card read '4 Losss' for a 4-loss streak -- plain +'s' doesn't pluralize 'Loss'. Now 'Losses' for a loss streak, 'Wins' (already correct) for a win streak",
+        "Verify: an existing Open trade's planned_margin field (added v3.17.0) correctly shows blank -- not hidden, not locked -- when editing a trade saved before that column existed, so a margin can be entered retroactively. No code change was needed: the field was never part of TradeController::saveJournal()'s pre-entry lock (that only applies once a trade closes) and openTradeModal()'s population loop already leaves it blank rather than erroring on a null value"
     ],
     "files": [
-        {"path": "migrations/2026_09_21_0010_add_trades_planned_margin.sql", "critical": false},
-        {"path": "migrations/2026_09_21_0011_create_challenge_limits.sql", "critical": false},
-        {"path": "migrations/2026_09_21_0012_add_challenges_default_leverage.sql", "critical": false},
-        {"path": "includes/helpers.php", "critical": false},
-        {"path": "includes/router.php", "critical": false},
-        {"path": "includes/controllers/CalculatorController.php", "critical": false},
-        {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "includes/controllers/ChallengeController.php", "critical": false},
-        {"path": "pages/calculator.php", "critical": false},
-        {"path": "pages/trades.php", "critical": false},
-        {"path": "modals/trade-modal.php", "critical": false},
-        {"path": "modals/challenge-modal.php", "critical": false},
-        {"path": "js/calculator.js", "critical": false},
-        {"path": "js/trades.js", "critical": false},
-        {"path": "js/challenges.js", "critical": false}
+        {"path": "includes/controllers/AlertController.php", "critical": false},
+        {"path": "js/dashboard.js", "critical": false}
     ],
     "db_migrations": []
 }

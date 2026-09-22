@@ -19,18 +19,38 @@
         </div>
         <div class="form-group full" id="strategy-vars-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:10px"></div>
         <div class="form-group"><label>Direction</label><select id="f-direction" name="direction"><option>Long</option><option>Short</option></select></div>
-        <!-- v3.14.0: date in, time in, date out, time out, entry price, exit price, lot
-             size and fees are gone from manual entry — execution never belongs in this
-             form again, it's written exclusively by the Bitfunded importer once a
-             position closes (see CLAUDE.md v3.14.0's division-of-responsibility table).
-             Stop loss and take profit are intent, not outcome, so they stay here — moved
-             up next to Pre-Entry Journal below, since that's the moment they're actually
-             knowable. A brand-new trade is now routinely saved with none of the fields
-             this section used to require. -->
+        <!-- v3.14.0: time in, date out, time out, exit price, lot size and fees stay out
+             of manual entry — those are only ever knowable from the broker's own record,
+             written exclusively by the Bitfunded importer once a position closes (see
+             CLAUDE.md v3.14.0's division-of-responsibility table). Stop loss and take
+             profit are intent, not outcome, so they stay pre-entry — next to Pre-Entry
+             Journal below, since that's the moment they're actually knowable.
+
+             v3.17.3 partially reverses this: entry_price is back on this form (Outcome
+             section, below), because the importer's own matcher has no way to find a
+             manually-logged open trade at all once it closes — that row has no
+             entry_price, no pnl, and no time_in to match against (see CLAUDE.md v3.17.3
+             for the incident this fixes). This is a deliberate, narrow exception, not a
+             rollback of the v3.14.0 principle: exit_price, lot_size, fees, time_in and
+             time_out are still exclusively the importer's — only entry_price, and only
+             because it doubles as a match key, comes back here. Whatever gets typed here
+             is provisional; BitfundedImportController's own matched-row UPDATE always
+             overwrites it with Bitfunded's real value once the import actually runs. -->
         <div class="section-divider"></div>
         <div class="section-label">Outcome</div>
         <div class="form-group"><label>Result</label><select id="f-result" name="result"><option value="">—</option><option>Win</option><option>Loss</option><option>Break Even</option><option>Open</option></select></div>
         <div class="form-group"><label>Exec Score (1-10)</label><input type="number" min="1" max="10" id="f-exec_score" name="exec_score"></div>
+        <!-- v3.17.3: the actual fill price, added once the position opens and Bitfunded
+             shows it — paste it, don't type it, is the expectation, which is why this is
+             type="text" (a real number input rejects/mangles a pasted "0.34403 USDT"
+             instead of letting JS clean it). normalizeEntryPriceInput() (js/trades.js)
+             strips a trailing currency label and whitespace on input; saveTrade() (PHP)
+             rejects the save outright if what's left isn't a positive number rather than
+             silently storing 0 or blank — a stored 0 would satisfy the importer's own
+             legacy "entry_price = 0 means a pre-v3.14.5 truncated price" branch and match
+             the wrong row entirely. Optional: a trade logged before the fill lands has
+             nothing to put here yet, and that's the normal, expected state. -->
+        <div class="form-group"><label>Entry Price <span style="font-weight:400;color:var(--text3)">— actual fill, paste from Bitfunded once filled</span></label><input type="text" inputmode="decimal" id="f-entry_price" name="entry_price" placeholder="e.g. 0.34403" oninput="normalizeEntryPriceInput(this)"></div>
         <!-- Execution — read only, populated once the Bitfunded importer has matched this
              trade to a closed position. Hidden entirely until then (see
              renderExecutionSummary() in trades.js): a pre-entry-only trade has nothing to

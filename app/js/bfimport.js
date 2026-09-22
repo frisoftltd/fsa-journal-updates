@@ -51,14 +51,44 @@ async function bfPreview() {
         (c.attention ? `<span style="color:var(--orange)">${c.attention} needs attention</span> — will be skipped, resolve manually` : `<span style="color:var(--text3)">0 needs attention</span>`) +
         (r.funding ? `<br><br>Funding total: <strong>${fmt(-1 * r.funding.funding_total)}</strong> → challenge adjustment (${r.funding.row_count} transaction rows read)` : '');
 
+    // v3.17.3 — Bitfunded's own reported balance is the free wallet balance, excluding
+    // margin locked in open positions. When every open position's planned_margin is
+    // known, it's added back before the difference is computed (server-side, see
+    // BitfundedImportController::reconciliation()) so this isn't comparing two different
+    // balance concepts. When it isn't fully known, the server sends
+    // comparison_unavailable instead of a difference — shown as its own state, not a
+    // silently-wrong "flagged" mismatch.
     const rec = r.reconciliation;
     let recHtml = `Derived balance:   ${fmt(rec.derived_balance)}<br>`;
     recHtml += `Bitfunded balance: ${rec.bitfunded_balance !== null ? fmt(rec.bitfunded_balance) : '— (paste Transaction History or enter it manually)'}<br>`;
-    if (rec.difference !== null) {
+    if (rec.open_positions_count > 0) {
+        recHtml += `Open positions:    ${rec.open_positions_count}` +
+            (rec.open_margin !== null ? ` (margin ${fmt(rec.open_margin)}, added back before comparing)` : ` (margin unknown — add planned_margin on the open trade(s) to enable comparison)`) +
+            `<br>`;
+    }
+    if (rec.comparison_unavailable) {
+        recHtml += `Difference:        <span style="color:var(--text3)">unavailable — open position margin isn't fully known</span>`;
+    } else if (rec.difference !== null) {
         recHtml += `Difference:        <span style="color:${rec.flagged ? 'var(--red)' : 'var(--green)'}">${fmt(rec.difference)}</span>`;
         if (rec.flagged) recHtml += ` <strong style="color:var(--red)">— over $1, check before confirming</strong>`;
     }
     document.getElementById('bf-reconciliation').innerHTML = recHtml;
+
+    // v3.17.3 — loud, explicit warning for the exact failure mode this release fixes:
+    // a pasted position that resolved against an open trade with no entry_price on
+    // file, whether that resolved cleanly (matched) or stayed ambiguous (attention).
+    // Recoverable, not blocking — preview()/confirm() both re-parse on every call, so
+    // leaving this page, adding the price on the Trade Log, and coming back to
+    // re-preview picks up the change with nothing cached against it.
+    const priceCard = document.getElementById('bf-no-entry-price-card');
+    if (r.no_entry_price_warnings && r.no_entry_price_warnings.length) {
+        priceCard.style.display = 'block';
+        document.getElementById('bf-no-entry-price-rows').innerHTML = r.no_entry_price_warnings.map(w =>
+            `<div style="padding:6px 0;border-bottom:1px solid var(--border)">${w}</div>`
+        ).join('');
+    } else {
+        priceCard.style.display = 'none';
+    }
 
     const attentionRows = r.rows.filter(row => row.status === 'attention');
     const attCard = document.getElementById('bf-attention-card');

@@ -1,22 +1,23 @@
 {
-    "current_version": "3.17.2",
-    "release_date": "2026-09-21",
+    "current_version": "3.17.3",
+    "release_date": "2026-09-22",
     "changelog": [
-        "Note: this briefing asked for v3.17.1, but that version had already shipped (banner removal + streak typo fix) by the time this work started -- shipped as v3.17.2 instead, per the standing rule against reusing a version number",
-        "Add: registering a NEW trade is now blocked server-side while any trade limit is reached, not just via the frontend button state. New helpers.php::tradeLimitStatus() (extracted from CalculatorController::getRiskStatus(), shared) is called from TradeController::saveTrade() for add_trade only -- editing an existing trade (check-ins, planned_margin, notes, closing) is never blocked. Rejects with exactly {\"success\":false,\"error\":\"STOP -- {reason}\"} before any DB write, so it can't be bypassed from a stale open form, a second tab, or a direct API call",
-        "Fix: index.php's global topbar '+ Trade' button (present on every page, calls openTradeModal() directly) had no STOP gate at all -- only the Trades page's '+ New Trade' (via openChecklist()) did. Both buttons are now gated identically by js/trades.js::refreshNewTradeGate(), labelled with the literal 'STOP -- {reason}' text, called at app init so the topbar button is correct before the Trades page is ever visited. openTradeModal() itself also checks window._riskStopReason directly (guarded to only a brand-new trade, data=null), covering any future caller the same way",
-        "Amend: the calculator's STOP state no longer hides everything. Balance, Risk %, Margin in Use, Available Margin, the new Open Positions list, and the status strip all stay visible during a STOP -- only the stop%-dependent sizing numbers (risk, position, margin, quantity) and 'Use in Trade Form ->' disappear, replaced by the STOP message inside the Live Outputs card specifically",
-        "Add: Open Positions list on the calculator page (pair, direction, date, planned margin per row) -- exactly what the existing Margin in Use figure sums, now visible as line items, not just a total. Backed by a new open_positions field on get_risk_status, computed from the same query as margin_in_use/available_margin"
+        "Fix: importing a closed Bitfunded position could insert a duplicate trade instead of updating an existing open manual row, because entry_price/pnl/time_in are all NULL on a never-matched manual row and every condition in the match query silently excludes a NULL column under SQL three-valued logic rather than matching or erroring. New BitfundedImportController::matchOpenRow() second match branch finds such a row by pair+direction+trade_date (+-1 day fallback) and, only when present, entry_price within 0.5% -- routes to the existing (confirmed-safe) update path, which never touches notes/emotions/gate tags/session/SL/screenshots",
+        "Add: entry_price returns to the manual trade form (Outcome section) as an optional, paste-friendly field -- normalizeEntryPriceInput() strips a trailing currency label client-side; TradeController::saveTrade() rejects a non-numeric or non-positive value outright rather than silently storing 0 or garbage (a stored 0 would satisfy the importer's own legacy corruption-tolerance branch and match the wrong row)",
+        "Add: an amber 'Add fill price' badge on any open Trade Log row with entry_price IS NULL, and a loud, explicit preview warning ('{pair} {direction} -- open trade found with no entry price...') whenever an import resolves against such a row, matched or ambiguous -- never silently falls through to 'new'",
+        "Fix: BitfundedImportController::reconciliation() reported a false balance mismatch of roughly the locked margin whenever positions were open, because Bitfunded's reported balance excludes open-position margin while the derived balance doesn't. Now adds open positions' planned_margin back before comparing, or reports comparison_unavailable instead of a false flagged mismatch when that margin isn't fully known",
+        "Add: trades.funding (nullable, un-backfilled) -- per-trade funding cost derived from Transaction History's real Open Position/Close Position rows (bf_attribute_funding() in bitfunded_parser.php: open_margin - returned_margin + pnl, isolated margin only, verified against real data to the cent). Exact-timestamp match first, +-60s fallback, never 'nearest' beyond that, never a pick among ambiguous candidates -- an unbounded nearest-in-time search would confidently attribute the wrong position's margin event. Not sign-clamped: funding can reduce a trader's cost (paid to hold), and net_pnl (= pnl - fees - COALESCE(funding,0)) can increase from it. No existing rows backfilled or recomputed; challenges.funding_adjustment and the reconciliation preview's own arithmetic are deliberately unchanged, to avoid double-counting the same funding at both the per-trade and challenge-level layers",
+        "Verify: bitfunded_parser.php's Transaction History self-test rebuilt from a verbatim real paste (the previous fixture's 'Realized PnL' Type does not exist in real data) -- 63 assertions, including the real TRX/BNB funding derivation and four synthetic edge cases for the match-tightening rules above"
     ],
     "files": [
-        {"path": "includes/helpers.php", "critical": false},
-        {"path": "includes/controllers/CalculatorController.php", "critical": false},
+        {"path": "migrations/2026_09_22_0001_add_trades_funding.sql", "critical": false},
+        {"path": "includes/bitfunded_parser.php", "critical": false},
+        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
         {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "pages/calculator.php", "critical": false},
-        {"path": "js/calculator.js", "critical": false},
+        {"path": "modals/trade-modal.php", "critical": false},
+        {"path": "pages/bfimport.php", "critical": false},
         {"path": "js/trades.js", "critical": false},
-        {"path": "js/app.js", "critical": false},
-        {"path": "index.php", "critical": false}
+        {"path": "js/bfimport.js", "critical": false}
     ],
     "db_migrations": []
 }

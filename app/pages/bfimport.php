@@ -44,6 +44,16 @@
         <div id="bf-summary" style="font-size:13px;line-height:2;font-family:var(--font-mono,monospace)"></div>
         <div id="bf-reconciliation" style="margin-top:12px;padding:12px;background:var(--bg3);border-radius:8px;font-size:12px;font-family:var(--font-mono,monospace);line-height:1.8"></div>
       </div>
+      <!-- v3.17.3 — loud on purpose: this is the exact failure mode the whole importer
+           fix exists to stop (see CLAUDE.md v3.17.3). Rendered above the ordinary
+           attention card, in red rather than amber, and shown even when the row resolved
+           to a clean single match — the underlying candidate still has no entry price on
+           file, which is worth fixing now regardless of what this particular import run
+           does with it. -->
+      <div class="card" id="bf-no-entry-price-card" style="display:none;margin-bottom:16px;border-color:var(--red)">
+        <div class="card-title" style="color:var(--red)">⚠ Open trade(s) with no entry price</div>
+        <div id="bf-no-entry-price-rows" style="font-size:12px;line-height:1.8;color:var(--text)"></div>
+      </div>
       <div class="card" id="bf-attention-card" style="display:none;margin-bottom:16px;border-color:var(--orange)">
         <div class="card-title" style="color:var(--orange)">Needs attention — not imported unless resolved</div>
         <div id="bf-attention-rows" style="font-size:12px;line-height:1.8"></div>

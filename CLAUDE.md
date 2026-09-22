@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.17.2 |
+| Current Version | v3.17.3 |
 
 ### Tech Stack
 
@@ -226,8 +226,22 @@ source, r_multiple_source (added v3.12.0),
 exit_reason (added v3.14.0),
 balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_rep (added v3.15.0),
 balance_at_day_start, target_r, exit_quality (added v3.16.0),
-planned_margin (added v3.17.0)
+planned_margin (added v3.17.0),
+funding (added v3.17.3)
 ```
+> `funding` (`DECIMAL(12,4) NULL`) — per-trade funding cost, derived by
+> `BitfundedImportController` from Transaction History's `Open Position`/`Close Position`
+> rows (`bitfunded_parser.php::bf_attribute_funding()`) once both legs of a position's own
+> margin transfer are found. `NULL` means never measured — Transaction History wasn't
+> pasted, or this position's own Open/Close Position rows weren't in what was — never a
+> recorded zero; `0` means measured and genuinely zero (a trader can be paid to hold, so
+> `funding` is not sign-clamped and a negative value is a real, expected outcome). Existing
+> rows are never backfilled — this only ever applies to trades imported after v3.17.3.
+> `net_pnl = pnl - fees - COALESCE(funding, 0)` going forward; every pre-v3.17.3 row keeps
+> its own already-correct `pnl - fees` value untouched. See the v3.17.3 section below for
+> the full derivation, its precondition (isolated margin only), and why this is
+> deliberately kept separate from `challenges.funding_adjustment` rather than folded into
+> it.
 > `planned_margin` (`DECIMAL(12,2) NULL`) — the Auto Risk Calculator's `margin_usd`
 > output, carried into the trade form and saved as an ordinary pre-entry field alongside
 > `stop_loss`/`take_profit`. `NULL` means no calculator output was ever attached to this
@@ -2613,6 +2627,223 @@ result='Open'`) backs both the Open Positions list and `margin_in_use`
 `planned_margin` as 0 via PHP's normal `array_sum()` behavior — the same convention
 `autoRiskPreview()`'s SQL `COALESCE(SUM(...),0)` already uses for this same figure, kept
 consistent rather than reintroducing a second computation of it).
+
+### v3.17.3: The Import Matcher Couldn't See an Open Manual Row — Investigation, Fix, Funding Attribution
+
+**Symptom:** importing a closed Bitfunded position (the 09-21 TRXUSDT Long) inserted a
+new trade instead of updating the existing open manual row, which held notes, emotions,
+gate tags, SL, and session — none of it recreatable from Bitfunded's own data. Investigated
+before any code was touched, per the standing rule that a "fix this" request gets a real
+trace, not a guessed patch.
+
+#### Root cause
+
+`BitfundedImportController::matchAll()` (`app/includes/controllers/BitfundedImportController.php`)
+and `preview()`/`confirm()` share one match implementation — not two independently
+maintained copies, ruled out early as a possible cause. On a manually-logged, never-yet-
+matched trade, `entry_price`, `pnl`, and `time_in` are **all** `NULL` —
+`TradeController::saveTrade()` has had no execution-field inputs on this form since
+v3.14.0, and `time_in` specifically was never in `saveTrade()`'s `$cols` at all (confirmed
+by reading the form and the handler, not assumed). `matchAll()`'s original query —
+`entry_price = ? OR TRUNCATE(?,2) = entry_price OR entry_price = 0`, `ABS(pnl - ?) <= ?`,
+`time_in BETWEEN ? AND ?` — has three independent conditions, each evaluating to SQL's
+`NULL` (not `TRUE`) against a `NULL` column under three-valued logic. A `NULL` `AND`ed into
+a `WHERE` clause silently excludes the row rather than matching, erroring, or even
+surfacing as `'attention'` for a human to see. The near-match fallback has the identical
+blind spot (`entry_price<>?` / `pnl<>?` are also `NULL`, not `TRUE`), so the case never
+even reached the attention path — it fell straight through to `'new'`.
+
+The write path was checked and is safe: `confirm()`'s matched-row `UPDATE` never mentions
+`notes`, `emotion_tag`, gate/tag `trade_variables`, `session`, `stop_loss`, `take_profit`,
+or `screenshots` — confirmed by reading every column in both `UPDATE` statements, not
+assumed from the file's own header comment. If a match had been found, updating would
+have been completely safe.
+
+**Scope:** every manually-logged trade has `entry_price IS NULL` until an import fills it
+in — this isn't specific to TRX; the open BNBUSDT row was flagged as exposed identically,
+before it ever closed.
+
+#### Part 1 — `entry_price` returns to the manual form
+
+Partially reverses v3.14.0's "execution data never belongs in this form" rule — a
+deliberate, narrow exception, not a rollback: `exit_price`, `lot_size`, `fees`, `time_in`,
+`time_out` all stay importer-only. `entry_price` comes back specifically because the
+matcher has no way to find an open row without it. Added to `trade-modal.php` (Outcome
+section) as `type="text"`, not `type="number"` — a native number input mangles a pasted
+`"0.34403 USDT"` before JS ever sees it — with `normalizeEntryPriceInput()`
+(`js/trades.js`) stripping a trailing currency label on input. `TradeController::
+saveTrade()` rejects the save outright (`jsonError`) if what's left isn't a positive
+number, never silently stores `0` or garbage — a stored `0` would satisfy the importer's
+*legacy* `entry_price = 0` corruption-tolerance branch (from v3.14.6, for a genuinely
+pre-v3.14.5-truncated price) and match the wrong row entirely. Joins `saveTrade()`'s
+`$cols`; the `count($cols)+2` placeholder formula (see v3.16.2) absorbed the new column
+correctly with no hardcoded number to update — verified with the same standalone
+placeholder-count script used for the v3.16.2 fix (21 named columns = 21 placeholders =
+21 bound values).
+
+#### Part 2 — `matchOpenRow()`, a second match branch
+
+New private method in `BitfundedImportController`, called only when `matchAll()`'s
+original branch finds zero exact candidates (no double-counting risk — a row with real
+execution data would already have been found or ruled ambiguous above). Match key:
+`challenge_id` + `pair` + `direction` (exact) + `trade_date = DATE(Opening Time)` (exact
+day, ±1 day fallback if same-day finds nothing — a late-night trade can straddle
+midnight) + `(result IS NULL OR result NOT IN ('Win','Loss','Break Even'))` (the explicit
+`IS NULL` branch is load-bearing: a bare `NOT IN` returns `NULL`, not `TRUE`, against a
+`NULL` `result` — which is exactly what an untouched Result dropdown submits, per
+`saveTrade()`'s `?: null` normalization — a plain `NOT IN` here would silently recreate
+the identical bug one level down). Entry price, only when the candidate actually has one,
+within 0.5% tolerance — skipped entirely (not compared) when `NULL`, computed in PHP not
+SQL specifically so "skip the condition" (NULL) and "present but out of tolerance"
+(disqualified) stay two different outcomes a single SQL `OR entry_price IS NULL` clause
+would have collapsed into one.
+
+Candidate resolution: one → matched, routes to the existing (confirmed-safe) update path.
+More than one → attention, lists every candidate id, never picks the first. Zero → falls
+through to the existing near-match/new logic unchanged. When both priced and priceless
+candidates exist, the priced ones win outright — a real, checkable number beats "we don't
+know yet," and NULL-entry candidates are dropped from consideration entirely rather than
+padding out an otherwise-resolvable set.
+
+#### Part 3 — loud, not silent
+
+**Trade Log row indicator:** any non-closed row (`!['Win','Loss','Break Even'].includes(t.result)`)
+with `entry_price IS NULL` shows an amber "⚠ Add fill price" badge in the Entry column,
+click-through to edit — catches it day-to-day while the position is open and the
+Bitfunded card is still on screen. **Import preview blocker:** whenever a pasted position
+resolves via `matchOpenRow()` with `no_entry_price: true` (matched *or* attention), a
+loud red card renders above the ordinary attention card:
+`"{pair} {direction} — open trade found with no entry price. Add the fill price to that
+trade before importing, or this will be logged as a new trade."` — shown even for a row
+that resolved cleanly, since the underlying candidate still has no entry price on file,
+worth fixing regardless of what this particular import run does with it. Recoverable, not
+blocking: `preview()`/`confirm()` both re-parse on every call, so leaving the page, adding
+the price, and re-previewing picks up the change with nothing cached against it.
+
+#### Part 4 — naming the NULL-guard mechanism explicitly
+
+Every condition across both branches that touches a nullable column carries a comment
+naming which NULL guard it is — three total (the original branch's `entry_price`/`pnl`/
+`time_in`, `matchOpenRow()`'s `result`, and its `entry_price` tolerance check), plus a
+note on the now-unreachable-for-this-case near-match fallback acknowledging it shares the
+same blind spot. One mechanism — a comparison against a `NULL` column evaluates to
+`NULL`, not `TRUE` or `FALSE`, and silently drops the row from an `AND`-chained `WHERE`
+clause — has now caused this exact failure shape four separate times across this
+project's history (the v3.12.x hand-typed-timestamp duplicates, v3.16.x's `exit_quality`/
+`NOT IN` traps, and this one); naming it explicitly at each site is cheaper than
+re-discovering it a fifth time.
+
+#### Part 5 — reconciliation no longer reports a false mismatch for open positions
+
+Bitfunded's own reported `Balance` (Transaction History's latest row, or a manually
+entered figure) is the account's **free wallet balance** — it excludes margin locked in a
+still-open position. `$derived` has no such exclusion (every closed trade's realised P&L
+against `starting_balance`, closer to full account equity), so comparing the two directly
+reported a false "mismatch" of roughly however much margin was locked — not a real
+discrepancy, a unit mismatch between two different balance concepts. Fixed by adding open
+positions' summed `planned_margin` back onto the reported free balance before comparing.
+`planned_margin` is the only figure this codebase has for what's actually locked; if even
+one open position's is unknown (`NULL`), the correction itself would be wrong, so
+`reconciliation()` returns `comparison_unavailable: true` instead of a `difference` —
+never a silently-wrong flagged mismatch built on an incomplete correction.
+
+#### Part 6 — funding, attributed per position
+
+**The real `Type` vocabulary — confirmed against a verbatim real paste, not guessed.**
+Two prior candidate strings ("Realized PnL", "Margin Transfer") were explicitly ruled
+out — neither appears in a real paste. Five real values, capitalization inconsistent
+between them: `Funding Fee`, `Opening fee`, `Closing fee`, `Open Position`,
+`Close Position` — every comparison in this codebase against any of them is
+case-insensitive (`strcasecmp`). `Open Position`/`Close Position` carry the traded symbol
+in the `Transaction` column, slash-separated (`TRX/USDT`) — normalized by stripping the
+slash and uppercasing, to match `trades.pair`'s own format (`TRXUSDT`). Every other row's
+`Transaction` column is just `USDT` — no symbol at all, which is the entire reason
+per-position funding can't be read off directly and has to be derived. `Balance` does
+**not** update per row (several rows share one value in a real paste) — `latest_balance`
+is keyed off the row with the latest `Time`, never row order or a running delta.
+
+**`bf_attribute_funding()`** (`bitfunded_parser.php`, pure — no DB, consistent with that
+file's existing "parsing only" scope) derives one position's funding cost:
+`open_margin − returned_margin + pnl`, where `open_margin`/`returned_margin` are the
+absolute values of the matched `Open Position`/`Close Position` rows' `Amount` and `pnl`
+is the position's own signed realized P&L from Position History (no `Realized PnL` row
+type exists in a real Transaction History paste at all). Verified against real data:
+TRX margin out `3488.4954`, back `3394.5281`, pnl `-91.288` → `2.6793`, matching the sum
+of the three real TRX `Funding Fee` rows (`0.1527+0.7599+1.7664 = 2.6790`, the `0.0003`
+gap being ordinary sub-cent rounding, the same class already documented at v3.13.2/
+v3.13.4). **Explicit precondition, stated in the function's own doc comment, not checked
+in code: isolated margin only.** The derivation only holds because margin is locked to a
+single position and returned on that position's own close — under cross margin there is
+no per-position margin row at all, and calling this against a cross-margin account's
+Transaction History would not fail loudly; it would silently return a plausible-looking,
+meaningless number, because the two rows this function looks for simply don't exist in
+that shape. This importer has no way to detect which margin mode an account uses, so this
+is a documented precondition of calling the function, not a runtime guard.
+
+**`bf_find_position_row()`** matches `Open Position`/`Close Position` rows exact-timestamp
+first (a real row's own `Time` is identical to the position's Opening Time/Liquidate Date
+— confirmed against real data, both landed on the same second), falling back to a narrow
+±60 second window only if the exact second has nothing, and returning `null` beyond
+that — never "whichever is nearest." An unbounded nearest-in-time search would happily
+attribute a *different* position's own margin event from days earlier and report a
+confident, wrong number — the identical silent-wrong shape as the bug this whole release
+exists to fix, just relocated into a new function. More than one candidate at whichever
+precision tier succeeds returns `null` immediately, at that tier, without ever trying the
+next — an ambiguous match is not a match, and this function never disambiguates by
+picking the closer of two.
+
+**Funding is not sign-clamped.** A trader can be paid to hold a position; `bf_attribute_
+funding()`'s return value can be negative, and `net_pnl` must be able to increase from
+it, not just decrease. Tested directly: a synthetic case where returned margin (1050)
+exceeds open margin (1000) plus pnl (10) asserts a `-40.0` result.
+
+**Schema:** `trades.funding DECIMAL(12,4) NULL DEFAULT NULL` (migration
+`2026_09_22_0001_add_trades_funding.sql`), nullable and un-backfilled, per the same
+"NULL means unknown, 0 means measured as zero" convention this whole release is about
+not collapsing. `net_pnl = pnl - fees - COALESCE(funding, 0)` going forward, in both
+`confirm()`'s matched-`UPDATE` and new-row `INSERT` — the `?? 0.0` in PHP is a deliberate,
+narrowly-scoped COALESCE-equivalent: it lets `net_pnl` fall back to the pre-v3.17.3
+formula when funding is unknown, without ever writing a fabricated `0` onto the column
+itself. **No backfill, no recompute of existing rows** — every trade imported before this
+release keeps its own already-correct `pnl - fees` value exactly as recorded.
+
+**Confirmed, not fixed: fees are not double-charged.** Transaction History's `Opening
+fee`/`Closing fee` rows are read into `$funding['rows']` for the margin/funding
+derivation only, never summed into `trades.fees` — that column stays exclusively
+Position History's own combined `Fee` field, unchanged. Verified against real data: TRX's
+`Opening fee` (`6.9769`) + `Closing fee` (`6.9404`) = `13.9173`, matching the card's own
+combined Fee (`13.9175`) to the same sub-cent rounding gap already documented elsewhere —
+the same money reported at two granularities, not two separate costs. No code change was
+needed here; this was a read-then-confirm, the same discipline as the "verify before
+fixing" investigation that opened this whole release.
+
+**Caught during review, before writing: `reconciliation()`'s `$importedSum` must NOT also
+subtract per-position funding.** `$fundingAdj` (a few lines further down the same
+function) already subtracts the *whole pasted Transaction History's* `funding_total` from
+`$derived` — which, for a position being imported in the same request, is the same
+funding `bf_attribute_funding()` would also attribute to it individually. Subtracting it
+in both places would double-count: once per-position in `$importedSum`, once again for
+the whole paste via `$fundingAdj`. Caught by re-reading the function after writing an
+initial (wrong) version that added a per-position subtraction to `$importedSum` — fixed
+by leaving `$importedSum` exactly as it was before this release (`pnl - fees`, no funding
+term). This mirrors the ticket's own explicit scope boundary — "don't double-count: if
+per-trade funding starts feeding equity, that's a separate decision, not part of this
+ticket" — the reconciliation preview's arithmetic is deliberately unchanged by Part 6;
+only the stored per-trade `net_pnl` is funding-aware. `challenges.funding_adjustment`
+itself (the challenge-level total, written from `$funding['funding_total']`) is untouched
+by this entire release, exactly as scoped.
+
+**Self-test:** `bitfunded_parser.php`'s Transaction History fixture — previously a
+fabricated sample using a `'Realized PnL'` `Type` that, on inspection of a real paste,
+does not exist — replaced with the verbatim 13-row real paste above (the identical
+mistake this file's own Position History self-test already learned from once, at
+v3.14.4: a plausible-looking guess passing every test while the live path kept failing).
+63 assertions total, including the real-data TRX (`2.6793`) and BNB (`null`, still open,
+no Close Position row) cases, a symbol absent from the paste entirely (`null`), and four
+synthetic edge cases exercising exactly the four tightenings above: sign-not-clamped
+(`-40.0`), two candidates inside the 60s tolerance (`null`), two candidates at the exact
+same timestamp (`null`), and a real candidate that exists but sits outside the 60s
+tolerance (`null`, not matched as "nearest available"). All 63 pass.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 

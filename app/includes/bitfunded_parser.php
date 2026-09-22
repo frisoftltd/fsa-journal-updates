@@ -284,16 +284,33 @@ function parsePositionHistory(string $raw): array {
 
 /**
  * Transaction History (Box 2, optional). Tab-separated: Type, Transaction, Amount, Time, Balance.
- * Only two things are taken from it: the sum of Amount where Type = 'Funding Fee', and the
- * most recent Balance value. Everything else in the tab is read only far enough to validate
- * shape and is otherwise ignored — this is not a general transaction importer.
  *
- * Returns ['funding_total' => float, 'latest_balance' => float|null, 'row_count' => int].
- * funding_total is the sum of raw Amount values for funding rows, negated so it's ready to
- * write directly into challenges.funding_adjustment (see CLAUDE.md v3.14.0: a negative
- * Amount there is money leaving the account — a cost — and funding_adjustment is a positive
- * magnitude subtracted in the balance formula, so the sign must flip once here, not per row
- * elsewhere).
+ * v3.17.3 — verified against a real 13-row paste (see CLAUDE.md v3.17.3), five distinct
+ * Type values actually appear: 'Funding Fee', 'Opening fee', 'Closing fee', 'Open
+ * Position', 'Close Position' — capitalization is inconsistent between them ("fee"
+ * lowercase, "Position" capitalized), so every comparison here is case-insensitive.
+ * 'Open Position'/'Close Position' carry the traded symbol in the Transaction column,
+ * slash-separated ("TRX/USDT"); every other row's Transaction column is just "USDT" (no
+ * symbol). That's the only place a symbol appears anywhere in this tab — Funding Fee
+ * rows never carry one, which is the whole reason per-position funding can't be read off
+ * directly and has to be derived (see bf_attribute_funding() below).
+ *
+ * Returns ['funding_total' => float, 'latest_balance' => float|null, 'row_count' => int,
+ * 'rows' => array]. funding_total/latest_balance/row_count are unchanged from before this
+ * release — funding_total is still the sum of every Funding Fee row across the whole
+ * paste (challenge-level, feeds challenges.funding_adjustment, not touched by this
+ * release at all), negated so it's ready to write directly (a negative Amount is money
+ * leaving the account — a cost — and funding_adjustment is a positive magnitude
+ * subtracted in the balance formula). latest_balance is keyed off the row with the
+ * latest Time, not the last row in the paste or a running total — Balance does NOT
+ * update per row (several rows share one value, confirmed against the real paste), so a
+ * row-order or row-count assumption would be wrong.
+ *
+ * 'rows' is new: every row, with 'symbol' populated (normalized: slash stripped,
+ * uppercased, to match trades.pair's own format) only for Open Position/Close Position
+ * rows, null otherwise. This is what BitfundedImportController and
+ * bf_attribute_funding() read to attribute funding per position — nothing here decides
+ * that attribution itself; this function only parses and normalizes.
  */
 function parseTransactionHistory(string $raw): array {
     $rawLines = preg_split('/\r\n|\r|\n/', $raw);
@@ -312,6 +329,7 @@ function parseTransactionHistory(string $raw): array {
     $latestBalance = null;
     $latestTs = null;
     $rowCount = 0;
+    $rows = [];
 
     foreach ($lines as $entry) {
         $lineNo = $entry['n'];
@@ -331,8 +349,9 @@ function parseTransactionHistory(string $raw): array {
             );
         }
 
-        [$type, , $amountRaw, $timeRaw, $balanceRaw] = $cells;
+        [$type, $transactionRaw, $amountRaw, $timeRaw, $balanceRaw] = $cells;
         $type = trim($type);
+        $transactionRaw = trim($transactionRaw);
         $rowCount++;
 
         $amount = bf_parse_num($amountRaw, $lineNo, 'Amount');
@@ -349,6 +368,23 @@ function parseTransactionHistory(string $raw): array {
             $latestTs = $ts;
             $latestBalance = $balance;
         }
+
+        $symbol = null;
+        if (strcasecmp($type, 'Open Position') === 0 || strcasecmp($type, 'Close Position') === 0) {
+            $symbol = strtoupper(str_replace('/', '', $transactionRaw));
+        }
+
+        $rows[] = [
+            'type'        => $type,
+            'transaction' => $transactionRaw,
+            'symbol'      => $symbol,
+            'amount'      => $amount,
+            // Reformatted through the same strtotime()-then-date() pass as everywhere
+            // else in this file (bf_parse_datetime()) specifically so exact-string time
+            // comparisons in bf_find_position_row() below are comparing like formats,
+            // not raw paste text that happens to look similar.
+            'time'        => date('Y-m-d H:i:s', $ts),
+        ];
     }
 
     if ($rowCount === 0) {
@@ -359,7 +395,89 @@ function parseTransactionHistory(string $raw): array {
         'funding_total'  => round(-1 * $fundingSum, 4),
         'latest_balance' => $latestBalance,
         'row_count'      => $rowCount,
+        'rows'           => $rows,
     ];
+}
+
+/**
+ * v3.17.3 — derives the funding cost attributable to ONE closed position, from the Open
+ * Position / Close Position rows parseTransactionHistory() already extracted. See
+ * CLAUDE.md v3.17.3 for the incident this closes: challenges.funding_adjustment is a
+ * challenge-level total and stays that way (unchanged by this function or its caller);
+ * this is the first place funding is ever attributed to a single trade.
+ *
+ * PRECONDITION, not checked in code: isolated margin. This derivation only works because
+ * margin is locked specifically to one position and returned specifically on that
+ * position's own close — the two Open Position/Close Position rows this function looks
+ * for are a real, direct record of that. Under cross margin there is no such per-position
+ * margin row at all, and calling this against a cross-margin account's Transaction
+ * History would not fail — it would silently return a plausible-looking, meaningless
+ * number, because the two rows this function is built to find simply don't exist in that
+ * shape. This importer has no way to detect which margin mode an account uses, so this is
+ * a documented precondition of calling it, not a runtime guard.
+ *
+ * Formula (verified against real data — see CLAUDE.md v3.17.3 for the full reconciliation
+ * against three real Funding Fee rows): funding = open_margin − returned_margin + pnl,
+ * where open_margin/returned_margin are the ABSOLUTE VALUES of the matched Open/Close
+ * Position rows' Amount and pnl is the position's own signed realized P&L (from Position
+ * History, not Transaction History — no 'Realized PnL' row type exists in a real paste).
+ * The result is NOT clamped to a sign: a trader can be paid to hold a position (funding
+ * flows the account's way instead of out of it), and a negative return here is a real,
+ * expected outcome that must be able to increase $net, not just decrease it.
+ *
+ * Returns null — unknown, never a guessed 0 — whenever either leg can't be found
+ * unambiguously: no candidate row, or more than one equally-good candidate. See
+ * bf_find_position_row() for exactly what "unambiguous" requires.
+ */
+function bf_attribute_funding(array $txRows, string $pair, string $timeIn, string $timeOut, float $pnl): ?float {
+    $openRow = bf_find_position_row($txRows, 'open position', $pair, $timeIn);
+    if ($openRow === null) return null;
+
+    $closeRow = bf_find_position_row($txRows, 'close position', $pair, $timeOut);
+    if ($closeRow === null) return null;
+
+    $openMargin = abs($openRow['amount']);
+    $returnedMargin = abs($closeRow['amount']);
+    return round($openMargin - $returnedMargin + $pnl, 4);
+}
+
+/**
+ * v3.17.3 — finds exactly one Transaction History row of the given $type ('open position'
+ * / 'close position', matched case-insensitively) whose normalized symbol equals $pair
+ * and whose own Time matches $targetTime.
+ *
+ * Exact-timestamp match first: a real Open/Close Position row's own Time is identical to
+ * the position's Opening Time / Liquidate Date (confirmed against a real paste — both
+ * landed on the same second). Only if the exact second has no candidate does this fall
+ * back to a narrow +/-60 second window, and it returns null beyond that rather than
+ * taking whatever is nearest — an unbounded "nearest in time" search would happily
+ * attribute a completely different position's own margin event from days earlier and
+ * report a confident, wrong number. That is the identical silent-wrong shape as the bug
+ * this whole release exists to fix, just relocated into a brand-new function instead of
+ * the original matcher.
+ *
+ * More than one candidate at whichever precision tier actually finds something — exact,
+ * or the 60s fallback — returns null immediately, at that tier, without ever trying the
+ * next one. An ambiguous match is not a match; this function never disambiguates by
+ * picking the closer of two, only by finding exactly one.
+ */
+function bf_find_position_row(array $txRows, string $type, string $pair, string $targetTime): ?array {
+    $candidates = array_values(array_filter($txRows, function ($r) use ($type, $pair) {
+        return $r['symbol'] === $pair && strcasecmp($r['type'], $type) === 0;
+    }));
+    if (!$candidates) return null;
+
+    $exact = array_values(array_filter($candidates, fn($r) => $r['time'] === $targetTime));
+    if (count($exact) === 1) return $exact[0];
+    if (count($exact) > 1) return null;
+
+    $targetTs = strtotime($targetTime);
+    $near = array_values(array_filter($candidates, function ($r) use ($targetTs) {
+        return abs(strtotime($r['time']) - $targetTs) <= 60;
+    }));
+    if (count($near) === 1) return $near[0];
+
+    return null; // zero or ambiguous within the fallback window
 }
 
 // ── SELF-TEST ────────────────────────────────────────────────────────────
@@ -672,22 +790,114 @@ TXT;
         $pass++;
     }
 
-    // Transaction History parser: still a real table, sanity-checked against a small
-    // real-shaped paste (mixed decimal precision, as Bitfunded actually displays it).
+    // Transaction History parser — v3.17.3: replaced with a verbatim real paste (see
+    // CLAUDE.md v3.17.3). The previous fixture here used a 'Realized PnL' Type that, on
+    // inspection of an actual paste, does not exist — it was a plausible-looking guess
+    // that passed every test while never having been checked against real bytes, the
+    // identical mistake bitfunded_parser.php's own Position History self-test already
+    // learned this lesson from once (v3.14.4). The five Type values below — Funding Fee,
+    // Opening fee, Closing fee, Open Position, Close Position, inconsistently capitalized
+    // — are what a real paste actually contains.
     $tx = <<<'TXT'
 Type	Transaction	Amount	Time	Balance
-Funding Fee	Funding	-1.2345	2026-09-14 00:00:00	9800.0000
-Funding Fee	Funding	-5.4024	2026-09-15 00:00:00	9750.0000
-Realized PnL	Position	-98.68	2026-09-15 20:49:24	9735.1722
+Funding Fee	USDT	-0.1441	2026-09-22 18:00:17	8623.6757
+Closing fee	USDT	-6.9404	2026-09-22 15:43:20	8623.6757
+Close Position	TRX/USDT	3394.5281	2026-09-22 15:43:20	8623.6757
+Funding Fee	USDT	-0.2305	2026-09-22 10:00:22	5236.0880
+Funding Fee	USDT	-1.7664	2026-09-22 10:00:13	5236.0880
+Funding Fee	USDT	-0.4946	2026-09-22 02:00:23	5236.0880
+Funding Fee	USDT	-0.7599	2026-09-22 02:00:16	5236.0880
+Funding Fee	USDT	-0.6387	2026-09-21 18:00:18	5236.0880
+Funding Fee	USDT	-0.1527	2026-09-21 18:00:13	5236.0880
+Opening fee	USDT	-6.9769	2026-09-21 11:04:01	5236.0880
+Open Position	TRX/USDT	-3488.4954	2026-09-21 11:04:01	5243.0650
+Opening fee	USDT	-2.0032	2026-09-21 11:00:03	8731.5604
+Open Position	BNB/USDT	-1001.6136	2026-09-21 11:00:03	8733.5636
 TXT;
+    $txResult = null;
     try {
-        $result = parseTransactionHistory($tx);
-        $check('funding_total', $result['funding_total'], 6.6369);
-        $check('latest_balance', $result['latest_balance'], 9735.1722);
-        $check('row_count', $result['row_count'], 3);
+        $txResult = parseTransactionHistory($tx);
+        // Balance does NOT update per row -- several rows above share one value (see the
+        // 2026-09-22 15:43:20 pair, and the two 2026-09-21 11:0x:0x rows) -- so
+        // latest_balance has to be keyed off the row with the latest Time, not the last
+        // row in the paste or a running total. 8623.6757 is the 18:00:17 row, the most
+        // recent Time in the whole paste, not the first row (paste order here is
+        // newest-first, which this assertion deliberately does not rely on).
+        $check('funding_total (7 real Funding Fee rows)', $txResult['funding_total'], 4.1869);
+        $check('latest_balance (by Time, not row order/count)', $txResult['latest_balance'], 8623.6757);
+        $check('row_count', $txResult['row_count'], 13);
     } catch (BitfundedParseException $e) {
         $fail++;
         fwrite(STDERR, "FAIL: Transaction History parse threw: " . $e->getMessage() . "\n");
+    }
+
+    // bf_attribute_funding() against the same real paste. TRX: Opening Time
+    // 2026-09-21 11:04:01 (identical to the Open Position row's own Time), Liquidate Date
+    // 2026-09-22 15:43:20 (identical to Close Position's), pnl -91.288 -- independently
+    // verified against the three real TRX Funding Fee rows (0.1527+0.7599+1.7664 =
+    // 2.6790, 0.0003 short of the derived 2.6793 from rounding, confirmed as the real
+    // mechanism, not a coincidence). BNB has no Close Position row anywhere in this paste
+    // (it's still open) -- must return null, not a guess.
+    if ($txResult !== null) {
+        $trxFunding = bf_attribute_funding($txResult['rows'], 'TRXUSDT', '2026-09-21 11:04:01', '2026-09-22 15:43:20', -91.288);
+        $check('bf_attribute_funding TRX (verified against real funding rows)', $trxFunding, 2.6793);
+
+        $bnbFunding = bf_attribute_funding($txResult['rows'], 'BNBUSDT', '2026-09-21 11:00:03', '2026-09-22 23:59:59', -1.0);
+        $check('bf_attribute_funding BNB (still open, no Close Position row) -> null', $bnbFunding, null);
+
+        $absentFunding = bf_attribute_funding($txResult['rows'], 'ETHUSDT', '2026-09-21 00:00:00', '2026-09-22 00:00:00', 1.0);
+        $check('bf_attribute_funding symbol absent from paste entirely -> null', $absentFunding, null);
+    }
+
+    // Synthetic cases bf_attribute_funding() needs that the real paste above doesn't
+    // exercise: a negative funding result (paid to hold — must not be sign-clamped),
+    // ambiguous candidates within the 60s fallback window (must return null, never pick
+    // the closer one), an exact-timestamp collision (same rule, at the other tier), and a
+    // real row that exists but sits outside the 60s tolerance (must return null rather
+    // than matching a different, distant event for the same symbol — the "grab a
+    // different TRX position from two days earlier" failure shape named directly).
+    $synthetic = <<<'TXT'
+Type	Transaction	Amount	Time	Balance
+Open Position	SIG/USDT	-1000.0000	2026-01-01 00:00:00	5000.0000
+Close Position	SIG/USDT	1050.0000	2026-01-01 01:00:00	5000.0000
+Open Position	AMB/USDT	-500.0000	2026-01-02 00:00:00	5000.0000
+Open Position	AMB/USDT	-500.0000	2026-01-02 00:00:30	5000.0000
+Close Position	AMB/USDT	500.0000	2026-01-02 01:00:00	5000.0000
+Open Position	DUP/USDT	-300.0000	2026-01-04 00:00:00	5000.0000
+Open Position	DUP/USDT	-300.0000	2026-01-04 00:00:00	5000.0000
+Close Position	DUP/USDT	310.0000	2026-01-04 01:00:00	5000.0000
+Open Position	FAR/USDT	-200.0000	2026-01-03 00:00:00	5000.0000
+Close Position	FAR/USDT	210.0000	2026-01-03 01:00:00	5000.0000
+TXT;
+    try {
+        $synResult = parseTransactionHistory($synthetic);
+
+        // SIG: returned margin (1050) exceeds open margin (1000) + pnl (10) -- funding
+        // must come back negative, not clamped to 0 or made positive. A negative funding
+        // figure means $net = pnl - fees - funding must be able to INCREASE from it.
+        $sigFunding = bf_attribute_funding($synResult['rows'], 'SIGUSDT', '2026-01-01 00:00:00', '2026-01-01 01:00:00', 10.0);
+        $check('bf_attribute_funding sign is not clamped (paid to hold -> negative)', $sigFunding, -40.0);
+
+        // AMB: two Open Position rows 30s apart, target time 15s from each -- both inside
+        // the 60s fallback window, neither an exact match. Ambiguous, must be null, not
+        // whichever is closer.
+        $ambFunding = bf_attribute_funding($synResult['rows'], 'AMBUSDT', '2026-01-02 00:00:15', '2026-01-02 01:00:00', 5.0);
+        $check('bf_attribute_funding two candidates within 60s tolerance -> null, not a pick', $ambFunding, null);
+
+        // DUP: two Open Position rows at the exact same identical timestamp -- ambiguous
+        // at the exact tier itself, must be null before the 60s fallback is ever tried.
+        $dupFunding = bf_attribute_funding($synResult['rows'], 'DUPUSDT', '2026-01-04 00:00:00', '2026-01-04 01:00:00', 5.0);
+        $check('bf_attribute_funding two candidates at the exact same timestamp -> null', $dupFunding, null);
+
+        // FAR: a real Open Position row exists for this symbol, but 5 minutes (300s) from
+        // the target time -- outside the 60s tolerance. Must be null, not matched as
+        // "nearest available" -- an unbounded nearest-in-time search is exactly the
+        // failure shape being guarded against here.
+        $farFunding = bf_attribute_funding($synResult['rows'], 'FARUSDT', '2026-01-03 00:05:00', '2026-01-03 01:00:00', 1.0);
+        $check('bf_attribute_funding candidate outside the 60s tolerance -> null, not nearest-match', $farFunding, null);
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: synthetic Transaction History (bf_attribute_funding edge cases) threw: " . $e->getMessage() . "\n");
     }
 
     fwrite(STDOUT, "bitfunded_parser.php self-test: $pass passed, $fail failed\n");

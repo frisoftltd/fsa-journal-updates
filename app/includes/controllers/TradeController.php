@@ -165,6 +165,21 @@ class TradeController {
             jsonError('Stop loss and take profit are required before a trade can be saved.');
         }
 
+        // v3.17.3 — entry_price is optional (a trade logged before the fill lands has
+        // nothing to put here), but if something was entered it must be a real, positive
+        // number or the save is rejected outright — never silently coerced to 0 or left
+        // as whatever garbage was typed. This matters beyond normal data hygiene: a
+        // stored 0 would satisfy BitfundedImportController::matchAll()'s legacy
+        // "entry_price = 0" branch (built to tolerate a pre-v3.14.5 truncated price) and
+        // could match this row to the wrong imported position entirely. The client-side
+        // normalizeEntryPriceInput() (js/trades.js) already strips a trailing currency
+        // label before this ever arrives, but that's a UX nicety, not the guarantee — a
+        // direct API call bypasses it, so this check is the one that actually holds.
+        $entryPriceVal = trim((string)($d['entry_price'] ?? ''));
+        if ($entryPriceVal !== '' && (!is_numeric($entryPriceVal) || (float)$entryPriceVal <= 0)) {
+            jsonError('Entry price must be a positive number, or left blank until the fill lands.');
+        }
+
         // Handle multiple screenshots (up to 4, max 1MB each)
         $screenshotsJson = null;
         $singleScreenshot = null;
@@ -189,7 +204,14 @@ class TradeController {
         // into this form and rides through add/update the same way. count($cols) below
         // is what keeps the INSERT branch's placeholder math correct automatically as
         // this list grows — see the v3.16.2 fix for why that matters.
-        $cols = ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure','planned_margin'];
+        //
+        // v3.17.3 — entry_price joins too, reversing part of v3.14.0's execution-fields-
+        // never-belong-here rule (see the markup comment in trade-modal.php for the full
+        // reasoning: the importer's matcher has no way to find a manually-logged open
+        // trade without it). BitfundedImportController's own matched-row UPDATE always
+        // overwrites whatever's here with Bitfunded's real value once a match lands, so
+        // this is a provisional value, not a competing source of truth.
+        $cols = ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','emotion_tag','setup_grade','note_saw','note_why','note_unsure','planned_margin','entry_price'];
 
         // v3.16.2 — everything from here on touches the database on behalf of add_trade/
         // update_trade. Before this, an uncaught PDOException (e.g. the placeholder-count

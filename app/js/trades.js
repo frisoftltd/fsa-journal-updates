@@ -68,6 +68,13 @@ async function loadPairs() {
     });
 }
 
+// v3.17.3 §3 — "not closed" here matches the closed-trades-only convention used
+// everywhere else in this codebase (result IN ('Win','Loss','Break Even') = closed) —
+// NULL and the literal string 'Open' both count as still-open.
+function isOpenTrade(t){
+    return !['Win','Loss','Break Even'].includes(t.result);
+}
+
 function renderTradesTable(trades) {
     const tbody=document.getElementById('trades-tbody');
     if(!trades.length){tbody.innerHTML='<tr><td colspan="13" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';return;}
@@ -76,7 +83,7 @@ function renderTradesTable(trades) {
         <td><span class="badge" style="background:rgba(79,124,255,0.1);color:var(--blue2);font-size:10px">${t.session||'—'}</span></td>
         <td style="font-weight:600;color:var(--text)">${t.pair}</td>
         <td>${t.direction==='Long'?'<span class="badge badge-long">Long</span>':'<span class="badge badge-short">Short</span>'}</td>
-        <td style="font-family:var(--font-head);font-size:11px">${t.entry_price?parseFloat(t.entry_price).toFixed(2):'—'}</td>
+        <td style="font-family:var(--font-head);font-size:11px">${t.entry_price?parseFloat(t.entry_price).toFixed(2):(isOpenTrade(t)?`<span class="badge" style="background:rgba(245,158,11,0.15);color:var(--orange);font-size:9px;cursor:pointer" title="Add the fill price once Bitfunded shows it, so the importer can find this trade when it closes" onclick="editTrade(${t.id})">⚠ Add fill price</span>`:'—')}</td>
         <td style="font-family:var(--font-head);font-size:11px;color:var(--red2)">${t.stop_loss?parseFloat(t.stop_loss).toFixed(2):'—'}</td>
         <td style="font-family:var(--font-head);font-size:11px">${t.exit_price?parseFloat(t.exit_price).toFixed(2):'—'}</td>
         <td><span class="${pnlCls(t.pnl)}">${fmt(t.pnl)}</span></td>
@@ -290,6 +297,20 @@ function lightboxGoTo(idx) {
     renderLightbox();
 }
 
+// v3.17.3 — entry_price is meant to be pasted from Bitfunded ("0.34403 USDT",
+// "708.79USDT", any of the shapes bitfunded_parser.php already has to handle on the
+// import side), not typed, so this strips a trailing currency label rather than
+// rejecting the paste outright. Only ever trims/strips here — never coerces bad input to
+// 0 or silently accepts it; TradeController::saveTrade() is where a non-numeric or
+// non-positive leftover is actually rejected, since a client-side-only check can be
+// bypassed and a stored 0 would incorrectly satisfy the importer's legacy
+// "entry_price = 0" corruption-tolerance branch and match the wrong row.
+function normalizeEntryPriceInput(el){
+    let v = el.value;
+    v = v.trim().replace(/\s*[A-Za-z]{2,10}\s*$/, '').trim();
+    el.value = v;
+}
+
 // ── TRADE MODAL ─────────────────────────────────────────
 function openTradeModal(data=null) {
     // v3.17.1 — the STOP gate applies only to registering a NEW trade; editing an
@@ -321,7 +342,7 @@ function openTradeModal(data=null) {
     initJournalSections(data);
     renderExecutionSummary(data);
     if(data){
-        const fields=['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','planned_margin'];
+        const fields=['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','planned_margin','entry_price'];
         fields.forEach(k=>{ const el=document.getElementById('f-'+k); if(el&&data[k]!==null&&data[k]!==undefined) el.value=data[k]; });
         selectGrade(data.setup_grade||null);
         // Show existing screenshots
@@ -871,7 +892,7 @@ async function saveTrade() {
         // three-phase trade_journal below replaced them on the form (the columns still
         // exist for historical trades, just nothing writes to them anymore).
         const data = {};
-        ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','setup_grade','planned_margin'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
+        ['trade_date','session','pair','direction','stop_loss','take_profit','result','exec_score','notes','strategy_id','setup_grade','planned_margin','entry_price'].forEach(k=>{data[k]=document.getElementById('f-'+k)?.value||null;});
         data.trade_variables = collectTradeVariables();
         data.trade_journal = collectTradeJournal();
         if(id) {

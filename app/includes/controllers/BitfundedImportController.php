@@ -17,6 +17,15 @@
  * touches trade_variables, emotion_tag, setup_grade, the three note columns, stop_loss,
  * take_profit, strategy_id, screenshots, or a trade's id.
  *
+ * v3.17.3 adds `funding` (per-trade, via bf_attribute_funding() in bitfunded_parser.php)
+ * to that execution-field set — nullable, defaulting NULL not 0, never backfilled onto a
+ * row imported before this release. `net_pnl` becomes `pnl - fees - COALESCE(funding, 0)`
+ * going forward; every row imported before this release keeps its own already-correct
+ * `pnl - fees` value untouched. `challenges.funding_adjustment` (the challenge-level
+ * total, set below from `$funding['funding_total']`) is unrelated and unchanged by this —
+ * see CLAUDE.md v3.17.3 for why a per-trade figure and the challenge-level total are two
+ * separate, deliberately non-double-counted numbers.
+ *
  * v3.14.1 adds one narrow exception: for a MATCHED row only, if the existing trade
  * already has a stop_loss on file (set pre-entry, before this execution data ever
  * landed), r_multiple/risk_amount/r_multiple_source='recorded' are computed from that
@@ -53,16 +62,37 @@ class BitfundedImportController {
         $matches = $this->matchAll($challenge['id'], $positions);
         $counts = ['total' => 0, 'new' => 0, 'matched' => 0, 'attention' => 0];
         $rows = [];
+        // v3.17.3 §3 — Part 2's matchOpenRow() branch flags 'no_entry_price' whenever it
+        // resolved a row (matched or attention) against an open trade that has no
+        // entry_price on file. This is the exact failure mode from the v3.17.3 incident,
+        // so it's surfaced here as its own loud, explicit list — never left to the
+        // ordinary attention-card text alone, and never silent just because this
+        // particular pass happened to resolve to exactly one candidate.
+        $noEntryPriceWarnings = [];
         foreach ($positions as $i => $p) {
             $m = $matches[$i];
             $counts['total']++;
             $counts[$m['status']]++;
+            // v3.17.3 — same derivation confirm() will use if this row is actually
+            // imported (named 'position_funding' here, distinct from the top-level
+            // 'funding' key below, which is the whole parsed Transaction History result).
+            // Shown per row so the derived figure is visible and checkable before
+            // confirming, not only discoverable afterward on the trade itself.
+            $positionFunding = ($funding !== null && $m['status'] !== 'attention')
+                ? bf_attribute_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
+                : null;
             $rows[] = [
                 'line' => $p['line'], 'pair' => $p['pair'], 'direction' => $p['direction'],
                 'time_in' => $p['time_in'], 'entry_price' => $p['entry_price'], 'pnl' => $p['pnl'],
                 'fees' => $p['fees'], 'exit_reason' => $p['exit_reason'],
                 'status' => $m['status'], 'trade_id' => $m['trade_id'] ?? null, 'reason' => $m['reason'] ?? null,
+                'no_entry_price' => $m['no_entry_price'] ?? false,
+                'position_funding' => $positionFunding,
             ];
+            if ($m['no_entry_price'] ?? false) {
+                $noEntryPriceWarnings[] = "{$p['pair']} {$p['direction']} — open trade found with no entry price. " .
+                    "Add the fill price to that trade before importing, or this will be logged as a new trade.";
+            }
         }
 
         $reconciliation = $this->reconciliation($challenge, $positions, $matches, $funding, $d['manual_balance'] ?? null);
@@ -74,6 +104,7 @@ class BitfundedImportController {
             'rows' => $rows,
             'funding' => $funding,
             'reconciliation' => $reconciliation,
+            'no_entry_price_warnings' => $noEntryPriceWarnings,
         ]);
     }
 
@@ -93,15 +124,42 @@ class BitfundedImportController {
                 if ($m['status'] === 'attention') { $attention++; continue; }
 
                 $result = $p['pnl'] > 0 ? 'Win' : ($p['pnl'] < 0 ? 'Loss' : 'Break Even');
-                $net = round($p['pnl'] - $p['fees'], 4);
+                // v3.17.3 — $p['fees'] here is Position History's own combined Fee field
+                // ONLY, unchanged from before this release. Transaction History's
+                // 'Opening fee'/'Closing fee' rows (read into $funding['rows'] purely for
+                // the margin/funding derivation below) are never added to it — they're
+                // the same cost reported twice by Bitfunded at two different
+                // granularities, not two separate costs. Confirmed against a real paste:
+                // TRX's Opening fee (6.9769) + Closing fee (6.9404) = 13.9173, matching
+                // the card's own combined Fee (13.9175) to the same sub-cent rounding gap
+                // already documented elsewhere in this codebase (CLAUDE.md v3.13.2/
+                // v3.13.4) — not a discrepancy to reconcile, just confirmation this is the
+                // same money counted once, not a second cost to add in.
+                //
+                // $positionFunding is null whenever Transaction History wasn't
+                // pasted, or this specific position's Open/Close Position rows aren't in
+                // what was pasted (bf_attribute_funding()'s own null cases) — "unknown,"
+                // never a guessed 0, so trades.funding stores that same null rather than
+                // 0. The COALESCE-equivalent (?? 0.0) below is deliberate and scoped to
+                // exactly this arithmetic: it lets net_pnl fall back to the pre-v3.17.3
+                // pnl-minus-fees formula when funding is unknown, without ever writing a
+                // fabricated 0 onto the column itself. This is the same class of NULL
+                // handling as every other guard in this release — an unguarded NULL here
+                // would silently poison net_pnl into NULL for every row, the identical
+                // mechanism (just a different column) as the bug this whole release
+                // fixes.
+                $positionFunding = $funding !== null
+                    ? bf_attribute_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
+                    : null;
+                $net = round($p['pnl'] - $p['fees'] - ($positionFunding ?? 0.0), 4);
                 $exitReasonForDb = $p['exit_reason'] !== '' ? $p['exit_reason'] : null;
 
                 if ($m['status'] === 'matched') {
                     $sql = "UPDATE trades SET trade_date=?, time_in=?, time_out=?, entry_price=?, exit_price=?,
-                            lot_size=?, fees=?, pnl=?, net_pnl=?, result=?, exit_reason=?, source='import'";
+                            lot_size=?, fees=?, funding=?, pnl=?, net_pnl=?, result=?, exit_reason=?, source='import'";
                     $params = [
                         substr($p['time_in'], 0, 10), $p['time_in'], $p['time_out'], $p['entry_price'], $p['exit_price'],
-                        $p['lot_size'], $p['fees'], $p['pnl'], $net, $result, $exitReasonForDb,
+                        $p['lot_size'], $p['fees'], $positionFunding, $p['pnl'], $net, $result, $exitReasonForDb,
                     ];
 
                     // §5: R is measurable, not estimated, once a real stop_loss exists —
@@ -146,14 +204,14 @@ class BitfundedImportController {
                     $this->db->prepare(
                         "INSERT INTO trades
                             (user_id, challenge_id, trade_date, session, time_in, time_out, pair, direction,
-                             entry_price, stop_loss, take_profit, exit_price, lot_size, fees, pnl, net_pnl,
+                             entry_price, stop_loss, take_profit, exit_price, lot_size, fees, funding, pnl, net_pnl,
                              result, exit_reason, confidence, exec_score, fib_level, fsa_rules, notes,
                              strategy_id, emotion_tag, setup_grade, note_saw, note_why, note_unsure, source)
-                         VALUES (?,?,?,NULL,?,?,?,?, ?,NULL,NULL,?,?,?,?,?, ?,?,NULL,NULL,NULL,NULL,NULL, NULL,NULL,NULL,NULL,NULL,NULL, 'import')"
+                         VALUES (?,?,?,NULL,?,?,?,?, ?,NULL,NULL,?,?,?,?,?,?, ?,?,NULL,NULL,NULL,NULL,NULL, NULL,NULL,NULL,NULL,NULL,NULL, 'import')"
                     )->execute([
                         $this->uid, $challenge['id'], substr($p['time_in'], 0, 10), $p['time_in'], $p['time_out'],
                         $p['pair'], $p['direction'],
-                        $p['entry_price'], $p['exit_price'], $p['lot_size'], $p['fees'], $p['pnl'], $net,
+                        $p['entry_price'], $p['exit_price'], $p['lot_size'], $p['fees'], $positionFunding, $p['pnl'], $net,
                         $result, $exitReasonForDb,
                     ]);
                     $newTradeId = (int)$this->db->lastInsertId();
@@ -262,6 +320,17 @@ class BitfundedImportController {
      *   'attention' — more than one such candidate, or a near-match (same pair/direction/
      *                 time window, but entry_price or pnl doesn't fit) with zero exact
      *                 candidates. Nothing is written for these; the user decides.
+     *
+     * v3.17.3 — this branch above only ever considers a row that already HAS
+     * entry_price/pnl/time_in on file (a previously-imported or hand-closed trade). It
+     * can never see a manually-logged trade that's still open: entry_price, pnl, and
+     * time_in are all NULL on such a row (see CLAUDE.md v3.17.3 for the incident — a
+     * closed Bitfunded position inserted a duplicate instead of updating the existing
+     * open manual row, because every one of this branch's comparisons against those
+     * three columns evaluates to NULL, not TRUE, under SQL three-valued logic, and a
+     * NULL AND'd into a WHERE clause silently drops the row rather than erroring). Below,
+     * matchOpenRow() is the second branch that exists specifically to catch that case —
+     * see its own docblock for the NULL-guard reasoning in each of its conditions.
      */
     private function matchAll($challengeId, array $positions): array {
         $out = [];
@@ -270,6 +339,13 @@ class BitfundedImportController {
             $windowStart = date('Y-m-d H:i:s', $ts - self::MATCH_WINDOW_SECONDS);
             $windowEnd = date('Y-m-d H:i:s', $ts + self::MATCH_WINDOW_SECONDS);
 
+            // NULL guard #1 (of three total in this method — see the v3.17.3 doc note
+            // above): every one of entry_price/pnl/time_in in this query's WHERE clause
+            // silently excludes a row where that column is NULL, rather than matching or
+            // erroring. That's correct and intentional HERE — this branch is only meant
+            // to find a row that already carries real execution data — but it's exactly
+            // why a second branch below exists for the row shape this one structurally
+            // cannot see.
             $exact = $this->db->prepare(
                 "SELECT id, stop_loss FROM trades WHERE challenge_id=? AND pair=? AND direction=?
                  AND (entry_price = ? OR TRUNCATE(?, 2) = entry_price OR entry_price = 0)
@@ -296,6 +372,19 @@ class BitfundedImportController {
                 continue;
             }
 
+            $openMatch = $this->matchOpenRow($challengeId, $p);
+            if ($openMatch !== null) {
+                $out[] = $openMatch;
+                continue;
+            }
+
+            // Not a NULL guard fix in itself — this query still has the same blind spot
+            // (`entry_price<>?`/`pnl<>?` are both NULL, not TRUE, against a NULL column,
+            // so a no-execution-data row is invisible here too) — but it's a non-issue in
+            // practice now: matchOpenRow() above already catches every row this bug can
+            // reach before control ever gets here. Left as-is rather than patched, since
+            // patching a diagnostic-only query that's already unreachable for this case
+            // would be speculative, not a fix for anything currently broken.
             $near = $this->db->prepare(
                 "SELECT id, time_in, entry_price, pnl FROM trades WHERE challenge_id=? AND pair=? AND direction=?
                  AND time_in BETWEEN ? AND ? AND (entry_price<>? OR pnl<>?) LIMIT 1"
@@ -315,10 +404,132 @@ class BitfundedImportController {
     }
 
     /**
+     * v3.17.3 — second match branch, for a manually-logged open row with no execution
+     * data at all. Only ever called when matchAll()'s first branch found zero exact
+     * candidates, so there is no double-counting risk: a row with real entry_price/pnl
+     * on file would already have been found (or ruled ambiguous) above, and this branch's
+     * own result filter excludes anything already closed.
+     *
+     * Match key: challenge_id + pair + direction (exact), trade_date against the pasted
+     * position's own Opening Time date (same day, or ±1 day if same-day finds nothing —
+     * a late-night trade can straddle midnight), and — only when the candidate row
+     * actually has one — entry_price within 0.5% of the pasted price.
+     *
+     * Every condition below that touches a nullable column states which NULL guard it
+     * is, because this entire bug is the same mechanism appearing three times: a
+     * comparison against a NULL column evaluates to NULL, not TRUE or FALSE, and a NULL
+     * ANDed into a WHERE clause drops the row silently instead of matching, erroring, or
+     * even surfacing as 'attention' for a human to see.
+     *
+     * Returns matchAll()'s normal ['status' => ...] shape (with an added
+     * 'no_entry_price' flag so preview() can render Part 3's explicit warning), or null
+     * if this branch has nothing to report — the caller then falls through to the
+     * existing near-match/new logic unchanged.
+     */
+    private function matchOpenRow($challengeId, array $p): ?array {
+        $date = substr($p['time_in'], 0, 10);
+
+        // NULL guard #2: a bare "result NOT IN ('Win','Loss','Break Even')" returns
+        // NULL, not TRUE, when result itself is NULL — which is exactly what an
+        // untouched Result dropdown on the manual trade form submits (TradeController::
+        // saveTrade() normalizes an empty selection to NULL, not the literal string
+        // 'Open'). A plain NOT IN here would silently drop every never-touched manual
+        // row from this branch's own candidate set, recreating the identical bug one
+        // level down. The explicit "result IS NULL OR" is load-bearing, not defensive
+        // styling.
+        $sql = "SELECT id, stop_loss, entry_price FROM trades
+                WHERE challenge_id=? AND pair=? AND direction=?
+                AND (result IS NULL OR result NOT IN ('Win','Loss','Break Even'))
+                AND trade_date=?";
+        $s = $this->db->prepare($sql);
+        $s->execute([$challengeId, $p['pair'], $p['direction'], $date]);
+        $rows = $s->fetchAll();
+
+        if (!$rows) {
+            $sql2 = "SELECT id, stop_loss, entry_price FROM trades
+                     WHERE challenge_id=? AND pair=? AND direction=?
+                     AND (result IS NULL OR result NOT IN ('Win','Loss','Break Even'))
+                     AND trade_date BETWEEN DATE_SUB(?, INTERVAL 1 DAY) AND DATE_ADD(?, INTERVAL 1 DAY)";
+            $s2 = $this->db->prepare($sql2);
+            $s2->execute([$challengeId, $p['pair'], $p['direction'], $date, $date]);
+            $rows = $s2->fetchAll();
+        }
+
+        if (!$rows) return null;
+
+        // NULL guard #3: entry_price is compared in PHP, not SQL, specifically so a
+        // candidate whose entry_price IS NULL can still stay in the running (skip the
+        // condition entirely, per the brief) while a candidate whose entry_price is
+        // present but genuinely outside tolerance is disqualified outright — two
+        // different outcomes for two different reasons that a single SQL "OR entry_price
+        // IS NULL" clause would have collapsed into one.
+        $withPrice = [];
+        $withoutPrice = [];
+        foreach ($rows as $row) {
+            if ($row['entry_price'] === null) {
+                $withoutPrice[] = $row;
+                continue;
+            }
+            $stored = (float)$row['entry_price'];
+            if ($p['entry_price'] > 0 && abs($stored - $p['entry_price']) / $p['entry_price'] <= 0.005) {
+                $withPrice[] = $row;
+            }
+            // present but out of tolerance: disqualified, added to neither list.
+        }
+
+        // A real, checkable entry price beats "we don't know yet" — when at least one
+        // candidate's price actually matches, the NULL-entry candidates are dropped from
+        // consideration entirely rather than padding out an ambiguous set.
+        $usingPriceless = empty($withPrice);
+        $candidates = $usingPriceless ? $withoutPrice : $withPrice;
+
+        // Every row that reached here had a real entry_price but it fell outside
+        // tolerance -- $withoutPrice is empty too (nothing was NULL), so $candidates is
+        // empty. That's "no candidate survived," not "multiple candidates, ambiguous" --
+        // falling through to the caller's existing near-match/new logic (which can still
+        // flag this as "close in time but price doesn't fit") is correct here, not a
+        // silent drop: the row was considered and explicitly ruled out, not missed.
+        if (!$candidates) return null;
+
+        if (count($candidates) === 1) {
+            $c = $candidates[0];
+            return [
+                'status' => 'matched',
+                'trade_id' => (int)$c['id'],
+                'stop_loss' => $c['stop_loss'] !== null ? (float)$c['stop_loss'] : null,
+                'no_entry_price' => $usingPriceless,
+            ];
+        }
+
+        // More than one candidate — list every one, never take the first.
+        $ids = implode(', ', array_map(fn($c) => $c['id'], $candidates));
+        return [
+            'status' => 'attention',
+            'reason' => count($candidates) . " open trade(s) with no execution data on file (ids $ids) match this position on pair/direction/date alone" .
+                ($usingPriceless ? ', all missing an entry price' : '') . ' — cannot tell which one this is.',
+            'no_entry_price' => $usingPriceless,
+        ];
+    }
+
+    /**
      * §6: derived balance projected AFTER this import would apply (new + matched rows;
      * 'attention' rows are never written and are excluded), compared against Bitfunded's
      * own reported balance. Flags anything over $1 — sub-cent residuals are expected (see
      * CLAUDE.md v3.13.x: the journal stores P&L at 4 decimals, Bitfunded displays 2).
+     *
+     * v3.17.3 — Bitfunded's own reported `Balance` (Transaction History's latest row, or
+     * a manually entered figure) is the account's FREE wallet balance — it excludes
+     * whatever margin is currently locked in a still-open position. `$derived` has no
+     * such exclusion; it's every closed trade's realised P&L against `starting_balance`,
+     * which is closer to full account equity. Comparing the two directly, unadjusted,
+     * reports a false "mismatch" of roughly however much margin is locked right now —
+     * not a real discrepancy, a unit mismatch between two different balance concepts.
+     * Corrected by adding the sum of open positions' `planned_margin` back onto the
+     * reported free balance before comparing, putting both sides on the same basis.
+     * `planned_margin` is the only figure this codebase has for what's actually locked;
+     * if even one open position's is unknown (`NULL`), the correction itself would be
+     * wrong, so the comparison is marked unavailable rather than silently showing a
+     * partially-corrected number that could still look like a real flagged mismatch.
      */
     private function reconciliation($challenge, array $positions, array $matches, $funding, $manualBalance) {
         $matchedIds = [];
@@ -334,6 +545,16 @@ class BitfundedImportController {
         }
         $baseSum = (float)$s->fetchColumn();
 
+        // v3.17.3 — deliberately NOT subtracting per-position funding here, even though
+        // confirm()'s actual written net_pnl does. $fundingAdj below already subtracts
+        // the whole pasted Transaction History's funding_total from $derived — the same
+        // funding a position being imported right now would also be attributed via
+        // bf_attribute_funding(). Also subtracting it here would double-count it: once
+        // per-position in $importedSum, once again for the whole paste via $fundingAdj.
+        // This mirrors the ticket's own scope boundary verbatim ("don't double-count: if
+        // per-trade funding starts feeding equity, that's a separate decision, not part
+        // of this ticket") — the reconciliation preview's arithmetic is intentionally
+        // unchanged by Part 6; only the stored per-trade net_pnl is funding-aware.
         $importedSum = 0.0;
         foreach ($positions as $i => $p) {
             if ($matches[$i]['status'] === 'attention') continue;
@@ -347,11 +568,27 @@ class BitfundedImportController {
         if ($funding !== null && $funding['latest_balance'] !== null) $bitfundedBalance = (float)$funding['latest_balance'];
         elseif ($manualBalance !== null && $manualBalance !== '') $bitfundedBalance = (float)$manualBalance;
 
-        $difference = $bitfundedBalance !== null ? round($derived - $bitfundedBalance, 4) : null;
+        $om = $this->db->prepare("SELECT COUNT(*) AS n, SUM(planned_margin IS NULL) AS null_count, COALESCE(SUM(planned_margin),0) AS margin_sum FROM trades WHERE challenge_id=? AND result='Open'");
+        $om->execute([$challenge['id']]);
+        $omRow = $om->fetch();
+        $openCount = (int)$omRow['n'];
+        $openMarginKnown = $openCount === 0 || (int)$omRow['null_count'] === 0;
+        $openMarginSum = round((float)$omRow['margin_sum'], 4);
+
+        $comparisonUnavailable = $bitfundedBalance !== null && !$openMarginKnown;
+
+        $difference = null;
+        if ($bitfundedBalance !== null && !$comparisonUnavailable) {
+            $adjustedBitfundedBalance = $bitfundedBalance + $openMarginSum;
+            $difference = round($derived - $adjustedBitfundedBalance, 4);
+        }
 
         return [
             'derived_balance' => $derived,
             'bitfunded_balance' => $bitfundedBalance,
+            'open_positions_count' => $openCount,
+            'open_margin' => $openMarginKnown ? $openMarginSum : null,
+            'comparison_unavailable' => $comparisonUnavailable,
             'difference' => $difference,
             'flagged' => $difference !== null && abs($difference) > 1.0,
         ];

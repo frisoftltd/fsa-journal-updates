@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.17.3 |
+| Current Version | v3.18.0 |
 
 ### Tech Stack
 
@@ -467,6 +467,33 @@ user_id, log_date, daily_pnl, trades_count
 **schema_migrations** (added v3.7.0 — see §3A)
 ```sql
 id, filename, checksum, applied_at, execution_ms, status (applied/failed/baselined), error_message
+```
+
+**report_cards / report_card_blocks / report_card_templates / report_card_template_blocks /
+report_card_mantras / report_card_mantra_checks / report_card_tickers /
+report_card_ticker_images / report_card_ai_reviews / report_card_ai_findings** (added
+v3.18.0 — see that section below for full column lists, the AI review payload/tool
+schema, and every judgment call made building this module)
+```sql
+-- one row per user+challenge+date; challenge_id NOT NULL DEFAULT 0 ("no challenge
+-- selected"), no FK on that column (see the migration file's own header for why)
+report_cards: id, user_id, challenge_id, card_date, overall_grade, pnl, pnl_auto,
+  morning_temperature, sleep_quality, primary_goal, learned, changes_needed,
+  easiest_money_trade, overview, wins, status (draft/complete)
+report_card_blocks: id, card_id, sort_order, label, start_utc, end_utc, market_session,
+  grade, playbook_only, sizing, in_my_favor, comments
+report_card_templates: id, user_id, name, is_default, weekday_default
+report_card_template_blocks: id, template_id, sort_order, label, start_utc, end_utc, market_session
+report_card_mantras: id, user_id, text, sort_order, is_active
+report_card_mantra_checks: card_id, mantra_id, checked_at
+report_card_tickers: id, card_id, sort_order, ticker, pnl, trade_analysis, chart_notes, trade_id
+report_card_ticker_images: id, ticker_id, file_path, sort_order
+report_card_ai_reviews: id, user_id, card_id, scope (daily/weekly/monthly), period_start,
+  period_end, status (pending/running/complete/failed), model, prompt_version,
+  input_payload (JSON), output_payload (JSON), alignment_score, discipline_score, summary,
+  one_change, suggested_goal, input_tokens, output_tokens, error_message
+report_card_ai_findings: id, review_id, type (contradiction/behavior_pattern/
+  thinking_pattern/strength/risk), severity, title, detail, evidence (JSON), acknowledged
 ```
 
 ### Data Relationships
@@ -2845,6 +2872,156 @@ synthetic edge cases exercising exactly the four tightenings above: sign-not-cla
 same timestamp (`null`), and a real candidate that exists but sits outside the 60s
 tolerance (`null`, not matched as "nearest available"). All 63 pass.
 
+### v3.18.0: Daily Report Card — a New Module, Built From a Standalone Build Briefing
+
+This release is a full new module (Daily Report Card + AI Review), built from a build
+briefing rather than a bug/fix ticket. It's the first module in this codebase with its
+own ten-table schema, its own sidebar entry, and its own Anthropic API integration — the
+first time this app calls out to an LLM at all. Several parts of the briefing didn't map
+cleanly onto this app's actual architecture (no "accounts" table, no client-side router,
+no job queue on Namecheap shared hosting), so this section documents every judgment call
+made reconciling the two, the same discipline this file applies to every other release.
+
+#### Judgment calls, and why
+
+1. **"account_id" -> "challenge_id."** The briefing's schema is written generically
+   ("per user, per account") for an app this codebase isn't — this schema's real
+   per-user trading-account concept is a `challenge` (see §3's Challenge Scoping Rule).
+   `report_cards.challenge_id` keeps the briefing's exact design (`NOT NULL DEFAULT 0`,
+   no foreign key — MySQL treats `NULL` as distinct in a unique index, so a nullable
+   column would let the same user/date collide across challenges, and `0` is a real,
+   permanent sentinel that an `AUTO_INCREMENT` `challenges.id` will never legitimately
+   contain).
+2. **`utf8mb4_unicode_ci` -> `utf8mb4_general_ci`.** Every existing table in this schema
+   uses `general_ci` (§3A's own migration checklist says so explicitly, after
+   `2026_09_15_0001` shipped without it and needed a follow-up fix). Matched the
+   established convention over the briefing's literal collation.
+3. **No per-user timezone exists anywhere in this schema.** `users.timezone` was only
+   ever a §14 wishlist column, never actually migrated (confirmed by grep before writing
+   any code, not assumed). The briefing itself names CAT (UTC+2) as the trader's zone, so
+   `ReportCardController::REPORT_CARD_TZ` is a fixed `'Africa/Kigali'` constant, not a
+   per-user preference. **This is a real, flagged gap** — if this app ever onboards a
+   trader in a different zone, session-block times will display and edit in the wrong
+   local hours for them until this becomes a real per-user setting.
+4. **No client-side router exists to serve `/report-card/{date}`-style routes.**
+   `index.php`'s `showPage()` only ever toggles which `.page` element is visible by id —
+   there is no `pushState` or route-matching anywhere in this app. Implemented as one
+   sidebar page (`pages/reportcard.php`, nav id `reportcard`) with three internal views
+   (Card / History / Templates) switched by `js/report-card.js::showRcView()`, the same
+   "one page per sidebar item" shape every other page in this app already uses. Building
+   a real router was a much bigger architectural change than this briefing scoped.
+5. **The trade-count guard reads `challenge_limits`, not a hardcoded 2/day-4/week.** The
+   briefing's own §5 names "max 2/day, 4/week" as if it were a fixed rule, but this app's
+   own v3.17.0 release already generalized exactly this into `challenge_limits`
+   (`tradeLimitStatus()`, shared with the Auto Risk Calculator's status strip) specifically
+   so a limit is never hardcoded twice. Reused rather than reintroducing the hardcode this
+   codebase already fixed once.
+6. **"Run as a background job... never block the page request" (§7.3) is approximated,
+   not real.** This hosting has no queue/worker infrastructure (Namecheap shared cPanel,
+   no frameworks — §1). `ReportCardAiController::runFor()` still writes the
+   `pending -> running -> complete/failed` states the schema expects, but all of it
+   happens synchronously inside one request — there is no concurrency to speak of. The
+   "optional nightly job" and "weekly review on a schedule" pieces are
+   `report_card_cron.php`, a standalone token-protected entry point at the site root
+   (identical pattern to `migrate.php`), meant to be hit by a **cPanel Cron Job** — the
+   only real scheduling primitive this hosting offers. Suggested crontab lines are in
+   that file's own header comment.
+7. **Gate score / "15m trigger" aren't fixed columns.** The briefing's §7.1 behaviour
+   list names these as if they were specific trade fields, but this schema's strategy
+   checklists are user/strategy-defined (`strategy_variables`, see the Strategy Lab) —
+   there is no universal "gate score 1-5" column, and assuming one exists would silently
+   break for any trader whose strategy doesn't happen to have a variable with that exact
+   label. The AI payload instead includes each trade's full `strategy_variables`
+   label->value map, generically, so the model judges against whatever the trader's own
+   checklist actually is.
+8. **Streak semantics (§2, "don't break the chain") aren't specified exactly.**
+   `ReportCardController::computeStreak()` walks backward from today, but starts from
+   yesterday instead if today's own card isn't `complete` yet — otherwise a trading day
+   still in progress would zero out an otherwise-intact streak every single afternoon.
+   Not a quoted spec; a reasonable interpretation, documented as the judgment call it is.
+9. **"Light day" template's Review block has no stated time** in the briefing's own
+   §4.2 table (just "Single window 14:00-16:00 . Review") — placed immediately after the
+   window (14:00-14:30 CAT) rather than left unspecified.
+
+#### AI Review mechanics
+
+`ReportCardAiController::callAnthropic()` uses a **forced tool call**
+(`tool_choice: {type:"tool", name:"submit_review"}`) rather than asking the model to
+emit JSON in prose and hoping it parses — the tool's `input_schema` encodes exactly
+§7.2's required shape (`alignment_score`, `discipline_score`,
+`contradictions`/`behavior_patterns`/`thinking_patterns`/`strengths`/`risks` each with
+cited evidence, `summary`, `one_change`, `suggested_goal`, `repeat_of`), so there is no
+manual "attempt to extract a JSON blob from free text" step that could silently fail on
+a slightly-off response. The model is `claude-sonnet-5` by default
+(`ReportCardAiController::MODEL`, overridable via a `REPORT_CARD_AI_MODEL` constant in
+`config.php` without a code change), and both `model` and `prompt_version` are written
+onto every `report_card_ai_reviews` row so old reviews stay interpretable if the prompt
+or model ever changes later (the exact same reasoning §7.3 itself gives).
+
+**Requires `ANTHROPIC_API_KEY` defined in `includes/config.php`** — never committed to
+this repo, same as every other secret (§13 rule 4, same file `MIGRATE_TOKEN` already
+lives in). Without it, `callAnthropic()` fails loudly with a clear `error_message` and
+`status='failed'`; it never silently no-ops or fakes a response. `report_card_cron.php`
+similarly needs its own `REPORT_CARD_CRON_TOKEN` constant, checked with `hash_equals()`
+the same way `migrate.php` checks `MIGRATE_TOKEN`.
+
+**Payload builder (`ReportCardAiController::buildPayload()`)** assembles behaviour
+(trades: pair/direction/times, session, the block they fell in or "unassigned", risk
+sizing vs. the ladder, target R, realised R and its `recorded`/`estimated` provenance,
+exit reason/quality, time since the previous trade, whether it followed a loss, and the
+trade's own `strategy_variables` map) and thinking (every card field, per-block
+grade/playbook/sizing/comments, mantras checked) into one payload, plus context (the
+last 5 cards' `one_change` and up to 20 recent unacknowledged findings) — exactly §7.1's
+three sections, built from a single query pass over `report_cards`/`report_card_blocks`
+per day in the period rather than one query per card, since a weekly review spans 7 of
+them.
+
+**Findings explosion** (`explodeFindings()`) maps the tool response's five arrays
+directly onto `report_card_ai_findings.type`, defaulting `strengths` to `severity='low'`
+(everything else defaults to `'medium'` if the model omits it) and storing whatever
+`evidence` object the model provided as-is in the `JSON` column — this table is what
+makes the module compound across months (§ intro), so nothing here reshapes or drops the
+model's own evidence structure.
+
+#### What a card actually is, end to end
+
+`ReportCardController::findOrCreateCard()` is the one place a card comes into
+existence: on first `get_report_card` for a given (user, active-challenge, date), it
+seeds this user's five reference templates if they have none yet (`report_card_templates
+.user_id` is `NOT NULL`, so a migration literally cannot seed rows for users that don't
+exist yet — this can only happen lazily, in PHP, the first time a template list is
+needed), picks a template by weekday match then `is_default` then blank, and copies that
+template's blocks into `report_card_blocks` once. Every subsequent load of that date
+just reads the existing row — editing the day never touches the template, and editing
+the template (`updateTemplate()`) never touches a card that already copied its blocks,
+satisfying the build briefing's own acceptance criteria ("deleting a template alters no
+existing card") by construction, not by a special-case check.
+
+**Trade attribution and P&L autofill are both computed live, never stored** — the same
+"derive, don't store" principle `enrichChallenge()` already established for
+`challenges.current_balance` (§3, v3.13.0): a block's UTC window is
+`[card_date + start_utc, card_date + end_utc)`, pushed a day forward on the end if
+`end_utc <= start_utc` (midnight-crossing, build briefing rule 8), and every trade whose
+`time_in` falls in zero block windows is surfaced under Unassigned rather than dropped —
+per the briefing, that absence is itself the signal of unplanned trading, not a gap to
+hide. `pnl_auto` is a live `SUM(net_pnl)` over the same date+challenge, shown next to the
+manual `pnl` override, never the two conflated into one column.
+
+#### Not attempted in v3.18.0
+
+- **Per-user timezones** — see judgment call 3 above.
+- **A real background job queue** — see judgment call 6 above; `report_card_cron.php`
+  is the pragmatic substitute this hosting actually supports.
+- **Monthly AI reviews** — the schema's `scope` enum already includes `'monthly'` and
+  `ReportCardAiController::runFor()` takes `scope` as a plain parameter, so adding a
+  monthly cron mode is a small follow-up, not a schema change; not wired into
+  `report_card_cron.php` in this release since the briefing's own §7.3 only asked for
+  daily (manual) and weekly (scheduled).
+- **A findings-over-time chart beyond the single alignment-score line** on the History
+  view (§7.4 asks for "a findings-over-time chart" generally) — the alignment-score line
+  chart ships; breaking findings down by type/severity over time is a reasonable
+  follow-up once there's enough real review history to make such a chart meaningful.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -2985,6 +3162,22 @@ const resp = await fetch('includes/api.php?action=add_trade', { method: 'POST', 
 | `delete_strategy_trade` | POST | StrategyController | Delete strategy test |
 | `get_reviews` | GET | ReviewController | List weekly reviews |
 | `save_review` | POST | ReviewController | Create/update review |
+| `get_report_card` | GET | ReportCardController | Get/create the card for a date (default today) |
+| `save_report_card` | POST | ReportCardController | Save header/free-text fields |
+| `get_report_card_history` | GET | ReportCardController | History list + streak |
+| `add_report_card_block` / `update_report_card_block` / `delete_report_card_block` | POST | ReportCardController | Session block CRUD |
+| `reorder_report_card_blocks` | POST | ReportCardController | Persist drag-reorder |
+| `get_report_card_templates` / `add_report_card_template` / `update_report_card_template` / `delete_report_card_template` | GET/POST | ReportCardController | Template CRUD (§4.2 seed templates lazy-seeded on first `get_report_card_templates` call per user) |
+| `apply_report_card_template` | POST | ReportCardController | Replace a card's blocks with a template's |
+| `save_report_card_blocks_as_template` | POST | ReportCardController | "Save these blocks as a template" |
+| `get_report_card_mantras` / `add_report_card_mantra` / `update_report_card_mantra` / `delete_report_card_mantra` | GET/POST | ReportCardController | Standing mantra CRUD |
+| `toggle_report_card_mantra_check` | POST | ReportCardController | Per-card daily check-off |
+| `add_report_card_ticker` / `update_report_card_ticker` / `delete_report_card_ticker` | POST | ReportCardController | Ticker row CRUD |
+| `upload_report_card_ticker_image` / `delete_report_card_ticker_image` | POST | ReportCardController | Ticker chart images |
+| `run_ai_review` | POST | ReportCardAiController | Daily AI review — card must be `status='complete'` |
+| `run_weekly_ai_review` | POST | ReportCardAiController | Weekly AI review over the last 7 cards |
+| `get_ai_reviews` / `get_ai_review` | GET | ReportCardAiController | List / single review + findings |
+| `acknowledge_ai_finding` | POST | ReportCardAiController | Mark a finding acknowledged |
 
 ---
 
@@ -3915,7 +4108,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.11.1
+Current Version: v3.18.0
 DB: theittav_journal on Namecheap shared hosting
 CLAUDE.md is in the repo root — read it for full context.
 

@@ -55,11 +55,12 @@ function showPage(id) {
     if(pg) pg.classList.add('active');
     const lnk = document.querySelector(`[data-page="${id}"]`);
     if(lnk) lnk.classList.add('active');
-    const titles={dashboard:'Dashboard',trades:'Trade Log',stats:'Statistics',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges',bfimport:'Import'};
+    const titles={dashboard:'Dashboard',trades:'Trade Log',reportcard:'Report Card',stats:'Statistics',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges',bfimport:'Import'};
     document.querySelector('.topbar h2').textContent = titles[id]||id;
     document.querySelector('.sidebar').classList.remove('open');
     if(id==='dashboard') loadDashboard();
     if(id==='trades') { loadPairs(); loadTrades(); }
+    if(id==='reportcard') loadReportCard();
     if(id==='stats') loadStats();
     if(id==='review') loadReviewEngine();
     if(id==='strategy') loadStrategyTrades();
@@ -89,4 +90,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
     // not just Trades, so its STOP gate needs an initial check here rather than only ever
     // running from loadTrades(). refreshNewTradeGate() lives in js/trades.js.
     refreshNewTradeGate();
+    // v3.18.0 — the sidebar's Report Card dot badge (draft after 20:00 local) needs an
+    // initial check here too, same reasoning as refreshNewTradeGate() above: it's visible
+    // from every page, not just when Report Card itself is open. Lives in js/report-card.js.
+    refreshReportCardDot();
 });

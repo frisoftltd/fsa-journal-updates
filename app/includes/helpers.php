@@ -404,6 +404,21 @@ function computeTradeRiskFields(PDO $db, int $tradeId): array {
     return $out;
 }
 
+/**
+ * Report Card (v3.18.0) — [startUtcDateTime, endUtcDateTime) for a session block on
+ * $date. Handles midnight-crossing (build briefing §4.1 rule 8): end <= start means the
+ * block's end belongs to the next calendar day, not a zero/negative-length window.
+ * Shared by ReportCardController (single-day card view) and ReportCardAiController
+ * (multi-day AI review payload) — one definition of "which UTC instant does this block
+ * actually span," not two copies that could drift.
+ */
+function reportCardBlockWindow(string $date, string $startUtc, string $endUtc): array {
+    $start = new DateTime("$date $startUtc", new DateTimeZone('UTC'));
+    $end = new DateTime("$date $endUtc", new DateTimeZone('UTC'));
+    if ($end <= $start) $end->modify('+1 day');
+    return [$start, $end];
+}
+
 /** Writes computeTradeRiskFields()'s output onto the row. Separate from the compute step so a caller can inspect the values (e.g. for a response) before/without persisting, though every current caller persists immediately. */
 function persistTradeRiskFields(PDO $db, int $tradeId, array $fields): void {
     $db->prepare(

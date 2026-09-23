@@ -1,23 +1,28 @@
 {
-    "current_version": "3.17.3",
-    "release_date": "2026-09-22",
+    "current_version": "3.18.0",
+    "release_date": "2026-09-23",
     "changelog": [
-        "Fix: importing a closed Bitfunded position could insert a duplicate trade instead of updating an existing open manual row, because entry_price/pnl/time_in are all NULL on a never-matched manual row and every condition in the match query silently excludes a NULL column under SQL three-valued logic rather than matching or erroring. New BitfundedImportController::matchOpenRow() second match branch finds such a row by pair+direction+trade_date (+-1 day fallback) and, only when present, entry_price within 0.5% -- routes to the existing (confirmed-safe) update path, which never touches notes/emotions/gate tags/session/SL/screenshots",
-        "Add: entry_price returns to the manual trade form (Outcome section) as an optional, paste-friendly field -- normalizeEntryPriceInput() strips a trailing currency label client-side; TradeController::saveTrade() rejects a non-numeric or non-positive value outright rather than silently storing 0 or garbage (a stored 0 would satisfy the importer's own legacy corruption-tolerance branch and match the wrong row)",
-        "Add: an amber 'Add fill price' badge on any open Trade Log row with entry_price IS NULL, and a loud, explicit preview warning ('{pair} {direction} -- open trade found with no entry price...') whenever an import resolves against such a row, matched or ambiguous -- never silently falls through to 'new'",
-        "Fix: BitfundedImportController::reconciliation() reported a false balance mismatch of roughly the locked margin whenever positions were open, because Bitfunded's reported balance excludes open-position margin while the derived balance doesn't. Now adds open positions' planned_margin back before comparing, or reports comparison_unavailable instead of a false flagged mismatch when that margin isn't fully known",
-        "Add: trades.funding (nullable, un-backfilled) -- per-trade funding cost derived from Transaction History's real Open Position/Close Position rows (bf_attribute_funding() in bitfunded_parser.php: open_margin - returned_margin + pnl, isolated margin only, verified against real data to the cent). Exact-timestamp match first, +-60s fallback, never 'nearest' beyond that, never a pick among ambiguous candidates -- an unbounded nearest-in-time search would confidently attribute the wrong position's margin event. Not sign-clamped: funding can reduce a trader's cost (paid to hold), and net_pnl (= pnl - fees - COALESCE(funding,0)) can increase from it. No existing rows backfilled or recomputed; challenges.funding_adjustment and the reconciliation preview's own arithmetic are deliberately unchanged, to avoid double-counting the same funding at both the per-trade and challenge-level layers",
-        "Verify: bitfunded_parser.php's Transaction History self-test rebuilt from a verbatim real paste (the previous fixture's 'Realized PnL' Type does not exist in real data) -- 63 assertions, including the real TRX/BNB funding derivation and four synthetic edge cases for the match-tightening rules above"
+        "Add: Daily Report Card module — a new sidebar page for the pre-market plan / post-market review workflow, per build briefing. Header (date, process-based overall grade, manual + auto P&L, morning temperature, sleep quality), one enforced primary process goal, standing mantras checked off daily, five free-text sections, and repeatable ticker rows with chart image uploads. Ten new tables (migrations/2026_09_23_0001_create_report_card_tables.sql): report_cards, report_card_blocks, report_card_templates(+blocks), report_card_mantras(+checks), report_card_tickers(+images), report_card_ai_reviews, report_card_ai_findings",
+        "Add: dynamic per-day session blocks (ReportCardController.php) — not the reference card's fixed US-equity blocks. Full CRUD, drag-reorder, 0-12 blocks per day, overlaps allowed (non-blocking warning), midnight-crossing blocks valid. Blocks are copied from a template into a card once at creation (weekday_default match -> user's is_default -> blank day) and never referenced again — editing a template never rewrites a past card, editing a day never rewrites the template. Five seed templates (Full day/London only/NY only/Light day/No-trade day) lazy-seeded per user on first use, since report_card_templates.user_id is NOT NULL and a migration can't seed rows for users that don't exist yet",
+        "Add: journal integration — a trade is attributed to whichever block's UTC window its time_in falls inside (or to an explicit Unassigned bucket, which is itself the signal of unplanned trading); pnl_auto is a live SUM(net_pnl) of the day's closed trades, never stored, shown alongside the manual pnl override; a trade-count guard reads the existing challenge_limits table (tradeLimitStatus(), shared with the Auto Risk Calculator) rather than hardcoding a 2/day-4/week limit",
+        "Add: AI Review (ReportCardAiController.php) — one Anthropic Messages API call per review sees behaviour (trades: risk sizing, R, exit quality, gate/tag strategy-variable answers, time gaps, block attribution) and thinking (the card's own text/grades) in the same payload, with a forced tool call guaranteeing structured JSON back. Produces alignment_score, discipline_score, and named contradictions/behavior_patterns/thinking_patterns/strengths/risks, each with cited evidence, exploded into report_card_ai_findings (queryable across months, so a repeated mistake becomes a fact, not a feeling). Re-running a review always inserts a new row; a failed run leaves status=failed with error_message and the card still renders",
+        "Add: report_card_cron.php — token-protected entry point (same pattern as migrate.php) for the nightly/weekly AI review runs, meant to be hit by a cPanel Cron Job; this hosting has no queue infrastructure for a real background worker",
+        "Add: History view (streak, alignment-score-over-time chart, per-day table) and Templates view (manage session templates and their blocks) as internal tabs on the same Report Card page — this app has no client-side URL router (index.php's showPage() only swaps page visibility, no pushState), so the briefing's /report-card/{date}-style routes are implemented as view state on one sidebar page instead of separate routes"
     ],
     "files": [
-        {"path": "migrations/2026_09_22_0001_add_trades_funding.sql", "critical": false},
-        {"path": "includes/bitfunded_parser.php", "critical": false},
-        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
-        {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "modals/trade-modal.php", "critical": false},
-        {"path": "pages/bfimport.php", "critical": false},
-        {"path": "js/trades.js", "critical": false},
-        {"path": "js/bfimport.js", "critical": false}
+        {"path": "migrations/2026_09_23_0001_create_report_card_tables.sql", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "includes/helpers.php", "critical": false},
+        {"path": "includes/controllers/ReportCardController.php", "critical": false},
+        {"path": "includes/controllers/ReportCardAiController.php", "critical": false},
+        {"path": "report_card_cron.php", "critical": false},
+        {"path": "index.php", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "js/report-card.js", "critical": false},
+        {"path": "css/style.css", "critical": false},
+        {"path": "pages/reportcard.php", "critical": false},
+        {"path": "modals/report-card-block-modal.php", "critical": false},
+        {"path": "modals/report-card-template-modal.php", "critical": false}
     ],
     "db_migrations": []
 }

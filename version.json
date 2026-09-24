@@ -1,20 +1,15 @@
 {
-    "current_version": "3.19.2",
+    "current_version": "3.19.3",
     "release_date": "2026-09-24",
     "changelog": [
-        "Fix: Chart page layout — removed the dead space above/below the chart and made it fill from directly under the controls bar to the bottom of the viewport (flex-based, no hardcoded pixel height), with no page-level scrollbar while the chart is open. Scoped entirely to a new body.chart-active class (set in js/app.js::showPage()) — every other page's layout is unchanged.",
-        "Change: the chart's controls bar is now a compact, dark bar (roughly half its old height) matching the chart's own theme instead of the light card style used elsewhere in the app — inline controls, no vertical label stacking, the \"Data from ...\" note right-aligned and muted.",
-        "Change: the page header (title + Trade/PDF buttons) switches to the chart's dark theme only while the chart page is open — every other page keeps its current light header.",
-        "Add: collapsible sidebar, app-wide — a toggle collapses it to an icon-only rail (WordPress-admin style), with each item's label shown as a hover tooltip while collapsed. Persisted in localStorage and restored before first paint (no flash-of-uncollapsed-sidebar on load). Disabled below 900px, where the sidebar is already a mobile overlay drawer, not a rail.",
-        "Fix: the chart now explicitly calls resize() (not just Lightweight Charts' own autoSize) on the sidebar's own transitionend (width) and on window resize, so collapsing/expanding the sidebar or resizing the window doesn't leave the canvas stretched or squashed."
+        "Fix: the backfill/update/repair paginator silently dropped exactly one candle at every 1000-candle page boundary (e.g. ETHUSDT 4H: a page ending 2024-05-25 16:00 UTC, then a reported gap at 2024-05-25 20:00 UTC — the very next candle). Cause: the page window was built as an inclusive [cursor, cursor + 1000*interval] range — 1001 candle slots — requested with limit=1000. Bybit's start/end are both inclusive, so a window meant to hold exactly `limit` candles has to span `limit - 1` steps, not `limit` steps; the one-slot overshoot forced a candle to be dropped from the window's own start every time a page was actually full, which is always the very next candle after the previous page's last stored one. Fixed in includes/bybit_client.php::backtestSyncForward() -- interval-aware for all four timeframes (15m/1H/4H/1D) via the existing backtestTimeframeStepMs() lookup, not a per-timeframe hardcode.",
+        "Found and fixed the identical fencepost in backtestFindEarliestOpenTime() (the earliest-candle probe backfill.php runs on a symbol+timeframe's very first backfill) -- same formula, same defect, checked proactively while tracking down the reported bug rather than assuming it was isolated to the one call site named in the report.",
+        "repair.php needed no changes -- it calls the same now-fixed backtestSyncForward(), so once redeployed it will correctly refetch and fill every gap this bug already created on live, going forward from whatever backfill/update has stored so far.",
+        "Added a self-test (php includes/bybit_client.php -- same standalone-CLI convention as bitfunded_parser.php's own self-test) simulating a Bybit-like data source and a multi-page fetch shaped exactly like the real pagination loop, asserting the union of pages contains every expected open_time with no gap at any seam. Includes a sanity assertion that the OLD (buggy) window formula demonstrably does drop candles against the same synthetic data, confirming this test actually exercises the bug class fixed here rather than passing regardless of the formula."
     ],
-    "release_notes": "UI/layout only — no database changes, no migration involved. Nothing here touches migrations/2026_09_24_0002_create_backtesting_tables.sql, still pending from v3.19.0 (run migrate.php?mode=run after Update Now if you haven't already).",
+    "release_notes": "Redeploy includes/bybit_client.php, then re-run php cli/repair.php over SSH to fill every gap this bug already created in whatever's been backfilled/updated so far on live. No database schema change; migrations/2026_09_24_0002_create_backtesting_tables.sql from v3.19.0 is unrelated and untouched by this release.",
     "files": [
-        {"path": "css/style.css", "critical": false},
-        {"path": "index.php", "critical": false},
-        {"path": "js/app.js", "critical": false},
-        {"path": "js/chart.js", "critical": false},
-        {"path": "pages/chart.php", "critical": false}
+        {"path": "includes/bybit_client.php", "critical": false}
     ],
     "db_migrations": []
 }

@@ -248,7 +248,17 @@ function bybitFetchKlines(string $symbol, string $timeframe, int $startMs, int $
  */
 function backtestSyncForward(PDO $db, string $symbol, string $timeframe, int $cursorMs, int $untilMs, int $nowMs, callable $log): int {
     $stepMs = backtestTimeframeStepMs($timeframe);
-    $pageWindowMs = $stepMs * 1000;
+    // v3.19.3 fix: this was `$stepMs * 1000`, an inclusive [cursorMs, cursorMs +
+    // 1000*stepMs] window spanning 1001 candle slots (cursorMs, cursorMs+step, ...,
+    // cursorMs+1000*step) requested with limit=1000. Bybit's start/end are both
+    // inclusive, so a window meant to hold exactly `limit` candles has to span
+    // `limit - 1` steps, not `limit` steps -- the one-slot overshoot forced Bybit to
+    // drop a candle to fit the limit every time a page was actually full, and it
+    // dropped it from the window's own start: the candle at exactly `cursorMs` itself,
+    // which is always the very next candle after the previous page's last stored one
+    // (cursorMs is set to lastOpenTime + stepMs below). That's exactly the reported
+    // symptom -- a single-candle gap landing precisely at every page boundary.
+    $pageWindowMs = $stepMs * 999;
     $total = 0;
 
     while ($cursorMs < $untilMs) {
@@ -373,8 +383,20 @@ function backtestUpdateSyncState(PDO $db, string $symbol, string $timeframe, ?in
  * caller treats that as "nothing to backfill yet," not an error.
  */
 function backtestFindEarliestOpenTime(string $symbol, string $timeframe, int $probeFromMs, int $nowMs, ?callable $log = null): ?int {
+    // v3.19.3 fix: same fencepost error as backtestSyncForward() (see its own comment)
+    // -- an inclusive [cursor, cursor + 1000*stepMs] window is 1001 candle slots for a
+    // limit=1000 request. Found and fixed proactively while tracking down the reported
+    // page-boundary gaps: this function shares the identical formula, so any symbol
+    // whose very first probe window actually contained >=1001 real candles (true for
+    // every symbol traded continuously since well before its own probe start) would
+    // have had its recorded earliest_open_time land one interval LATE, silently
+    // dropping that symbol+timeframe's true first candle before candle_sync ever knew
+    // to expect it. Not separately reported (verify.php's own gap-walk should already
+    // flag this as a [earliest,earliest] gap once earliest_open_time is corrected by a
+    // fresh backfill, same as any other detected gap), but it's the same defect in the
+    // same file and needed the same fix.
     $stepMs = backtestTimeframeStepMs($timeframe);
-    $windowMs = $stepMs * 1000;
+    $windowMs = $stepMs * 999;
     $cursor = $probeFromMs;
 
     while ($cursor < $nowMs) {
@@ -424,4 +446,86 @@ function backtestDetectGaps(PDO $db, string $symbol, string $timeframe): array {
         $gaps[] = [$expected, (int) $sync['latest_open_time']];
     }
     return $gaps;
+}
+
+// ── SELF-TEST ────────────────────────────────────────────────────────────
+// Run standalone: `php includes/bybit_client.php` (no DB, no network — same convention
+// as bitfunded_parser.php's own self-test at the bottom of that file). Not executed
+// when this file is require_once'd by the CLI scripts.
+if (PHP_SAPI === 'cli' && basename($_SERVER['SCRIPT_FILENAME'] ?? '') === basename(__FILE__)) {
+    backtest_self_test();
+}
+
+function backtest_self_test(): void {
+    $pass = 0; $fail = 0;
+    $check = function (string $label, $actual, $expected) use (&$pass, &$fail) {
+        if ($actual === $expected) { $pass++; return; }
+        $fail++;
+        fwrite(STDERR, "FAIL: $label — expected " . var_export($expected, true) . ", got " . var_export($actual, true) . "\n");
+    };
+
+    $check('15m step', backtestTimeframeStepMs('15m'), 15 * 60 * 1000);
+    $check('1H step', backtestTimeframeStepMs('1H'), 60 * 60 * 1000);
+    $check('4H step', backtestTimeframeStepMs('4H'), 4 * 60 * 60 * 1000);
+    $check('1D step', backtestTimeframeStepMs('1D'), 24 * 60 * 60 * 1000);
+
+    $open = 1700000000000;
+    $step = backtestTimeframeStepMs('15m');
+    $check('candle exactly at its own close time is closed', backtestCandleIsClosed($open, '15m', $open + $step), true);
+    $check('candle one ms before its close time is not yet closed', backtestCandleIsClosed($open, '15m', $open + $step - 1), false);
+
+    $args = backtestCliArgs(['backfill.php', '--symbol=BTCUSDT', '--timeframe=15m', '--dry-run']);
+    $check('parses --key=value', $args['symbol'] ?? null, 'BTCUSDT');
+    $check('parses bare flag', $args['dry-run'] ?? null, true);
+
+    // v3.19.3 — the actual regression test: simulate a Bybit-like data source and a
+    // multi-page fetch loop shaped exactly like backtestSyncForward()'s real one
+    // (same window-width formula, same cursor-advance-by-one-step rule), and assert
+    // the union of pages contains every expected open_time with no gap at the seams.
+    // $fakeBybit below replicates the real defect's actual mechanism: given an
+    // inclusive [start,end] window containing more than $limit real candles, an
+    // exchange kline API returns only the LATEST $limit of them, silently dropping
+    // candles from the window's own start -- exactly what happened when the window was
+    // sized for 1001 slots against a limit of 1000.
+    $fakeBybit = function (array $allTimes, int $startMs, int $endMs, int $limit): array {
+        $matches = array_values(array_filter($allTimes, fn($t) => $t >= $startMs && $t <= $endMs));
+        return count($matches) > $limit ? array_slice($matches, -$limit) : $matches;
+    };
+    $pageForward = function (array $allTimes, int $earliest, int $nowMs, int $stepMs, int $pageWindowMs) use ($fakeBybit): array {
+        $cursor = $earliest;
+        $collected = [];
+        while ($cursor < $nowMs) {
+            $windowEnd = min($cursor + $pageWindowMs, $nowMs);
+            $page = $fakeBybit($allTimes, $cursor, $windowEnd, 1000);
+            if (empty($page)) { $cursor = $windowEnd; continue; }
+            foreach ($page as $t) $collected[$t] = true;
+            $cursor = end($page) + $stepMs; // same "last_open_time + one interval" rule as backtestSyncForward()
+        }
+        return $collected;
+    };
+
+    $stepMs = backtestTimeframeStepMs('15m');
+    $earliest = 1700000000000;
+    $totalCandles = 2500; // spans multiple 1000-candle pages, forcing real page boundaries
+    $allTimes = [];
+    for ($i = 0; $i < $totalCandles; $i++) $allTimes[] = $earliest + $i * $stepMs;
+    $nowMs = end($allTimes) + $stepMs; // one step past the last candle's open time, so it counts as closed
+
+    $fixedWindowMs = $stepMs * 999; // the corrected formula (1000 inclusive slots, matching limit exactly)
+    $collectedFixed = $pageForward($allTimes, $earliest, $nowMs, $stepMs, $fixedWindowMs);
+    $check('fixed formula: union of pages has exactly the expected candle count', count($collectedFixed), $totalCandles);
+    $missingFixed = array_values(array_filter($allTimes, fn($t) => !isset($collectedFixed[$t])));
+    $check('fixed formula: every single expected open_time is present, none missing at any seam', $missingFixed, []);
+
+    // Regression guard: prove this test actually exercises the bug class being fixed,
+    // not just a formula that happens to always pass regardless of window width. The
+    // OLD, buggy width (*1000, one slot too many for an inclusive range against a
+    // limit of 1000) must demonstrably drop candles against the exact same synthetic
+    // data and fake API.
+    $buggyWindowMs = $stepMs * 1000;
+    $collectedBuggy = $pageForward($allTimes, $earliest, $nowMs, $stepMs, $buggyWindowMs);
+    $check('sanity: the old (buggy) window formula DOES drop candles at page seams against this same data', count($collectedBuggy) < $totalCandles, true);
+
+    fwrite(STDOUT, "bybit_client.php self-test: $pass passed, $fail failed\n");
+    if ($fail > 0) exit(1);
 }

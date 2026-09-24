@@ -1,26 +1,15 @@
 {
-    "current_version": "3.19.0",
+    "current_version": "3.19.1",
     "release_date": "2026-09-24",
     "changelog": [
-        "Add: Backtesting Phase 1a — a candle data pipeline (Bybit v5 linear perpetuals, BTCUSDT/ETHUSDT/BNBUSDT to start, database-driven via a new symbols table, 15m/1H/4H/1D fetched natively) plus a TradingView-styled chart page (TradingView Lightweight Charts, dark theme, right price scale, OHLC legend, volume histogram, symbol/timeframe/timezone switchers, scroll-back pagination). No replay engine, drawing tools, or orders yet — that's phase 1b. See docs/backtesting-pipeline.md (repo only, not part of the deployed site) for the full runbook.",
-        "New tables (migrations/2026_09_24_0002_create_backtesting_tables.sql, manual step — see release notes below): symbols, candles (PRIMARY KEY (symbol, timeframe, open_time) — one composite key doubling as both the required UNIQUE constraint and the range-query index, InnoDB-clustered in read/write order), candle_sync (per symbol+timeframe earliest/latest/last-synced bookkeeping).",
-        "New CLI pipeline (includes/bybit_client.php + cli/backfill.php, cli/update.php, cli/verify.php, cli/repair.php) — CLI-only (403s under any web SAPI; also nginx-denied at /cli/, see CLAUDE.md). backfill.php auto-detects each symbol's real earliest available candle rather than assuming 2020-01-01; resumable by design (always resumes from candle_sync.latest_open_time, every write is an upsert keyed on (symbol,timeframe,open_time)). update.php is the 15-minute cron target and never stores the currently-forming candle. verify.php reports gaps (and, with --spotcheck=N, re-fetches a random sample to catch value-level drift); repair.php refetches exactly the gaps verify.php would report.",
-        "New chart surface: ChartController.php (get_symbols/get_candles — reads only from MySQL, never calls Bybit from a page request or the browser) + pages/chart.php + js/chart.js, added to the sidebar as a new 'Chart' nav item."
+        "Fix: backfill.php crashed on its very first write with PDOException 1052 \"Column 'earliest_open_time' in field list is ambiguous.\" Cause: helpers's row-alias INSERT ... AS new ... ON DUPLICATE KEY UPDATE (added in v3.19.0 to avoid the deprecated VALUES() function) had bare, unqualified column references inside candle_sync's earliest/latest-tracking CASE expressions. MySQL 8.4 requires every column reference to be qualified once a row alias is present -- new.col for the row being inserted, candle_sync.col for the existing stored row -- an unqualified bare name is genuinely ambiguous, not merely deprecated, once the alias exists. Fixed in includes/bybit_client.php::backtestUpdateSyncState().",
+        "Checked the candles table's own upsert (backtestUpsertCandles()) for the same pattern, since it had not executed yet on live. Confirmed safe: every column reference in its ON DUPLICATE KEY UPDATE clause was already qualified (new.col), with no bare reference anywhere -- no change was needed there, and this was verified by inspection against the same MySQL 8.4 row-alias rules that caught the candle_sync bug, not assumed.",
+        "Moved docs/backtesting-pipeline.md to app/docs/backtesting-pipeline.md. It was committed at the repo root in v3.19.0 and never actually deployed: updater.php's GITHUB_BASE_URL fetch root is '.../main/app', so a files entry naming the repo-root path would 404 and fail the whole Update Now. Living under app/ now makes it a normal deployable file, matching this release's own files entry for it."
     ],
-    "release_notes": "MANUAL DB STEP REQUIRED, not run by this release: after Update Now, run migrate.php?mode=status then mode=run to apply migrations/2026_09_24_0002_create_backtesting_tables.sql (creates symbols/candles/candle_sync and seeds BTCUSDT/ETHUSDT/BNBUSDT). That migration file is deliberately NOT in this release's files list or db_migrations below, same as 2026_09_24_0001 was excluded in v3.18.1 -- it must never be auto-copied into the live migrations/ folder outside a real release's files list, since migrate.php's own directory scan would otherwise pick it up unexpectedly. It IS committed to the repo (git only) for history and manual reference. After the migration applies, run the CLI backfill over SSH (php cli/backfill.php) and register the cron job -- see docs/backtesting-pipeline.md in the repo for both, plus the recommended nginx 'deny' rule for /cli/.",
+    "release_notes": "MANUAL DB STEP REQUIRED, not run by this release: migrations/2026_09_24_0002_create_backtesting_tables.sql (from v3.19.0) is still pending -- run migrate.php?mode=status then mode=run after Update Now, same as noted in v3.19.0's own release notes. This v3.19.1 patch only fixes the PHP-side crash in the CLI pipeline (bybit_client.php) and correctly deploys the pipeline README; nothing here touches or re-runs any migration.",
     "files": [
         {"path": "includes/bybit_client.php", "critical": false},
-        {"path": "includes/controllers/ChartController.php", "critical": false},
-        {"path": "includes/router.php", "critical": false},
-        {"path": "cli/backfill.php", "critical": false},
-        {"path": "cli/update.php", "critical": false},
-        {"path": "cli/verify.php", "critical": false},
-        {"path": "cli/repair.php", "critical": false},
-        {"path": "pages/chart.php", "critical": false},
-        {"path": "js/chart.js", "critical": false},
-        {"path": "js/app.js", "critical": false},
-        {"path": "index.php", "critical": false},
-        {"path": "css/style.css", "critical": false}
+        {"path": "docs/backtesting-pipeline.md", "critical": false}
     ],
     "db_migrations": []
 }

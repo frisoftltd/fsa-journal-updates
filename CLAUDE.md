@@ -83,9 +83,13 @@ so a direct request for a log file 404s at the vhost level instead of serving pl
 
 The Chart page (`pages/chart.php`, `js/chart.js`, `ChartController.php`) reads candles
 only from MySQL via `get_symbols`/`get_candles` — nothing in the browser or in a page
-request ever calls Bybit directly. See `docs/backtesting-pipeline.md` (repo only, not
-part of the deployed site — the updater's `files` manifest never lists it) for the full
-backfill/cron/verify/repair runbook.
+request ever calls Bybit directly. See `docs/backtesting-pipeline.md` for the full
+backfill/cron/verify/repair runbook — **the file lives at `app/docs/backtesting-
+pipeline.md` in this repo** (v3.19.1: moved there from the repo root, where
+`updater.php`'s `GITHUB_BASE_URL` — `.../main/app` — could never actually reach it; a
+`files` entry pointing at the repo-root path 404'd and failed the whole Update Now).
+Every other repo-root `docs/` file (e.g. `docs/audits/`) is genuinely git-only and not
+meant to deploy — this one file is the exception, deployed on purpose.
 
 ---
 

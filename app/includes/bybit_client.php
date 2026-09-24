@@ -308,7 +308,13 @@ function backtestUpsertCandles(PDO $db, string $symbol, string $timeframe, array
         $params[] = $c['volume'];
     }
     // MySQL 8.4 target -- uses the row-alias ON DUPLICATE KEY UPDATE syntax (8.0.19+),
-    // not VALUES(), which is deprecated as of 8.0.20.
+    // not VALUES(), which is deprecated as of 8.0.20. v3.19.1: re-checked against the
+    // ambiguous-column bug found in backtestUpdateSyncState()'s otherwise-identical
+    // pattern -- every reference here is already qualified (`new.col`), with no bare
+    // column name anywhere in the UPDATE clause, so this statement doesn't carry the
+    // same defect. Confirmed by inspection, not by executing it against a live
+    // MySQL 8.4 instance (none available in this environment) -- the first real
+    // backfill run is still this statement's actual first test.
     $sql = "INSERT INTO candles (symbol, timeframe, open_time, open, high, low, close, volume) VALUES "
         . implode(',', $placeholders)
         . " AS new ON DUPLICATE KEY UPDATE open=new.open, high=new.high, low=new.low, close=new.close, volume=new.volume";
@@ -332,20 +338,27 @@ function backtestGetSyncState(PDO $db, string $symbol, string $timeframe): array
  *  than what's already stored — a repair run touching an isolated gap in the middle of
  *  an already-wide range must never accidentally narrow the recorded range. */
 function backtestUpdateSyncState(PDO $db, string $symbol, string $timeframe, ?int $earliest, ?int $latest): void {
-    // Row-alias syntax (MySQL 8.0.19+/8.4 target) -- bare column names in the UPDATE
-    // clause read the EXISTING row, `new.col` reads the row being inserted, same
-    // semantics VALUES(col) used to express before it was deprecated in 8.0.20.
+    // v3.19.1 fix: once a row alias (`AS new`) is present, MySQL 8.4 requires EVERY
+    // column reference in the UPDATE clause to be qualified -- `new.col` for the row
+    // being inserted, `candle_sync.col` for the existing stored row. A bare, unqualified
+    // `col` (what this originally said, modeled on the old VALUES()-based convention
+    // where an unqualified name unambiguously meant "the current row") is genuinely
+    // ambiguous once the alias exists, not just deprecated -- confirmed against the
+    // live PDOException this fixes: "1052 Column 'earliest_open_time' in field list is
+    // ambiguous," thrown on the very first backfill write. The LHS assignment targets
+    // (`earliest_open_time =`, etc.) are unaffected -- those are always the bare target
+    // table's own column name, never the alias, in both MySQL 5.7's and 8.4's syntax.
     $db->prepare(
         "INSERT INTO candle_sync (symbol, timeframe, earliest_open_time, latest_open_time, last_synced_at)
          VALUES (?, ?, ?, ?, NOW())
          AS new
          ON DUPLICATE KEY UPDATE
             earliest_open_time = CASE WHEN new.earliest_open_time IS NOT NULL
-                AND (earliest_open_time IS NULL OR new.earliest_open_time < earliest_open_time)
-                THEN new.earliest_open_time ELSE earliest_open_time END,
+                AND (candle_sync.earliest_open_time IS NULL OR new.earliest_open_time < candle_sync.earliest_open_time)
+                THEN new.earliest_open_time ELSE candle_sync.earliest_open_time END,
             latest_open_time = CASE WHEN new.latest_open_time IS NOT NULL
-                AND (latest_open_time IS NULL OR new.latest_open_time > latest_open_time)
-                THEN new.latest_open_time ELSE latest_open_time END,
+                AND (candle_sync.latest_open_time IS NULL OR new.latest_open_time > candle_sync.latest_open_time)
+                THEN new.latest_open_time ELSE candle_sync.latest_open_time END,
             last_synced_at = NOW()"
     )->execute([$symbol, $timeframe, $earliest, $latest]);
 }

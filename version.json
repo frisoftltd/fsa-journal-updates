@@ -1,13 +1,14 @@
 {
-    "current_version": "3.18.2",
+    "current_version": "3.18.3",
     "release_date": "2026-09-24",
     "changelog": [
-        "Ship migration 2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql via the standard updater/migrate.php path — v3.18.1 committed this file but deliberately left it out of files/db_migrations. Now deployed like every other tracked migration (see migrations/2026_09_23_0001 in v3.18.0 for the same pattern): the updater copies it into the live migrations/ folder, and it is applied by hand via migrate.php?mode=run (never automatically by the updater itself).",
-        "The migration file was trimmed to its single UPDATE statement — migrate.php executes every statement in a migration via PDO::exec() and its report only ever shows applied/failed + timing, with no path to display a SELECT's result set, so the preview/verify SELECTs v3.18.1's manual version had would run with their output going nowhere. The preview query is now given in the file's own header comment for eyeballing by hand (phpMyAdmin/mysql CLI) before mode=run, not embedded as a statement the runner would silently discard."
+        "Fix migrations/2026_09_23_0001_create_report_card_tables.sql — migrate.php?mode=run failed with errno 150 (\"Foreign key constraint is incorrectly formed\") creating report_cards. Confirmed against live SHOW CREATE TABLE users: users.id is signed int(11), while this migration declared every user_id column INT UNSIGNED. Every user_id column that FKs to users(id) (report_cards, report_card_templates, report_card_mantras, report_card_ai_reviews) is now plain INT (signed), matching exactly. Also found and fixed the same mismatch on report_card_tickers.trade_id -> trades.id (never reached by the live run, since mode=run stops at the first failing statement) — confirmed signed by precedent in the already-shipped 2026_09_21_0008_create_trade_checkins.sql, which FKs to trades(id) the same way. Every in-file FK between two new report_card_* tables was checked too and needed no change (all self-consistently INT UNSIGNED already).",
+        "Every CREATE TABLE in that migration now uses CREATE TABLE IF NOT EXISTS, so a retry after a later table's failure can't fail again on an earlier table that already succeeded (DDL auto-commits per statement; this file runs outside a transaction).",
+        "This file was never successfully applied on live (mode=run stopped at the first statement), so editing it is the intended retry path, not a checksum-locked edit — see CLAUDE.md v3.12.2. Checked the Report Card PHP code (ReportCardController.php, ReportCardAiController.php): nothing assumes these columns are unsigned — every read/write goes through a prepared-statement placeholder and app-level values are already always positive (uid()/validId()) — so no PHP changes were needed."
     ],
-    "release_notes": "Deploys migration 2026_09_24_0001 (repairs net_pnl double-counted funding). Back up DB, then run migrate.php?mode=status, then mode=run.",
+    "release_notes": "Redeploys the corrected migrations/2026_09_23_0001_create_report_card_tables.sql (fixes the errno 150 signedness mismatch against users.id/trades.id that failed the last mode=run) — the live migrations/ folder currently has the old, broken copy from v3.18.0 and needs this file re-synced before retrying. After Update Now: run migrate.php?mode=status to confirm it shows pending (not a checksum mismatch against the old copy's already-recorded 'failed' row, which is expected and retryable), then mode=run. Does not touch 2026_09_24_0001 — that migration is unrelated and still separately pending from v3.18.2.",
     "files": [
-        {"path": "migrations/2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql", "critical": false}
+        {"path": "migrations/2026_09_23_0001_create_report_card_tables.sql", "critical": false}
     ],
     "db_migrations": []
 }

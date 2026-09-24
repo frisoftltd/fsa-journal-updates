@@ -19,10 +19,37 @@
 --    general_ci (CLAUDE.md §3A, "Adding a migration" step 2, states this explicitly after
 --    2026_09_15_0001 shipped without it and needed a follow-up fix). Matching the
 --    established convention rather than the briefing's literal collation.
+--
+-- v3.18.3 fix (this file never successfully ran — mode=run failed on the very first
+-- CREATE TABLE, so editing it is the retry path, not a checksum-locked edit; see
+-- CLAUDE.md v3.12.2 for why a 'failed' migration is safe to edit):
+-- `errno 150 "Foreign key constraint is incorrectly formed"` on `report_cards`'
+-- `FOREIGN KEY (user_id) REFERENCES users (id)`. Confirmed against live `SHOW CREATE
+-- TABLE users`: `id` is `int(11) NOT NULL AUTO_INCREMENT` — signed — while every
+-- `user_id` column below was declared `INT UNSIGNED`. Every new table in this file uses
+-- `INT UNSIGNED` self-consistently for its own ids/FKs to each other (all of those stay
+-- unsigned — checked every in-file FK pair and none of them mismatch), but the two
+-- external, pre-migration-era tables this file also references — `users` and `trades` —
+-- predate this project's migration system and were both created as plain signed `INT`.
+-- The same check on `report_card_tickers.trade_id -> trades.id` found the identical
+-- mismatch (never reached by the live run, since `mode=run` stops at the first failing
+-- statement and `report_cards` is the first one in the file) — confirmed against
+-- `2026_09_21_0008_create_trade_checkins.sql`'s `trade_id INT NOT NULL REFERENCES
+-- trades(id)`, an already-shipped migration using the same pattern successfully, proving
+-- `trades.id` is signed. Every `user_id`/`trade_id` column that FKs to `users`/`trades`
+-- below is now plain `INT` (signed), matching exactly. No other column changed: PHP never
+-- relies on these being unsigned (every read/write goes through a prepared-statement `?`
+-- placeholder, and app-level values are already always positive via `uid()`/`validId()`),
+-- so nothing outside this file needed to change.
+--
+-- Every CREATE TABLE below also gained IF NOT EXISTS, so a future retry after a
+-- later-table failure (DDL auto-commits per statement — this file runs outside a
+-- transaction, see migrate.php's containsDdl() check) can't fail on "table already
+-- exists" for whichever earlier tables in this file already succeeded.
 
-CREATE TABLE report_cards (
+CREATE TABLE IF NOT EXISTS report_cards (
   id                  INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id             INT UNSIGNED NOT NULL,
+  user_id             INT NOT NULL,
   challenge_id        INT UNSIGNED NOT NULL DEFAULT 0,
   card_date           DATE NOT NULL,
   overall_grade       ENUM('A','B','C','D','F') DEFAULT NULL,
@@ -45,7 +72,7 @@ CREATE TABLE report_cards (
   CONSTRAINT fk_rc_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_blocks (
+CREATE TABLE IF NOT EXISTS report_card_blocks (
   id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
   card_id        INT UNSIGNED NOT NULL,
   sort_order     SMALLINT UNSIGNED NOT NULL DEFAULT 0,
@@ -65,9 +92,9 @@ CREATE TABLE report_card_blocks (
   CONSTRAINT fk_rcb_card FOREIGN KEY (card_id) REFERENCES report_cards (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_templates (
+CREATE TABLE IF NOT EXISTS report_card_templates (
   id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id         INT UNSIGNED NOT NULL,
+  user_id         INT NOT NULL,
   name            VARCHAR(80) NOT NULL,
   is_default      TINYINT(1) NOT NULL DEFAULT 0,
   weekday_default TINYINT UNSIGNED DEFAULT NULL COMMENT '0=Sun .. 6=Sat, NULL = none',
@@ -78,7 +105,7 @@ CREATE TABLE report_card_templates (
   CONSTRAINT fk_rct_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_template_blocks (
+CREATE TABLE IF NOT EXISTS report_card_template_blocks (
   id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
   template_id    INT UNSIGNED NOT NULL,
   sort_order     SMALLINT UNSIGNED NOT NULL DEFAULT 0,
@@ -91,9 +118,9 @@ CREATE TABLE report_card_template_blocks (
   CONSTRAINT fk_rctb_template FOREIGN KEY (template_id) REFERENCES report_card_templates (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_mantras (
+CREATE TABLE IF NOT EXISTS report_card_mantras (
   id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id    INT UNSIGNED NOT NULL,
+  user_id    INT NOT NULL,
   text       VARCHAR(255) NOT NULL,
   sort_order SMALLINT UNSIGNED NOT NULL DEFAULT 0,
   is_active  TINYINT(1) NOT NULL DEFAULT 1,
@@ -103,7 +130,7 @@ CREATE TABLE report_card_mantras (
   CONSTRAINT fk_rcm_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_mantra_checks (
+CREATE TABLE IF NOT EXISTS report_card_mantra_checks (
   card_id    INT UNSIGNED NOT NULL,
   mantra_id  INT UNSIGNED NOT NULL,
   checked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -112,7 +139,7 @@ CREATE TABLE report_card_mantra_checks (
   CONSTRAINT fk_rcmc_mantra FOREIGN KEY (mantra_id) REFERENCES report_card_mantras (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_tickers (
+CREATE TABLE IF NOT EXISTS report_card_tickers (
   id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
   card_id        INT UNSIGNED NOT NULL,
   sort_order     SMALLINT UNSIGNED NOT NULL DEFAULT 0,
@@ -120,14 +147,14 @@ CREATE TABLE report_card_tickers (
   pnl            DECIMAL(14,2) DEFAULT NULL,
   trade_analysis TEXT,
   chart_notes    TEXT,
-  trade_id       INT UNSIGNED DEFAULT NULL COMMENT 'optional link to journal trade',
+  trade_id       INT DEFAULT NULL COMMENT 'optional link to journal trade',
   PRIMARY KEY (id),
   KEY idx_card_order (card_id, sort_order),
   CONSTRAINT fk_rcti_card  FOREIGN KEY (card_id)  REFERENCES report_cards (id) ON DELETE CASCADE,
   CONSTRAINT fk_rcti_trade FOREIGN KEY (trade_id) REFERENCES trades (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_ticker_images (
+CREATE TABLE IF NOT EXISTS report_card_ticker_images (
   id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
   ticker_id  INT UNSIGNED NOT NULL,
   file_path  VARCHAR(255) NOT NULL,
@@ -138,9 +165,9 @@ CREATE TABLE report_card_ticker_images (
   CONSTRAINT fk_rctim_ticker FOREIGN KEY (ticker_id) REFERENCES report_card_tickers (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_ai_reviews (
+CREATE TABLE IF NOT EXISTS report_card_ai_reviews (
   id              INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  user_id         INT UNSIGNED NOT NULL,
+  user_id         INT NOT NULL,
   card_id         INT UNSIGNED DEFAULT NULL COMMENT 'NULL for weekly/monthly reviews',
   scope           ENUM('daily','weekly','monthly') NOT NULL DEFAULT 'daily',
   period_start    DATE NOT NULL,
@@ -167,7 +194,7 @@ CREATE TABLE report_card_ai_reviews (
   CONSTRAINT fk_rcar_card FOREIGN KEY (card_id) REFERENCES report_cards (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-CREATE TABLE report_card_ai_findings (
+CREATE TABLE IF NOT EXISTS report_card_ai_findings (
   id         INT UNSIGNED NOT NULL AUTO_INCREMENT,
   review_id  INT UNSIGNED NOT NULL,
   type       ENUM('contradiction','behavior_pattern','thinking_pattern','strength','risk') NOT NULL,

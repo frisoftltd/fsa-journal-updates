@@ -199,11 +199,22 @@ function backtestStepMsFor(tf) {
 }
 
 // ── CHART INIT ───────────────────────────────────────────
+// v3.19.2 — sizing is explicit (resizeTvChart()), not Lightweight Charts' own
+// autoSize/ResizeObserver. autoSize alone did track the container across a CSS-
+// transitioned width change (the sidebar collapsing), but only by re-measuring on
+// whatever cadence its internal ResizeObserver callback fires at, which produced a
+// visibly stretched/squashed frame mid-transition before self-correcting. Explicit
+// resize calls at the two moments that actually change the container's size —
+// .sidebar's own transitionend, and window resize — give a clean, immediate correction
+// instead of relying on an internal observer's timing, which is exactly what "the
+// chart must call resize() when the sidebar toggles" (and on window resize) asks for.
 function initTvChart() {
     if (tvChart) return;
     const container = document.getElementById('tv-chart');
 
     tvChart = LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: container.clientHeight,
         layout: { background: { color: TV_COLORS.background }, textColor: TV_COLORS.text },
         grid: {
             vertLines: { color: TV_COLORS.grid },
@@ -218,7 +229,6 @@ function initTvChart() {
         },
         handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
         handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
-        autoSize: true,
     });
 
     tvCandleSeries = tvChart.addCandlestickSeries({
@@ -258,6 +268,27 @@ function initTvChart() {
     });
 
     container.addEventListener('dblclick', () => tvChart.timeScale().fitContent());
+
+    // Sidebar collapse/expand (js/app.js::toggleSidebarCollapse()) changes .main's
+    // margin-left, which changes #tv-chart's actual pixel width — listened for here,
+    // self-contained, rather than app.js needing to know the chart exists at all.
+    // propertyName check: .sidebar's own transition also covers "transform" (the
+    // mobile drawer slide), which never changes this chart's width and would just be a
+    // wasted resize call.
+    const sidebarEl = document.querySelector('.sidebar');
+    if (sidebarEl) {
+        sidebarEl.addEventListener('transitionend', e => {
+            if (e.propertyName === 'width') resizeTvChart();
+        });
+    }
+    window.addEventListener('resize', resizeTvChart);
+}
+
+function resizeTvChart() {
+    if (!tvChart) return;
+    const container = document.getElementById('tv-chart');
+    if (!container) return;
+    tvChart.resize(container.clientWidth, container.clientHeight);
 }
 
 function resetChartZoom() {
@@ -338,7 +369,15 @@ async function loadChart() {
         if (el) el.innerHTML = '<div style="color:#ef5350;padding:20px;font-family:monospace">Lightweight Charts failed to load (check network/CDN access).</div>';
         return;
     }
-    if (chartInitialized) return;
+    if (chartInitialized) {
+        // Revisiting the page, not a first load — the container may have changed size
+        // while the chart was hidden on another page (e.g. the sidebar was toggled
+        // there, which fires no transitionend on an invisible chart), so resize once
+        // on every re-show rather than only reacting to events the chart could
+        // actually observe while visible.
+        resizeTvChart();
+        return;
+    }
     chartInitialized = true;
 
     populateTimezoneSwitcher();

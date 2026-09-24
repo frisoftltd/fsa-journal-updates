@@ -58,6 +58,11 @@ function showPage(id) {
     const titles={dashboard:'Dashboard',trades:'Trade Log',reportcard:'Report Card',stats:'Statistics',chart:'Chart',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges',bfimport:'Import'};
     document.querySelector('.topbar h2').textContent = titles[id]||id;
     document.querySelector('.sidebar').classList.remove('open');
+    // v3.19.2 — every "chart page should look/behave differently" rule (dark topbar,
+    // full-bleed .main, no page padding — css/style.css's "BACKTESTING CHART" block)
+    // keys off this one class, scoped to the chart page only; every other page is
+    // completely unaffected since they never get it.
+    document.body.classList.toggle('chart-active', id==='chart');
     if(id==='dashboard') loadDashboard();
     if(id==='trades') { loadPairs(); loadTrades(); }
     if(id==='reportcard') loadReportCard();
@@ -73,6 +78,18 @@ function showPage(id) {
     if(id==='bfimport') loadBfImport();
 }
 
+// ── SIDEBAR COLLAPSE (v3.19.2) ───────────────────────────
+// WordPress-admin-style icon rail; css/style.css's body.sidebar-collapsed rules do all
+// the actual visual work (width, hidden labels, hover tooltips) — this just flips the
+// one class, persists the choice, and updates the toggle button's own tooltip text.
+// Applies app-wide (every page uses the same .sidebar/.main), not just the chart page.
+function toggleSidebarCollapse(){
+    const collapsed = document.body.classList.toggle('sidebar-collapsed');
+    localStorage.setItem('fc_sidebar_collapsed', collapsed ? '1' : '0');
+    const btn = document.getElementById('sidebar-collapse-btn');
+    if(btn) btn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+}
+
 // ── PDF EXPORT ───────────────────────────────────────────
 function exportPDF(){ window.print(); }
 
@@ -85,6 +102,11 @@ document.addEventListener('DOMContentLoaded',async()=>{
     document.getElementById('hamburger-btn')?.addEventListener('click',()=>{
         document.querySelector('.sidebar').classList.toggle('open');
     });
+    // The collapsed class itself was already applied synchronously (see the inline
+    // <script> right after <body>, before the sidebar ever paints) — this just syncs
+    // the toggle button's own tooltip text to match on load.
+    const collapseBtn = document.getElementById('sidebar-collapse-btn');
+    if(collapseBtn && document.body.classList.contains('sidebar-collapsed')) collapseBtn.title = 'Expand sidebar';
 
     showPage('dashboard');
     // v3.17.1 — the topbar "+ Trade" button (#topbar-trade-btn) is present on every page,

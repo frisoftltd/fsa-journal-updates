@@ -14,6 +14,7 @@
   --font-body:'DM Sans',sans-serif;
   --radius:12px; --radius-sm:8px;
   --sidebar:220px;
+  --sidebar-collapsed:64px;
 }
 
 *{margin:0;padding:0;box-sizing:border-box}
@@ -22,8 +23,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body);font-si
 
 /* ── LAYOUT ── */
 .app{display:flex;min-height:100vh}
-.sidebar{width:var(--sidebar);height:100vh;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;z-index:100;transition:transform 0.3s}
-.sidebar-logo{padding:22px 18px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
+.sidebar{width:var(--sidebar);height:100vh;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;position:fixed;top:0;left:0;z-index:100;transition:transform 0.3s,width 0.2s}
+.sidebar-logo{padding:22px 18px 14px;border-bottom:1px solid var(--border);flex-shrink:0;position:relative}
+.sidebar-collapse-btn{position:absolute;top:20px;right:-12px;width:24px;height:24px;border-radius:50%;background:var(--card2);border:1px solid var(--border2);color:var(--text2);font-size:12px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:101;transition:right 0.2s}
 .sidebar-logo h1{font-family:var(--font-head);font-size:12px;color:var(--blue2);letter-spacing:2px;text-transform:uppercase}
 .sidebar-logo p{font-size:10px;color:var(--text3);margin-top:3px}
 .sidebar-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden}
@@ -48,7 +50,52 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body);font-si
 .logout-btn{font-size:11px;color:var(--text3);cursor:pointer;padding:2px 0;background:none;border:none;font-family:var(--font-body)}
 .logout-btn:hover{color:var(--red)}
 
-.main{margin-left:var(--sidebar);flex:1;padding:0;min-width:0}
+/* ── COLLAPSIBLE SIDEBAR (v3.19.2) ──
+   WordPress-admin-style: collapses to an icon-only rail, with each item's label shown
+   as a floating tooltip on hover rather than removed entirely. body.sidebar-collapsed
+   is the single toggle driving every rule below (js/app.js::toggleSidebarCollapse(),
+   persisted to localStorage) — .sidebar's own width and .main's margin-left both key
+   off it so they always move together, never independently drifting out of sync. */
+.nav-label{white-space:nowrap}
+/* Desktop only -- below 901px the sidebar is already an overlay drawer (see the
+   @media(max-width:900px) block further down), a completely different mechanism
+   (.open/transform, not width). Wrapping every collapsed-state rule here means a
+   persisted "collapsed" preference from a desktop session simply has no selector to
+   match on a narrow viewport, rather than needing to be individually reset there. */
+@media(min-width:901px){
+  body.sidebar-collapsed .sidebar{width:var(--sidebar-collapsed)}
+  body.sidebar-collapsed .main{margin-left:var(--sidebar-collapsed)}
+  body.sidebar-collapsed .sidebar-collapse-btn{transform:rotate(180deg)}
+  body.sidebar-collapsed .sidebar-logo{padding:16px 0;text-align:center}
+  body.sidebar-collapsed .sidebar-logo img{margin:0 auto;display:block}
+  body.sidebar-collapsed .sidebar-logo div{display:none}
+  body.sidebar-collapsed .nav-section{height:1px;padding:0;margin:10px 14px;background:var(--border);font-size:0;color:transparent;overflow:hidden}
+  body.sidebar-collapsed .nav a{justify-content:center;padding:12px 0;gap:0;position:relative}
+  body.sidebar-collapsed .nav a .nav-label,
+  body.sidebar-collapsed .nav a #reportcard-dot,
+  body.sidebar-collapsed .nav a #update-dot{display:none}
+  /* Floating tooltip, shown only on hover, only while collapsed -- the WordPress admin
+     menu's own pattern, not a native title="" tooltip (too slow to appear, no styling
+     control, inconsistent across browsers). pointer-events:none so it never itself
+     becomes what the mouse is "over," which would otherwise flicker the hover state. */
+  body.sidebar-collapsed .nav a:hover .nav-label{
+    display:block;position:absolute;left:100%;top:50%;transform:translateY(-50%);
+    margin-left:10px;background:var(--card2);color:var(--text);border:1px solid var(--border2);
+    padding:7px 12px;border-radius:var(--radius-sm);font-size:12px;white-space:nowrap;
+    z-index:200;box-shadow:0 4px 16px rgba(0,0,0,0.4);pointer-events:none;
+  }
+  body.sidebar-collapsed .sidebar-bottom > *:not(.sidebar-user){display:none}
+  body.sidebar-collapsed .sidebar-user{justify-content:center;position:relative}
+  body.sidebar-collapsed .sidebar-user .user-info{display:none}
+  body.sidebar-collapsed .sidebar-user:hover::after{
+    content:attr(data-tooltip);position:absolute;left:100%;bottom:0;margin-left:10px;
+    background:var(--card2);color:var(--text);border:1px solid var(--border2);
+    padding:7px 12px;border-radius:var(--radius-sm);font-size:12px;white-space:nowrap;
+    z-index:200;box-shadow:0 4px 16px rgba(0,0,0,0.4);pointer-events:none;
+  }
+}
+
+.main{margin-left:var(--sidebar);flex:1;padding:0;min-width:0;transition:margin-left 0.2s}
 .topbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;gap:12px}
 .topbar h2{font-family:var(--font-head);font-size:13px;color:var(--text);letter-spacing:1px;white-space:nowrap}
 .topbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -225,6 +272,12 @@ textarea{resize:vertical;min-height:65px}
   .sidebar.open{transform:translateX(0)}
   .main{margin-left:0}
   .hamburger{display:block}
+  /* The collapse-to-rail feature is a desktop concept (its own rules are wrapped in
+     @media(min-width:901px) below, so they simply don't match here at all) -- below
+     this width the sidebar is already an overlay drawer (opens/closes via .open, not
+     width). Just hide the toggle button, which would otherwise float uselessly on the
+     drawer's edge with nothing to toggle. */
+  .sidebar-collapse-btn{display:none}
   .kpi-grid{grid-template-columns:repeat(3,1fr)}
   .charts-grid{grid-template-columns:1fr}
   .charts-grid-3{grid-template-columns:1fr}
@@ -270,14 +323,54 @@ textarea{resize:vertical;min-height:65px}
 .rc-ticker-imgs img{width:90px;height:60px;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer}
 .rc-history-row td{cursor:pointer}
 
-/* ── BACKTESTING CHART (Phase 1a) ──
+/* ── BACKTESTING CHART (Phase 1a; full-bleed layout v3.19.2) ──
    Deliberately dark and independent of --bg/--card (which brand.css overrides to light
    values) — this is the one place in the app meant to look like TradingView's own dark
    chart pane, not the rest of FundedControl's "Light Authority" chrome. Colors here are
    just the wrapper frame; the candlestick/volume/grid colors themselves are set by
-   Lightweight Charts' own options in js/chart.js. */
-.tv-chart-wrap{position:relative;background:#131722;border:1px solid #1e222d;border-radius:var(--radius);overflow:hidden}
-#tv-chart{width:100%;height:560px}
+   Lightweight Charts' own options in js/chart.js.
+
+   Full-bleed: body.sidebar-collapsed is one JS-toggled class controlling the sidebar;
+   body.chart-active is the equivalent for "is the chart page currently showing" (set
+   in js/app.js::showPage()). Every rule below that needs the topbar/main/page to behave
+   differently ONLY while the chart is open is scoped under it — every other page is
+   completely unaffected, since none of them ever gets this class. */
+body.chart-active .topbar{background:#131722;border-bottom-color:#1e222d}
+body.chart-active .topbar h2{color:#d1d4dc}
+body.chart-active .hamburger{color:#d1d4dc}
+body.chart-active .topbar .btn-ghost{background:transparent;color:#8b93a7;border-color:#2a2e39}
+body.chart-active .topbar .btn-ghost:hover{color:#d1d4dc;border-color:#3a3f4c}
+body.chart-active .topbar .btn-primary{background:#2962ff}
+body.chart-active .topbar #today-info{color:#8b93a7}
+
+/* Locks .main to exactly the viewport height while the chart is open (not just
+   min-height, which is what every other page uses) -- with #page-chart taking the
+   remaining flex space below the topbar, there is nothing left over to overflow, so
+   the document itself never scrolls. Every other page is untouched: .main still just
+   flows with the document and scrolls normally when its content is taller than the
+   viewport, exactly as before this release. */
+body.chart-active .main{height:100vh;display:flex;flex-direction:column;overflow:hidden}
+body.chart-active #page-chart{flex:1;min-height:0;padding:0;display:flex;flex-direction:column}
+
+.tv-controls-bar{background:#131722;border-bottom:1px solid #1e222d;padding:6px 14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;flex-shrink:0}
+.tv-controls-bar select{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;padding:5px 10px;font-size:12px;width:auto;min-width:150px}
+.tv-controls-bar .tf-group{display:flex;gap:3px}
+.tv-controls-bar .tf-btn{padding:4px 10px;font-size:11px}
+/* .btn-ghost's own color/border (var(--text2)/var(--border)) resolve to brand.css's
+   LIGHT theme values everywhere else in the app -- unreadable against this bar's dark
+   background, so it needs its own dark-appropriate override here rather than
+   inheriting the global button theme. (.tf-btn.active already sets an explicit blue
+   background + white text regardless of surrounding theme, so it needs no change.) */
+.tv-controls-bar .btn-ghost{background:transparent;color:#8b93a7;border-color:#2a2e39}
+.tv-controls-bar .btn-ghost:hover{color:#d1d4dc;border-color:#3a3f4c}
+#chart-earliest-note{font-size:11px;color:#6b7280;margin-left:auto}
+
+/* The chart pane itself fills whatever's left of #page-chart below the controls bar --
+   flex:1 inside #page-chart's own flex column (set above), edge-to-edge rather than
+   the rounded, bordered card every other page uses, matching TradingView's own chrome
+   (a toolbar strip directly above an edge-to-edge chart, no card frame around it). */
+.tv-chart-wrap{position:relative;background:#131722;flex:1;min-height:0;overflow:hidden}
+#tv-chart{width:100%;height:100%}
 .tv-legend{position:absolute;top:10px;left:14px;z-index:5;font-family:var(--font-mono, monospace);font-size:12px;line-height:1.6;color:#d1d4dc;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,0.6)}
 .tv-legend .tv-legend-title{font-weight:600;margin-bottom:2px;font-size:13px}
 .tf-btn.active{background:var(--blue);color:white;border-color:var(--blue)}

@@ -21,6 +21,13 @@ $u = currentUser();
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
+<script>
+// v3.19.2 — applied synchronously, before the sidebar ever paints, so a persisted
+// "collapsed" preference from a prior session renders correctly on the very first
+// frame instead of flashing full-width and then visibly collapsing (.sidebar/.main's
+// own width/margin transitions would otherwise animate that flash on every page load).
+if (localStorage.getItem('fc_sidebar_collapsed') === '1') document.body.classList.add('sidebar-collapsed');
+</script>
 <div class="app">
 
 <!-- ══ SIDEBAR ══ -->
@@ -31,6 +38,7 @@ $u = currentUser();
       <h1>FundedControl</h1>
       <p>Get Funded. Stay Funded.</p>
     </div>
+    <button class="sidebar-collapse-btn" id="sidebar-collapse-btn" onclick="toggleSidebarCollapse()" title="Collapse sidebar">‹</button>
   </div>
   <!-- Nav and the pinned-looking bottom block share one scroll region (sidebar-scroll)
        so that on a short viewport the balance card/footer never eat fixed space that
@@ -41,23 +49,23 @@ $u = currentUser();
   <div class="sidebar-scroll">
   <nav class="nav">
     <div class="nav-section">Main</div>
-    <a href="#" data-page="dashboard" onclick="showPage('dashboard');return false;"><span class="icon">📊</span>Dashboard</a>
-    <a href="#" data-page="trades" onclick="showPage('trades');return false;"><span class="icon">📋</span>Trade Log</a>
-    <a href="#" data-page="reportcard" onclick="showPage('reportcard');return false;"><span class="icon">📝</span>Report Card<span id="reportcard-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--orange, #F59E0B);margin-left:auto"></span></a>
-    <a href="#" data-page="stats" onclick="showPage('stats');return false;"><span class="icon">📈</span>Statistics</a>
-    <a href="#" data-page="chart" onclick="showPage('chart');return false;"><span class="icon">🕯️</span>Chart</a>
+    <a href="#" data-page="dashboard" onclick="showPage('dashboard');return false;"><span class="icon">📊</span><span class="nav-label">Dashboard</span></a>
+    <a href="#" data-page="trades" onclick="showPage('trades');return false;"><span class="icon">📋</span><span class="nav-label">Trade Log</span></a>
+    <a href="#" data-page="reportcard" onclick="showPage('reportcard');return false;"><span class="icon">📝</span><span class="nav-label">Report Card</span><span id="reportcard-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--orange, #F59E0B);margin-left:auto"></span></a>
+    <a href="#" data-page="stats" onclick="showPage('stats');return false;"><span class="icon">📈</span><span class="nav-label">Statistics</span></a>
+    <a href="#" data-page="chart" onclick="showPage('chart');return false;"><span class="icon">🕯️</span><span class="nav-label">Chart</span></a>
     <div class="nav-section">Tools</div>
-    <a href="#" data-page="bfimport" onclick="showPage('bfimport');return false;"><span class="icon">📥</span>Import</a>
-    <a href="#" data-page="calculator" onclick="showPage('calculator');return false;"><span class="icon">🧮</span>Risk Calculator</a>
-    <a href="#" data-page="strategy" onclick="showPage('strategy');return false;"><span class="icon">🧪</span>Strategy Tester</a>
-    <a href="#" data-page="strategies" onclick="showPage('strategies');return false;"><span class="icon">🧩</span>Strategies</a>
-    <a href="#" data-page="leaderboard" onclick="showPage('leaderboard');return false;"><span class="icon">🏅</span>Leaderboard</a>
-    <a href="#" data-page="review" onclick="showPage('review');return false;"><span class="icon">🧭</span>Review</a>
+    <a href="#" data-page="bfimport" onclick="showPage('bfimport');return false;"><span class="icon">📥</span><span class="nav-label">Import</span></a>
+    <a href="#" data-page="calculator" onclick="showPage('calculator');return false;"><span class="icon">🧮</span><span class="nav-label">Risk Calculator</span></a>
+    <a href="#" data-page="strategy" onclick="showPage('strategy');return false;"><span class="icon">🧪</span><span class="nav-label">Strategy Tester</span></a>
+    <a href="#" data-page="strategies" onclick="showPage('strategies');return false;"><span class="icon">🧩</span><span class="nav-label">Strategies</span></a>
+    <a href="#" data-page="leaderboard" onclick="showPage('leaderboard');return false;"><span class="icon">🏅</span><span class="nav-label">Leaderboard</span></a>
+    <a href="#" data-page="review" onclick="showPage('review');return false;"><span class="icon">🧭</span><span class="nav-label">Review</span></a>
     <div class="nav-section">Account</div>
-    <a href="#" data-page="profile" onclick="showPage('profile');return false;"><span class="icon">👤</span>Profile</a>
-    <a href="#" data-page="challenges" onclick="showPage('challenges');return false;"><span class="icon">🏆</span>Challenges</a>
-    <a href="logout.php"><span class="icon">🚪</span>Logout</a>
-    <a href="updater.php" style="border-top:1px solid var(--border);color:var(--text3)" id="update-link"><span class="icon">🔄</span>Check Update <span id="update-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:auto"></span></a>
+    <a href="#" data-page="profile" onclick="showPage('profile');return false;"><span class="icon">👤</span><span class="nav-label">Profile</span></a>
+    <a href="#" data-page="challenges" onclick="showPage('challenges');return false;"><span class="icon">🏆</span><span class="nav-label">Challenges</span></a>
+    <a href="logout.php"><span class="icon">🚪</span><span class="nav-label">Logout</span></a>
+    <a href="updater.php" style="border-top:1px solid var(--border);color:var(--text3)" id="update-link"><span class="icon">🔄</span><span class="nav-label">Check Update</span> <span id="update-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--green);margin-left:auto"></span></a>
   </nav>
   <div class="sidebar-bottom">
     <!-- Challenge Switcher -->
@@ -72,7 +80,7 @@ $u = currentUser();
       <div class="dd-bar"><div class="dd-fill" id="dd-fill" style="width:0%"></div></div>
       <div class="dd-label"><span id="dd-label">DD: 0%</span><span id="dd-max-label"><?= $u['max_drawdown_pct'] ?? 10 ?>% max</span></div>
     </div>
-    <div class="sidebar-user">
+    <div class="sidebar-user" data-tooltip="<?= htmlspecialchars($u['display_name'] ?? $u['username']) ?>">
       <div class="avatar" id="sidebar-avatar" style="background:<?= htmlspecialchars($u['avatar_color'] ?? '#4f7cff') ?>"><?= strtoupper(substr($u['display_name'] ?? $u['username'], 0, 1)) ?></div>
       <div class="user-info">
         <div class="user-name" id="sidebar-username"><?= htmlspecialchars($u['display_name'] ?? $u['username']) ?></div>

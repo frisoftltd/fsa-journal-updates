@@ -1,15 +1,20 @@
 {
-    "current_version": "3.19.1",
+    "current_version": "3.19.2",
     "release_date": "2026-09-24",
     "changelog": [
-        "Fix: backfill.php crashed on its very first write with PDOException 1052 \"Column 'earliest_open_time' in field list is ambiguous.\" Cause: helpers's row-alias INSERT ... AS new ... ON DUPLICATE KEY UPDATE (added in v3.19.0 to avoid the deprecated VALUES() function) had bare, unqualified column references inside candle_sync's earliest/latest-tracking CASE expressions. MySQL 8.4 requires every column reference to be qualified once a row alias is present -- new.col for the row being inserted, candle_sync.col for the existing stored row -- an unqualified bare name is genuinely ambiguous, not merely deprecated, once the alias exists. Fixed in includes/bybit_client.php::backtestUpdateSyncState().",
-        "Checked the candles table's own upsert (backtestUpsertCandles()) for the same pattern, since it had not executed yet on live. Confirmed safe: every column reference in its ON DUPLICATE KEY UPDATE clause was already qualified (new.col), with no bare reference anywhere -- no change was needed there, and this was verified by inspection against the same MySQL 8.4 row-alias rules that caught the candle_sync bug, not assumed.",
-        "Moved docs/backtesting-pipeline.md to app/docs/backtesting-pipeline.md. It was committed at the repo root in v3.19.0 and never actually deployed: updater.php's GITHUB_BASE_URL fetch root is '.../main/app', so a files entry naming the repo-root path would 404 and fail the whole Update Now. Living under app/ now makes it a normal deployable file, matching this release's own files entry for it."
+        "Fix: Chart page layout — removed the dead space above/below the chart and made it fill from directly under the controls bar to the bottom of the viewport (flex-based, no hardcoded pixel height), with no page-level scrollbar while the chart is open. Scoped entirely to a new body.chart-active class (set in js/app.js::showPage()) — every other page's layout is unchanged.",
+        "Change: the chart's controls bar is now a compact, dark bar (roughly half its old height) matching the chart's own theme instead of the light card style used elsewhere in the app — inline controls, no vertical label stacking, the \"Data from ...\" note right-aligned and muted.",
+        "Change: the page header (title + Trade/PDF buttons) switches to the chart's dark theme only while the chart page is open — every other page keeps its current light header.",
+        "Add: collapsible sidebar, app-wide — a toggle collapses it to an icon-only rail (WordPress-admin style), with each item's label shown as a hover tooltip while collapsed. Persisted in localStorage and restored before first paint (no flash-of-uncollapsed-sidebar on load). Disabled below 900px, where the sidebar is already a mobile overlay drawer, not a rail.",
+        "Fix: the chart now explicitly calls resize() (not just Lightweight Charts' own autoSize) on the sidebar's own transitionend (width) and on window resize, so collapsing/expanding the sidebar or resizing the window doesn't leave the canvas stretched or squashed."
     ],
-    "release_notes": "MANUAL DB STEP REQUIRED, not run by this release: migrations/2026_09_24_0002_create_backtesting_tables.sql (from v3.19.0) is still pending -- run migrate.php?mode=status then mode=run after Update Now, same as noted in v3.19.0's own release notes. This v3.19.1 patch only fixes the PHP-side crash in the CLI pipeline (bybit_client.php) and correctly deploys the pipeline README; nothing here touches or re-runs any migration.",
+    "release_notes": "UI/layout only — no database changes, no migration involved. Nothing here touches migrations/2026_09_24_0002_create_backtesting_tables.sql, still pending from v3.19.0 (run migrate.php?mode=run after Update Now if you haven't already).",
     "files": [
-        {"path": "includes/bybit_client.php", "critical": false},
-        {"path": "docs/backtesting-pipeline.md", "critical": false}
+        {"path": "css/style.css", "critical": false},
+        {"path": "index.php", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "js/chart.js", "critical": false},
+        {"path": "pages/chart.php", "critical": false}
     ],
     "db_migrations": []
 }

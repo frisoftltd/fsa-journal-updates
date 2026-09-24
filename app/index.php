@@ -18,6 +18,7 @@ $u = currentUser();
 <link rel="stylesheet" href="css/brand.css">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 <div class="app">
@@ -44,6 +45,7 @@ $u = currentUser();
     <a href="#" data-page="trades" onclick="showPage('trades');return false;"><span class="icon">📋</span>Trade Log</a>
     <a href="#" data-page="reportcard" onclick="showPage('reportcard');return false;"><span class="icon">📝</span>Report Card<span id="reportcard-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--orange, #F59E0B);margin-left:auto"></span></a>
     <a href="#" data-page="stats" onclick="showPage('stats');return false;"><span class="icon">📈</span>Statistics</a>
+    <a href="#" data-page="chart" onclick="showPage('chart');return false;"><span class="icon">🕯️</span>Chart</a>
     <div class="nav-section">Tools</div>
     <a href="#" data-page="bfimport" onclick="showPage('bfimport');return false;"><span class="icon">📥</span>Import</a>
     <a href="#" data-page="calculator" onclick="showPage('calculator');return false;"><span class="icon">🧮</span>Risk Calculator</a>
@@ -97,7 +99,7 @@ $u = currentUser();
 
   <?php
   // ── Load each page from its own file ──
-  $pages = ['dashboard','trades','reportcard','stats','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
+  $pages = ['dashboard','trades','reportcard','stats','chart','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
   foreach ($pages as $p) {
       include "pages/{$p}.php";
   }
@@ -140,6 +142,7 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 <script src="js/trades.js"></script>
 <script src="js/report-card.js"></script>
 <script src="js/stats.js"></script>
+<script src="js/chart.js"></script>
 <script src="js/calculator.js"></script>
 <script src="js/strategy.js"></script>
 <script src="js/strategies.js"></script>

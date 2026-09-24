@@ -1,14 +1,26 @@
 {
-    "current_version": "3.18.3",
+    "current_version": "3.19.0",
     "release_date": "2026-09-24",
     "changelog": [
-        "Fix migrations/2026_09_23_0001_create_report_card_tables.sql — migrate.php?mode=run failed with errno 150 (\"Foreign key constraint is incorrectly formed\") creating report_cards. Confirmed against live SHOW CREATE TABLE users: users.id is signed int(11), while this migration declared every user_id column INT UNSIGNED. Every user_id column that FKs to users(id) (report_cards, report_card_templates, report_card_mantras, report_card_ai_reviews) is now plain INT (signed), matching exactly. Also found and fixed the same mismatch on report_card_tickers.trade_id -> trades.id (never reached by the live run, since mode=run stops at the first failing statement) — confirmed signed by precedent in the already-shipped 2026_09_21_0008_create_trade_checkins.sql, which FKs to trades(id) the same way. Every in-file FK between two new report_card_* tables was checked too and needed no change (all self-consistently INT UNSIGNED already).",
-        "Every CREATE TABLE in that migration now uses CREATE TABLE IF NOT EXISTS, so a retry after a later table's failure can't fail again on an earlier table that already succeeded (DDL auto-commits per statement; this file runs outside a transaction).",
-        "This file was never successfully applied on live (mode=run stopped at the first statement), so editing it is the intended retry path, not a checksum-locked edit — see CLAUDE.md v3.12.2. Checked the Report Card PHP code (ReportCardController.php, ReportCardAiController.php): nothing assumes these columns are unsigned — every read/write goes through a prepared-statement placeholder and app-level values are already always positive (uid()/validId()) — so no PHP changes were needed."
+        "Add: Backtesting Phase 1a — a candle data pipeline (Bybit v5 linear perpetuals, BTCUSDT/ETHUSDT/BNBUSDT to start, database-driven via a new symbols table, 15m/1H/4H/1D fetched natively) plus a TradingView-styled chart page (TradingView Lightweight Charts, dark theme, right price scale, OHLC legend, volume histogram, symbol/timeframe/timezone switchers, scroll-back pagination). No replay engine, drawing tools, or orders yet — that's phase 1b. See docs/backtesting-pipeline.md (repo only, not part of the deployed site) for the full runbook.",
+        "New tables (migrations/2026_09_24_0002_create_backtesting_tables.sql, manual step — see release notes below): symbols, candles (PRIMARY KEY (symbol, timeframe, open_time) — one composite key doubling as both the required UNIQUE constraint and the range-query index, InnoDB-clustered in read/write order), candle_sync (per symbol+timeframe earliest/latest/last-synced bookkeeping).",
+        "New CLI pipeline (includes/bybit_client.php + cli/backfill.php, cli/update.php, cli/verify.php, cli/repair.php) — CLI-only (403s under any web SAPI; also nginx-denied at /cli/, see CLAUDE.md). backfill.php auto-detects each symbol's real earliest available candle rather than assuming 2020-01-01; resumable by design (always resumes from candle_sync.latest_open_time, every write is an upsert keyed on (symbol,timeframe,open_time)). update.php is the 15-minute cron target and never stores the currently-forming candle. verify.php reports gaps (and, with --spotcheck=N, re-fetches a random sample to catch value-level drift); repair.php refetches exactly the gaps verify.php would report.",
+        "New chart surface: ChartController.php (get_symbols/get_candles — reads only from MySQL, never calls Bybit from a page request or the browser) + pages/chart.php + js/chart.js, added to the sidebar as a new 'Chart' nav item."
     ],
-    "release_notes": "Redeploys the corrected migrations/2026_09_23_0001_create_report_card_tables.sql (fixes the errno 150 signedness mismatch against users.id/trades.id that failed the last mode=run) — the live migrations/ folder currently has the old, broken copy from v3.18.0 and needs this file re-synced before retrying. After Update Now: run migrate.php?mode=status to confirm it shows pending (not a checksum mismatch against the old copy's already-recorded 'failed' row, which is expected and retryable), then mode=run. Does not touch 2026_09_24_0001 — that migration is unrelated and still separately pending from v3.18.2.",
+    "release_notes": "MANUAL DB STEP REQUIRED, not run by this release: after Update Now, run migrate.php?mode=status then mode=run to apply migrations/2026_09_24_0002_create_backtesting_tables.sql (creates symbols/candles/candle_sync and seeds BTCUSDT/ETHUSDT/BNBUSDT). That migration file is deliberately NOT in this release's files list or db_migrations below, same as 2026_09_24_0001 was excluded in v3.18.1 -- it must never be auto-copied into the live migrations/ folder outside a real release's files list, since migrate.php's own directory scan would otherwise pick it up unexpectedly. It IS committed to the repo (git only) for history and manual reference. After the migration applies, run the CLI backfill over SSH (php cli/backfill.php) and register the cron job -- see docs/backtesting-pipeline.md in the repo for both, plus the recommended nginx 'deny' rule for /cli/.",
     "files": [
-        {"path": "migrations/2026_09_23_0001_create_report_card_tables.sql", "critical": false}
+        {"path": "includes/bybit_client.php", "critical": false},
+        {"path": "includes/controllers/ChartController.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "cli/backfill.php", "critical": false},
+        {"path": "cli/update.php", "critical": false},
+        {"path": "cli/verify.php", "critical": false},
+        {"path": "cli/repair.php", "critical": false},
+        {"path": "pages/chart.php", "critical": false},
+        {"path": "js/chart.js", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "index.php", "critical": false},
+        {"path": "css/style.css", "critical": false}
     ],
     "db_migrations": []
 }

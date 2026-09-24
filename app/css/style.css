@@ -270,6 +270,18 @@ textarea{resize:vertical;min-height:65px}
 .rc-ticker-imgs img{width:90px;height:60px;object-fit:cover;border-radius:6px;border:1px solid var(--border);cursor:pointer}
 .rc-history-row td{cursor:pointer}
 
+/* ── BACKTESTING CHART (Phase 1a) ──
+   Deliberately dark and independent of --bg/--card (which brand.css overrides to light
+   values) — this is the one place in the app meant to look like TradingView's own dark
+   chart pane, not the rest of FundedControl's "Light Authority" chrome. Colors here are
+   just the wrapper frame; the candlestick/volume/grid colors themselves are set by
+   Lightweight Charts' own options in js/chart.js. */
+.tv-chart-wrap{position:relative;background:#131722;border:1px solid #1e222d;border-radius:var(--radius);overflow:hidden}
+#tv-chart{width:100%;height:560px}
+.tv-legend{position:absolute;top:10px;left:14px;z-index:5;font-family:var(--font-mono, monospace);font-size:12px;line-height:1.6;color:#d1d4dc;pointer-events:none;text-shadow:0 1px 2px rgba(0,0,0,0.6)}
+.tv-legend .tv-legend-title{font-weight:600;margin-bottom:2px;font-size:13px}
+.tf-btn.active{background:var(--blue);color:white;border-color:var(--blue)}
+
 /* ── PDF PRINT ── */
 @media print{
   .sidebar,.topbar,.btn,.modal-overlay,.toast,.hamburger{display:none!important}

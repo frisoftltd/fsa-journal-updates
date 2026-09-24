@@ -25,18 +25,67 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (git remote origin and `updater.php` both still say `acrobcrypto250/fsa-journal-updates` — that account was renamed to `frisoftltd`; GitHub redirects it, so it still works, but the hardcoded name in `updater.php` is stale) |
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
-| DB Name | `theittav_journal` on Namecheap shared hosting. **`theittav_fundedcontrol` is an abandoned copy** — this file briefly said `theittav_fundedcontrol` was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). |
-| Current Version | v3.18.0 |
+| DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
+| Current Version | v3.19.0 |
 
 ### Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Backend | PHP 8.1 |
-| Database | MySQL (PDO, prepared statements) |
-| Frontend | Vanilla JS + Chart.js |
-| Hosting | Namecheap shared hosting (cPanel) |
+| Database | MySQL 8.4 (PDO, prepared statements) |
+| Frontend | Vanilla JS + Chart.js + TradingView Lightweight Charts (backtesting chart, v3.19.0) |
+| Hosting | Hetzner VPS, CloudPanel, nginx + PHP-FPM — see §1A |
 | No frameworks | No Laravel, no React, no Composer |
+
+### §1A. Server Environment (migrated 2026-09-24)
+
+| Field | Value |
+|-------|-------|
+| Provider | Hetzner CX23 VPS, Helsinki |
+| OS | Ubuntu 24.04 |
+| IP | 77.42.125.97 |
+| Panel | CloudPanel |
+| Web server | nginx + PHP-FPM |
+| Site root | `/home/fundedcontrol/htdocs/fundedcontrol.com` |
+| Site user | `fundedcontrol` |
+| Database | MySQL 8.4 — database `fundedcontrol`, user `fundedcontrol`, host `127.0.0.1:3306` |
+
+**Everything above replaces the old Namecheap shared-hosting setup as of 2026-09-24.**
+Every other mention of `theittav_journal`, cPanel, or Namecheap-relative paths
+elsewhere in this file (§11, §3A's "Operational Lessons," the v3.9.x–v3.13.x narrative
+sections, §15's SMTP config, §18's session-starter template) is a **historical record**
+of what was true on the old host at the time those releases shipped — left as written,
+not rewritten, since rewriting history there would misrepresent what actually happened.
+Don't infer the current DB name, site paths, or hosting details from those older
+sections; this table is the current, authoritative one.
+
+### Backtesting Pipeline (Phase 1a, added v3.19.0)
+
+`app/cli/{backfill,update,verify,repair}.php` pull OHLCV candles from Bybit v5
+`/v5/market/kline` (linear perpetuals, no API key needed) into three new tables
+(`symbols`, `candles`, `candle_sync` — see §3 below) via `includes/bybit_client.php`.
+CLI-only, enforced two ways: `backtestRequireCli()` 403s under any non-CLI SAPI, and
+this site's nginx vhost denies `/cli/` outright:
+```nginx
+location ^~ /cli/ {
+    deny all;
+    return 403;
+}
+```
+`cli/update.php` runs every 15 minutes via a CloudPanel Cron Job:
+```
+*/15 * * * * php /home/fundedcontrol/htdocs/fundedcontrol.com/cli/update.php >> /home/fundedcontrol/htdocs/backtesting-logs/update-cron.log 2>&1
+```
+All four scripts also log to `/home/fundedcontrol/htdocs/backtesting-logs/` — one level
+above this site's own document root (a sibling of `fundedcontrol.com/` inside `htdocs/`),
+so a direct request for a log file 404s at the vhost level instead of serving plain text.
+
+The Chart page (`pages/chart.php`, `js/chart.js`, `ChartController.php`) reads candles
+only from MySQL via `get_symbols`/`get_candles` — nothing in the browser or in a page
+request ever calls Bybit directly. See `docs/backtesting-pipeline.md` (repo only, not
+part of the deployed site — the updater's `files` manifest never lists it) for the full
+backfill/cron/verify/repair runbook.
 
 ---
 
@@ -4105,11 +4154,12 @@ fsa-journal-updates/          ← Repo root
 Copy-paste this at the start of every Claude Code session:
 
 ```
-Project: FundedControl — PHP 8.1 + MySQL + Vanilla JS
+Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.18.0
-DB: theittav_journal on Namecheap shared hosting
+Current Version: v3.19.0
+Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
+DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.
 
 GitHub Token: [paste token here]

@@ -90,6 +90,9 @@ $routes = [
     'get_ai_reviews'         => ['ReportCardAiController', 'getReviews'],
     'get_ai_review'          => ['ReportCardAiController', 'getReview'],
     'acknowledge_ai_finding' => ['ReportCardAiController', 'acknowledgeFinding'],
+    // Backtesting Chart (Phase 1a) — read-only, MySQL only, never calls Bybit
+    'get_symbols'            => ['ChartController', 'getSymbols'],
+    'get_candles'            => ['ChartController', 'getCandles'],
 ];
 
 if (!isset($routes[$action])) {

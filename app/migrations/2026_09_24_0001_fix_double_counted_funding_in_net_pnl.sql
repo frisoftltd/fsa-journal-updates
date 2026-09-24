@@ -1,4 +1,4 @@
--- FundedControl — v3.18.1 data repair
+-- FundedControl — v3.18.1/v3.18.2 data repair
 -- Fixes: BitfundedImportController::confirm() (pre-v3.18.1) computed a matched/new
 -- trade's net_pnl as `pnl - fees - COALESCE(funding, 0)`, where `funding` is that one
 -- trade's own attributed slice of the account's Funding Fee history
@@ -18,43 +18,36 @@
 -- file and by the code fix — its current value is already correct (it was never the
 -- broken side of this bug); only the affected trades' own net_pnl needs correcting here.
 --
--- ⚠ BACK UP THE trades TABLE BEFORE RUNNING THE UPDATE BELOW.
+-- v3.18.2: this file is now deployed and run through the standard migration path
+-- (version.json's files -> migrate.php?mode=run), not run by hand as v3.18.1 originally
+-- shipped it. That changed what belongs in this file: migrate.php executes every
+-- statement in a migration through PDO::exec() (app/migrate.php::splitSqlStatements()/
+-- the mode=run loop) and its own report only ever renders applied/failed + timing per
+-- file — there is no code path that captures or displays a SELECT's result set. A
+-- preview/verify SELECT left in this file would run against production with its output
+-- going nowhere, which defeats the entire point of a "look before you touch it" preview
+-- and isn't a real safeguard here. **If you want to eyeball the affected rows before
+-- running this via migrate.php, run the SELECT below by hand first, via phpMyAdmin or
+-- the mysql CLI** — it is intentionally not part of this file:
+--
+--   SELECT id, challenge_id, pair, direction, trade_date, pnl, fees, funding, net_pnl,
+--          ROUND(pnl - fees, 4) AS correct_net_pnl,
+--          ROUND(net_pnl - (pnl - fees), 4) AS diff
+--   FROM trades
+--   WHERE ABS(net_pnl - (pnl - fees)) > 0.01
+--   ORDER BY challenge_id, trade_date, id;
+--
+-- ⚠ BACK UP THE trades TABLE BEFORE mode=run.
 --   mysqldump -u <user> -p theittav_journal trades > trades_backup_2026_09_24.sql
 --   (DDL/DML here can't be rolled back — same standing rule as every other migration in
 --   this project, see CLAUDE.md §3A.)
 --
--- This is plain SQL for manual execution (no live DB credentials exist in this
--- environment to run it here) — it is NOT wired into migrate.php/version.json. Run the
--- SELECT first, eyeball the rows, then run the UPDATE. Both are idempotent: a trade
--- whose net_pnl is already `pnl - fees` will never match the WHERE clause, so this is
--- safe to re-run (e.g. after a future import affects new rows) without re-checking by
--- hand every time.
-
--- ── Step 1: PREVIEW — every trade whose stored net_pnl disagrees with pnl - fees by
--- more than a cent. Expect this to return exactly the trades that had a non-null
--- `funding` value written by a pre-v3.18.1 import (their diff should equal their own
--- `funding` value, to the cent). Run this first and inspect the output before Step 3.
-SELECT
-    id, challenge_id, pair, direction, trade_date,
-    pnl, fees, funding, net_pnl,
-    ROUND(pnl - fees, 4) AS correct_net_pnl,
-    ROUND(net_pnl - (pnl - fees), 4) AS diff
-FROM trades
-WHERE ABS(net_pnl - (pnl - fees)) > 0.01
-ORDER BY challenge_id, trade_date, id;
-
--- ── Step 2: back up the trades table now, using the mysqldump command above, if you
--- have not already.
-
--- ── Step 3: REPAIR — recompute net_pnl as pnl - fees for exactly the rows Step 1
--- flagged. Does not touch pnl, fees, funding, or any other column — trades.funding is
--- left in place as the display-only figure it now is. Does not touch
--- challenges.funding_adjustment (already correct — not part of this bug).
+-- The UPDATE below is the only statement in this file. It is idempotent: a trade whose
+-- net_pnl is already `pnl - fees` never matches the WHERE clause, so re-running this
+-- migration (or migrate.php re-running it after a prior failure, per its own
+-- failed-is-retryable rule) is always safe and never a no-op-that-should-have-done-more.
+-- It touches only trades.net_pnl — never pnl, fees, funding, or any challenges column
+-- (funding_adjustment is untouched, exactly as documented above).
 UPDATE trades
 SET net_pnl = ROUND(pnl - fees, 4)
-WHERE ABS(net_pnl - (pnl - fees)) > 0.01;
-
--- ── Step 4: VERIFY — should return zero rows.
-SELECT COUNT(*) AS still_mismatched
-FROM trades
 WHERE ABS(net_pnl - (pnl - fees)) > 0.01;

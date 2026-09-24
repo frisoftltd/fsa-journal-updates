@@ -1,20 +1,13 @@
 {
-    "current_version": "3.18.1",
+    "current_version": "3.18.2",
     "release_date": "2026-09-24",
     "changelog": [
-        "Fix: Risk Calculator's \"Balance (today, auto)\", Available Margin, the trade-limits status strip, the \"+ New Trade\"/\"+ Trade\" gate, and the risk-ladder tier lookup all ignored challenges.funding_adjustment — every one of them reads balanceAtDayStart() (helpers.php), which duplicated the balance formula without a funding term at all. balanceAtDayStart() now delegates to the new challengeBalance(), the same funding-aware formula enrichChallenge() already used, so all of these move in lockstep with the sidebar balance going forward.",
-        "Fix: the Bitfunded importer double-counted funding on any matched/new trade whose position also appeared in the pasted Transaction History — BitfundedImportController::confirm() subtracted that trade's own attributed funding inside trades.net_pnl AND rolled the same funding into challenges.funding_adjustment (the whole paste's Funding Fee total, of which that trade's own funding is already a subset), which enrichChallenge()'s current_balance then subtracted a second time. trades.net_pnl is now always pnl - fees, full stop; trades.funding is kept but is display-only and feeds no balance or P&L sum anywhere in the app.",
-        "Change: single balance source of truth — helpers.php::challengeBalance() is now the only place `starting_balance + SUM(net_pnl of closed trades[, before a given date]) - funding_adjustment` is computed. enrichChallenge() (current_balance) and balanceAtDayStart() (ladder/calculator balance) both call it instead of each keeping its own copy of the formula.",
-        "Add: Statistics -> P&L & Fees gains two rows, \"Funding\" and \"Net After Funding\" (get_stats: new funding_adjustment / net_pnl_after_funding fields), so the account's funding cost is visible as its own line instead of only implicitly inside Net P&L or the Exit Reason table's footnote.",
-        "Migration (manual — see note below): migrations/2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql repairs trades.net_pnl on rows written under the old double-counting formula (recomputes net_pnl = pnl - fees wherever it currently disagrees with that by more than a cent). Back up the trades table first; run the preview SELECT and eyeball the rows before applying the UPDATE. Does not touch challenges.funding_adjustment — that column was never the broken side of this bug and its current value is already correct. This file is deliberately NOT in this release's files/db_migrations below — see the note at the top of this changelog block."
+        "Ship migration 2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql via the standard updater/migrate.php path — v3.18.1 committed this file but deliberately left it out of files/db_migrations. Now deployed like every other tracked migration (see migrations/2026_09_23_0001 in v3.18.0 for the same pattern): the updater copies it into the live migrations/ folder, and it is applied by hand via migrate.php?mode=run (never automatically by the updater itself).",
+        "The migration file was trimmed to its single UPDATE statement — migrate.php executes every statement in a migration via PDO::exec() and its report only ever shows applied/failed + timing, with no path to display a SELECT's result set, so the preview/verify SELECTs v3.18.1's manual version had would run with their output going nowhere. The preview query is now given in the file's own header comment for eyeballing by hand (phpMyAdmin/mysql CLI) before mode=run, not embedded as a statement the runner would silently discard."
     ],
-    "release_notes": "IMPORTANT — manual DB step, run by hand, not via this updater or migrate.php: after deploying this release, back up the `trades` table, then run migrations/2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql (preview SELECT first, then the UPDATE) against theittav_journal via phpMyAdmin or the mysql CLI. This file is intentionally excluded from the files list below and from db_migrations, so neither \"Update Now\" nor migrate.php?mode=run will ever touch it automatically — it lives in the repo's migrations/ folder for reference only in this release; do not copy it into the live server's migrations/ directory, or migrate.php's own directory scan would pick it up as a normal pending migration and could auto-apply it the next time mode=run is used for something unrelated.",
+    "release_notes": "Deploys migration 2026_09_24_0001 (repairs net_pnl double-counted funding). Back up DB, then run migrate.php?mode=status, then mode=run.",
     "files": [
-        {"path": "includes/helpers.php", "critical": false},
-        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
-        {"path": "includes/controllers/StatsController.php", "critical": false},
-        {"path": "pages/stats.php", "critical": false},
-        {"path": "js/stats.js", "critical": false}
+        {"path": "migrations/2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql", "critical": false}
     ],
     "db_migrations": []
 }

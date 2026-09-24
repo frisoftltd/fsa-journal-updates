@@ -28,6 +28,8 @@
       <div class="stat-row"><span class="stat-label">Gross P&amp;L</span><span class="stat-val" id="s-gross">—</span></div>
       <div class="stat-row"><span class="stat-label">Total Fees Paid</span><span class="stat-val red" id="s-fees">—</span></div>
       <div class="stat-row"><span class="stat-label">Net P&amp;L</span><span class="stat-val" id="s-netpnl">—</span></div>
+      <div class="stat-row"><span class="stat-label">Funding</span><span class="stat-val red" id="s-funding">—</span></div>
+      <div class="stat-row"><span class="stat-label">Net After Funding</span><span class="stat-val" id="s-net-after-funding">—</span></div>
       <div class="stat-row"><span class="stat-label">Avg Win</span><span class="stat-val green" id="s-avgwin">—</span></div>
       <div class="stat-row"><span class="stat-label">Avg Loss</span><span class="stat-val red" id="s-avgloss">—</span></div>
       <div class="stat-row"><span class="stat-label">Fees % of Gross</span><span class="stat-val" id="s-fee-pct">—</span></div>

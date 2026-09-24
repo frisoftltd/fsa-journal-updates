@@ -48,6 +48,13 @@ class StatsController {
         $stats['net_pnl']       = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades $where", $p);
         $stats['gross_pnl']     = $qv("SELECT COALESCE(SUM(pnl),0) FROM trades $where", $p);
         $stats['total_fees']    = $qv("SELECT COALESCE(SUM(fees),0) FROM trades $where", $p);
+        // v3.18.1 — net_pnl is now always gross_pnl - total_fees (funding no longer nets
+        // into it, see BitfundedImportController/helpers.php::challengeBalance()).
+        // funding_adjustment is the account's one real funding figure, shown as its own
+        // line rather than folded silently into Net P&L, so "Net after funding" is the
+        // only place the two combine and it's labeled as doing so.
+        $stats['funding_adjustment']  = round((float)($ch['funding_adjustment'] ?? 0), 2);
+        $stats['net_pnl_after_funding'] = round((float)$stats['net_pnl'] - $stats['funding_adjustment'], 2);
         $stats['avg_win']       = $qv("SELECT COALESCE(AVG(net_pnl),0) FROM trades $where AND result='Win'", $p);
         $stats['avg_loss']      = $qv("SELECT COALESCE(AVG(net_pnl),0) FROM trades $where AND result='Loss'", $p);
         $stats['avg_r']         = $qv("SELECT COALESCE(AVG(r_multiple),0) FROM trades $where AND $closedFilter", $p);

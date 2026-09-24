@@ -17,14 +17,20 @@
  * touches trade_variables, emotion_tag, setup_grade, the three note columns, stop_loss,
  * take_profit, strategy_id, screenshots, or a trade's id.
  *
- * v3.17.3 adds `funding` (per-trade, via bf_attribute_funding() in bitfunded_parser.php)
+ * v3.17.3 added `funding` (per-trade, via bf_attribute_funding() in bitfunded_parser.php)
  * to that execution-field set — nullable, defaulting NULL not 0, never backfilled onto a
- * row imported before this release. `net_pnl` becomes `pnl - fees - COALESCE(funding, 0)`
- * going forward; every row imported before this release keeps its own already-correct
- * `pnl - fees` value untouched. `challenges.funding_adjustment` (the challenge-level
- * total, set below from `$funding['funding_total']`) is unrelated and unchanged by this —
- * see CLAUDE.md v3.17.3 for why a per-trade figure and the challenge-level total are two
- * separate, deliberately non-double-counted numbers.
+ * row imported before that release. It briefly fed into `net_pnl` too
+ * (`pnl - fees - COALESCE(funding, 0)`); **v3.18.1 removed that** — a matched trade's own
+ * attributed funding is already a subset of the whole-paste `funding_total` this same
+ * `confirm()` writes to `challenges.funding_adjustment` below, so netting it into both
+ * double-subtracted it (see CLAUDE.md v3.18.1 for the incident this closes — the
+ * Bitfunded Altcoin sidebar balance sat ~$1.60 short of Bitfunded's own reported figure
+ * because of exactly this). `net_pnl` is now always `pnl - fees`, full stop — the same
+ * formula every pre-v3.17.3 row already had. `trades.funding` is kept and still written
+ * (display-only: shows what was attributed to this specific position) but no longer
+ * feeds any P&L or balance sum anywhere in this codebase; the account's one real funding
+ * figure is `challenges.funding_adjustment`, and `helpers.php::challengeBalance()`
+ * subtracts it exactly once.
  *
  * v3.14.1 adds one narrow exception: for a MATCHED row only, if the existing trade
  * already has a stop_loss on file (set pre-entry, before this execution data ever
@@ -140,18 +146,13 @@ class BitfundedImportController {
                 // pasted, or this specific position's Open/Close Position rows aren't in
                 // what was pasted (bf_attribute_funding()'s own null cases) — "unknown,"
                 // never a guessed 0, so trades.funding stores that same null rather than
-                // 0. The COALESCE-equivalent (?? 0.0) below is deliberate and scoped to
-                // exactly this arithmetic: it lets net_pnl fall back to the pre-v3.17.3
-                // pnl-minus-fees formula when funding is unknown, without ever writing a
-                // fabricated 0 onto the column itself. This is the same class of NULL
-                // handling as every other guard in this release — an unguarded NULL here
-                // would silently poison net_pnl into NULL for every row, the identical
-                // mechanism (just a different column) as the bug this whole release
-                // fixes.
+                // 0. v3.18.1: this value is display-only now (trades.funding), never part
+                // of $net — see this file's header comment for why folding it into net_pnl
+                // double-counted against challenges.funding_adjustment.
                 $positionFunding = $funding !== null
                     ? bf_attribute_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
                     : null;
-                $net = round($p['pnl'] - $p['fees'] - ($positionFunding ?? 0.0), 4);
+                $net = round($p['pnl'] - $p['fees'], 4);
                 $exitReasonForDb = $p['exit_reason'] !== '' ? $p['exit_reason'] : null;
 
                 if ($m['status'] === 'matched') {

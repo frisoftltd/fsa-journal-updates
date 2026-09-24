@@ -81,10 +81,51 @@ function getActiveChallenge() {
 }
 
 /**
+ * v3.18.1 — THE single balance formula for a challenge: `starting_balance + SUM(net_pnl
+ * of closed trades[, strictly before $beforeDate if given]) - funding_adjustment`. Every
+ * place in this codebase that needs "what does this account have" (enrichChallenge()'s
+ * current_balance) or "what did it have at the start of some date" (balanceAtDayStart(),
+ * below, is now a thin wrapper around this) must go through here — not a second,
+ * independently-written copy of this sum.
+ *
+ * This closes two related incidents (see CLAUDE.md v3.18.1): before this,
+ * balanceAtDayStart() duplicated this formula without the funding_adjustment term at
+ * all (the Risk Calculator, its ladder-tier lookup, and the trade-limits status strip
+ * were all funding-blind), and separately, BitfundedImportController::confirm() had
+ * subtracted a matched trade's own attributed funding inside that trade's own net_pnl
+ * *and* rolled the same funding into the challenge-level funding_adjustment total this
+ * function subtracts — double-counting it. net_pnl is now always `pnl - fees` (see
+ * BitfundedImportController), so funding is subtracted exactly once, here.
+ *
+ * $beforeDate === null means "as of right now" (every closed trade counts) —
+ * enrichChallenge()'s job. A `Y-m-d` string means "balance before the first trade of
+ * that date" — balanceAtDayStart()'s job. $excludeTradeId is a defensive pass-through
+ * (kept from balanceAtDayStart()'s original signature) for a caller recomputing a
+ * trade's own balance mid-save.
+ */
+function challengeBalance(PDO $db, int $challengeId, ?string $beforeDate = null, ?int $excludeTradeId = null): float {
+    $cs = $db->prepare("SELECT starting_balance, funding_adjustment FROM challenges WHERE id=?");
+    $cs->execute([$challengeId]);
+    $ch = $cs->fetch();
+    $starting = (float)($ch['starting_balance'] ?? 0);
+    $funding  = (float)($ch['funding_adjustment'] ?? 0);
+
+    $sql = "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE challenge_id=? AND result IN ('Win','Loss','Break Even')";
+    $params = [$challengeId];
+    if ($beforeDate !== null) { $sql .= " AND trade_date < ?"; $params[] = $beforeDate; }
+    if ($excludeTradeId) { $sql .= " AND id <> ?"; $params[] = $excludeTradeId; }
+    $s = $db->prepare($sql);
+    $s->execute($params);
+    $realised = (float)$s->fetchColumn();
+
+    return round($starting + $realised - $funding, 2);
+}
+
+/**
  * v3.13.0 — challenges.current_balance was a stored column nothing ever recalculated,
  * and it drifted silently for five weeks on the Bitfunded Altcoin challenge (see
- * CLAUDE.md). The column is gone; balance is derived here, every time, from
- * starting_balance + realised net P&L (closed trades only) - funding_adjustment, and
+ * CLAUDE.md). The column is gone; balance is derived here, every time, via
+ * challengeBalance() (v3.18.1 — previously an inline copy of that same formula), and
  * written back onto the array under the same 'current_balance' key so every existing
  * caller (PHP and the JSON API surface JS reads) keeps working unchanged.
  *
@@ -101,12 +142,8 @@ function getActiveChallenge() {
  */
 function enrichChallenge($db, $challenge) {
     if (!$challenge) return $challenge;
+    $challenge['current_balance'] = challengeBalance($db, (int)$challenge['id']);
     $starting = (float)($challenge['starting_balance'] ?? 0);
-    $funding  = (float)($challenge['funding_adjustment'] ?? 0);
-    $s = $db->prepare("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE challenge_id=? AND result IN ('Win','Loss','Break Even')");
-    $s->execute([$challenge['id']]);
-    $realised = (float)$s->fetchColumn();
-    $challenge['current_balance'] = round($starting + $realised - $funding, 2);
 
     $maxLossAmt = $challenge['max_loss_amt'] ?? null;
     if ($starting > 0 && $maxLossAmt !== null && (float)$maxLossAmt > 0) {
@@ -276,28 +313,20 @@ function jsonError($msg, $code = 200) {
 }
 
 /**
- * v3.16.1 (Phase 1b) — balance before the first trade of $tradeDate: starting_balance
- * plus the realised net P&L of every closed trade in the same challenge whose own
- * trade_date is strictly earlier. If none exist, this is starting_balance itself — the
- * same degenerate case the migration-era backfill relied on (COALESCE(...,0)), not a
- * special case that needs its own branch.
+ * v3.16.1 (Phase 1b) — balance before the first trade of $tradeDate. As of v3.18.1 this
+ * is a thin wrapper around challengeBalance() (see above) rather than its own copy of
+ * the formula — the pre-v3.18.1 version summed starting_balance + net_pnl only, with no
+ * funding_adjustment term at all, which is why the Risk Calculator's "Balance (today,
+ * auto)", its Available Margin, the trade-limits status strip, and the ladder-tier
+ * lookup (all of which read this function, directly or via computeTradeRiskFields())
+ * were funding-blind. See CLAUDE.md v3.18.1.
  *
  * Shared by computeTradeRiskFields() below and CalculatorController::sizePreview() (the
  * B4 pre-trade sizing panel) so both read the exact same definition rather than two
  * independently-written copies of the same sum drifting apart over time.
  */
 function balanceAtDayStart(PDO $db, int $challengeId, string $tradeDate, ?int $excludeTradeId = null): float {
-    $cs = $db->prepare("SELECT starting_balance FROM challenges WHERE id=?");
-    $cs->execute([$challengeId]);
-    $starting = (float)($cs->fetchColumn() ?: 0);
-
-    $sql = "SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE challenge_id=? AND result IN ('Win','Loss','Break Even') AND trade_date < ?";
-    $params = [$challengeId, $tradeDate];
-    if ($excludeTradeId) { $sql .= " AND id <> ?"; $params[] = $excludeTradeId; }
-    $s = $db->prepare($sql);
-    $s->execute($params);
-
-    return round($starting + (float)$s->fetchColumn(), 2);
+    return challengeBalance($db, $challengeId, $tradeDate, $excludeTradeId);
 }
 
 /**

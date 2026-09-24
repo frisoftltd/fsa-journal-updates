@@ -13,7 +13,10 @@ async function loadStats(){
     set('s-total',s.total_trades); set('s-wins',s.wins); set('s-losses',s.losses);
     set('s-be',s.break_evens); set('s-wr',fmtPct(s.win_rate));
     set('s-gross',fmt(s.gross_pnl)); set('s-fees',fmt(s.total_fees));
-    set('s-netpnl',fmt(s.net_pnl)); set('s-avgwin',fmt(s.avg_win));
+    set('s-netpnl',fmt(s.net_pnl));
+    set('s-funding',fmt(-Math.abs(s.funding_adjustment||0)));
+    set('s-net-after-funding',fmt(s.net_pnl_after_funding));
+    set('s-avgwin',fmt(s.avg_win));
     set('s-avgloss',fmt(s.avg_loss)); set('s-avgr',fmtR(s.avg_r));
     set('s-pf',s.profit_factor);
     set('s-maxdd',s.max_drawdown_pct?.toFixed(2)+'%');

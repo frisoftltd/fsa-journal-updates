@@ -1,28 +1,20 @@
 {
-    "current_version": "3.18.0",
-    "release_date": "2026-09-23",
+    "current_version": "3.18.1",
+    "release_date": "2026-09-24",
     "changelog": [
-        "Add: Daily Report Card module — a new sidebar page for the pre-market plan / post-market review workflow, per build briefing. Header (date, process-based overall grade, manual + auto P&L, morning temperature, sleep quality), one enforced primary process goal, standing mantras checked off daily, five free-text sections, and repeatable ticker rows with chart image uploads. Ten new tables (migrations/2026_09_23_0001_create_report_card_tables.sql): report_cards, report_card_blocks, report_card_templates(+blocks), report_card_mantras(+checks), report_card_tickers(+images), report_card_ai_reviews, report_card_ai_findings",
-        "Add: dynamic per-day session blocks (ReportCardController.php) — not the reference card's fixed US-equity blocks. Full CRUD, drag-reorder, 0-12 blocks per day, overlaps allowed (non-blocking warning), midnight-crossing blocks valid. Blocks are copied from a template into a card once at creation (weekday_default match -> user's is_default -> blank day) and never referenced again — editing a template never rewrites a past card, editing a day never rewrites the template. Five seed templates (Full day/London only/NY only/Light day/No-trade day) lazy-seeded per user on first use, since report_card_templates.user_id is NOT NULL and a migration can't seed rows for users that don't exist yet",
-        "Add: journal integration — a trade is attributed to whichever block's UTC window its time_in falls inside (or to an explicit Unassigned bucket, which is itself the signal of unplanned trading); pnl_auto is a live SUM(net_pnl) of the day's closed trades, never stored, shown alongside the manual pnl override; a trade-count guard reads the existing challenge_limits table (tradeLimitStatus(), shared with the Auto Risk Calculator) rather than hardcoding a 2/day-4/week limit",
-        "Add: AI Review (ReportCardAiController.php) — one Anthropic Messages API call per review sees behaviour (trades: risk sizing, R, exit quality, gate/tag strategy-variable answers, time gaps, block attribution) and thinking (the card's own text/grades) in the same payload, with a forced tool call guaranteeing structured JSON back. Produces alignment_score, discipline_score, and named contradictions/behavior_patterns/thinking_patterns/strengths/risks, each with cited evidence, exploded into report_card_ai_findings (queryable across months, so a repeated mistake becomes a fact, not a feeling). Re-running a review always inserts a new row; a failed run leaves status=failed with error_message and the card still renders",
-        "Add: report_card_cron.php — token-protected entry point (same pattern as migrate.php) for the nightly/weekly AI review runs, meant to be hit by a cPanel Cron Job; this hosting has no queue infrastructure for a real background worker",
-        "Add: History view (streak, alignment-score-over-time chart, per-day table) and Templates view (manage session templates and their blocks) as internal tabs on the same Report Card page — this app has no client-side URL router (index.php's showPage() only swaps page visibility, no pushState), so the briefing's /report-card/{date}-style routes are implemented as view state on one sidebar page instead of separate routes"
+        "Fix: Risk Calculator's \"Balance (today, auto)\", Available Margin, the trade-limits status strip, the \"+ New Trade\"/\"+ Trade\" gate, and the risk-ladder tier lookup all ignored challenges.funding_adjustment — every one of them reads balanceAtDayStart() (helpers.php), which duplicated the balance formula without a funding term at all. balanceAtDayStart() now delegates to the new challengeBalance(), the same funding-aware formula enrichChallenge() already used, so all of these move in lockstep with the sidebar balance going forward.",
+        "Fix: the Bitfunded importer double-counted funding on any matched/new trade whose position also appeared in the pasted Transaction History — BitfundedImportController::confirm() subtracted that trade's own attributed funding inside trades.net_pnl AND rolled the same funding into challenges.funding_adjustment (the whole paste's Funding Fee total, of which that trade's own funding is already a subset), which enrichChallenge()'s current_balance then subtracted a second time. trades.net_pnl is now always pnl - fees, full stop; trades.funding is kept but is display-only and feeds no balance or P&L sum anywhere in the app.",
+        "Change: single balance source of truth — helpers.php::challengeBalance() is now the only place `starting_balance + SUM(net_pnl of closed trades[, before a given date]) - funding_adjustment` is computed. enrichChallenge() (current_balance) and balanceAtDayStart() (ladder/calculator balance) both call it instead of each keeping its own copy of the formula.",
+        "Add: Statistics -> P&L & Fees gains two rows, \"Funding\" and \"Net After Funding\" (get_stats: new funding_adjustment / net_pnl_after_funding fields), so the account's funding cost is visible as its own line instead of only implicitly inside Net P&L or the Exit Reason table's footnote.",
+        "Migration (manual — see note below): migrations/2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql repairs trades.net_pnl on rows written under the old double-counting formula (recomputes net_pnl = pnl - fees wherever it currently disagrees with that by more than a cent). Back up the trades table first; run the preview SELECT and eyeball the rows before applying the UPDATE. Does not touch challenges.funding_adjustment — that column was never the broken side of this bug and its current value is already correct. This file is deliberately NOT in this release's files/db_migrations below — see the note at the top of this changelog block."
     ],
+    "release_notes": "IMPORTANT — manual DB step, run by hand, not via this updater or migrate.php: after deploying this release, back up the `trades` table, then run migrations/2026_09_24_0001_fix_double_counted_funding_in_net_pnl.sql (preview SELECT first, then the UPDATE) against theittav_journal via phpMyAdmin or the mysql CLI. This file is intentionally excluded from the files list below and from db_migrations, so neither \"Update Now\" nor migrate.php?mode=run will ever touch it automatically — it lives in the repo's migrations/ folder for reference only in this release; do not copy it into the live server's migrations/ directory, or migrate.php's own directory scan would pick it up as a normal pending migration and could auto-apply it the next time mode=run is used for something unrelated.",
     "files": [
-        {"path": "migrations/2026_09_23_0001_create_report_card_tables.sql", "critical": false},
-        {"path": "includes/router.php", "critical": false},
         {"path": "includes/helpers.php", "critical": false},
-        {"path": "includes/controllers/ReportCardController.php", "critical": false},
-        {"path": "includes/controllers/ReportCardAiController.php", "critical": false},
-        {"path": "report_card_cron.php", "critical": false},
-        {"path": "index.php", "critical": false},
-        {"path": "js/app.js", "critical": false},
-        {"path": "js/report-card.js", "critical": false},
-        {"path": "css/style.css", "critical": false},
-        {"path": "pages/reportcard.php", "critical": false},
-        {"path": "modals/report-card-block-modal.php", "critical": false},
-        {"path": "modals/report-card-template-modal.php", "critical": false}
+        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
+        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "pages/stats.php", "critical": false},
+        {"path": "js/stats.js", "critical": false}
     ],
     "db_migrations": []
 }

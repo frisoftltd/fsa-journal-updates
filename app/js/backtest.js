@@ -1,9 +1,18 @@
 /**
- * FundedControl — Backtesting (v3.20.2 — reliable diagnostics + Saved Backtests split out)
+ * FundedControl — Backtesting (v3.20.5 — no implicit session resume)
  *
  * Two screens, exactly one visible at a time (showBacktestScreen()):
- *   'form'   — Screen A, new-session setup. Opens directly when the sidebar's
- *              "Backtesting" link is clicked — no session list first.
+ *   'form'   — Screen A, new-session setup. ALWAYS what opens when the sidebar's
+ *              "Backtesting" link is clicked, unconditionally — loadBacktest() no longer
+ *              looks at btActiveSessionId to decide whether to skip straight back to an
+ *              already-open session. That "convenience" (v3.20.1) was the whole bug:
+ *              btActiveSessionId is a plain in-memory variable that outlives navigating
+ *              away to Saved Backtests, so it kept pointing at a session even after that
+ *              session was deleted, and every route back into this page (sidebar link,
+ *              "+ New Backtest," "Create your first backtest" — all three just call
+ *              showPage('backtest')) silently reopened the dead session's replay window
+ *              instead of the form. Resuming a session is now only ever a deliberate
+ *              action from Saved Backtests (openBacktestFromList()).
  *   'window' — Screen B, the actual replay (chart/controls/orders/challenge panel).
  *              Full-bleed + dark; body.backtest-active is toggled here, exactly when
  *              entering/leaving THIS screen — not page-wide.
@@ -71,12 +80,18 @@ async function btApi(action, method, data) {
 }
 
 // ── ENTRY POINT ──────────────────────────────────────────
+/** v3.20.5: this used to trust a stale btActiveSessionId and silently resume whatever
+ *  session it still pointed at -- including one that had just been deleted, since
+ *  nothing clears btActiveSessionId on navigating away from the replay window to Saved
+ *  Backtests (only entering Screen A or a failed session load ever did). That's exactly
+ *  what let a deleted session's replay window keep reopening from the sidebar link, from
+ *  "+ New Backtest," and from "Create your first backtest" -- all three just call
+ *  showPage('backtest'), which calls this. Per this release's own requirement, the
+ *  sidebar's Backtesting link always opens the New Backtest form; resuming a session is
+ *  a deliberate action taken only from Saved Backtests (openBacktestFromList()), never
+ *  implicit here. showBacktestScreen('form') itself resets btActiveSessionId to null as
+ *  a side effect, so this can never leave a stale reference behind either. */
 async function loadBacktest() {
-    if (btActiveSessionId) {
-        // Returning to an already-open session (e.g. browser back) — just resize.
-        if (typeof resizeTvChart === 'function') resizeTvChart();
-        return;
-    }
     showBacktestScreen('form');
 }
 
@@ -235,14 +250,18 @@ async function btLoadCandleWindow() {
 }
 
 /** Returns true on success, false on failure (already shown to the user and bounced
- *  back to the session list) — callers use this to decide whether to keep going. */
+ *  back to the New Backtest form) — callers use this to decide whether to keep going.
+ *  v3.20.5: a deleted-or-never-existed session id must never render a phantom replay
+ *  screen. showBacktestScreen('form') (not a page navigation) is deliberate here — this
+ *  only ever runs while #page-backtest is already the visible page (every caller either
+ *  got here via openBacktestSession(), which is only ever invoked after showPage('backtest')
+ *  has already run), so switching screens in place is correct and also resets
+ *  btActiveSessionId to null as a side effect, same as every other path into Screen A. */
 async function refreshBtSession() {
     const s = await btApi(`get_backtest_session&id=${btActiveSessionId}`);
     if (!s || s.error) {
         toast('Failed to load session — ' + (s ? s.error : 'unknown error'), 'error');
-        btActiveSessionId = null; // otherwise the next visit to Backtesting thinks a session is already open and skips straight back to this same broken screen
-        document.body.classList.remove('backtest-active');
-        showPage('saved-backtests');
+        showBacktestScreen('form');
         return false;
     }
     btSession = s;

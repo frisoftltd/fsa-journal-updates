@@ -105,6 +105,15 @@ async function deleteBacktestSession(id, btn) {
         btn.disabled = false;
         return;
     }
+    // v3.20.5: btActiveSessionId (js/backtest.js, loaded before this file and sharing
+    // its top-level scope) is a plain in-memory variable that outlives navigating away
+    // from the replay window -- if the session just deleted is the one it still points
+    // at, clear it immediately rather than leaving a stale reference sitting around
+    // until something else happens to reset it.
+    if (btActiveSessionId === id) {
+        btActiveSessionId = null;
+        btSession = null;
+    }
     toast('Backtest deleted');
     loadSavedBacktests();
 }

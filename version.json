@@ -1,18 +1,16 @@
 {
-    "current_version": "3.20.6",
+    "current_version": "3.20.8",
     "release_date": "2026-09-25",
     "changelog": [
-        "Fix: BacktestController::createSession() treated a blank Start Date the same as an out-of-range one, rejecting it with \"Start date must fall within this symbol/timeframe's available history\" even though nothing had actually been entered. Start Date is now genuinely optional -- an empty field starts the session at the earliest available candle for that symbol/timeframe (candle_sync's own earliest_open_time), and the range check only runs at all when a date is actually given.",
-        "New: get_backtest_symbol_range (BacktestController::getSymbolRange()) -- returns candle_sync's earliest/latest open_time for a symbol+timeframe pair. Needed because get_symbols' own earliest_candle_ms is symbol-level only (not scoped to a timeframe) and has no \"latest\" counterpart at all, so the setup form had no source for either a correct per-timeframe earliest date or a max bound.",
-        "The setup form's Start Date field now prefills to that earliest date whenever the symbol or timeframe changes (so the user sees exactly what they'll get by default before editing it), and its min/max are set to the real available range so an out-of-range date can't be picked in the browser's own date picker to begin with. The 'Data from ... onward' helper line is unchanged.",
-        "Label now reads \"Start Date (optional -- defaults to the earliest available candle)\" so the fixed behaviour is visible in the UI, not just in the error handling."
+        "Cause confirmed: a freshly-created (or resumed) backtest session fetched candles ending exactly at its own replay cursor with no explicit lead-in, so a session starting at (or near) the earliest available candle for its symbol/timeframe received only that one bar. Lightweight Charts' price scale and fitContent() both autoscale to whatever's actually loaded, so a single bar's own high/low filled the entire vertical axis and its one time-slot filled the entire horizontal one -- the reported giant candle block. This became far more visible after v3.20.6, which now defaults/prefills Start Date to the earliest available date on every symbol/timeframe change -- the overwhelmingly common case is now exactly the zero-lead-in edge case.",
+        "Fix: btLoadCandleWindow() (js/backtest.js) now explicitly requests BT_LEAD_IN_BARS (300, a named constant) candles before the replay point plus the current one, on every fresh load of the replay window -- session open, session resume, and after every advance, since it's one shared function rather than a create-only special case. get_backtest_candles' own no-lookahead clamp (BacktestController::getCandles()'s cursorCeiling) is completely unchanged -- this only changes how much history is requested, never what's allowed after the replay point, on any timeframe.",
+        "Fix: the replay window now sets a fixed-width initial visible range (the most recent BT_INITIAL_VISIBLE_BARS = 100 bars ending at the replay point) instead of calling fitContent(), which is what actually produced the giant-block look. Requested even when fewer than 100 real bars exist -- Lightweight Charts renders the real bars at a normal width with empty space filling the rest, rather than stretching sparse data to fill the pane. If a session's start date has fewer than 300 candles behind it, the server already returns however many actually exist with no error; the frontend already handled a shorter-than-requested result correctly (same pattern chart.js's own pagination already used).",
+        "Confirmed, no code change needed: scrolling back to load older history already works in the replay window -- chart.js's existing scroll-triggered loadOlderCandles() is symbol/timeframe-agnostic and already routes through window.btFetchCandlesOverride during an active session, unchanged by this release.",
+        "Finding, not a code change: there is currently no live control to switch timeframe during an active replay (no .tf-btn or equivalent exists in the replay window's controls bar) -- chart.js's onChartTimeframeChange()/loadInitialWindow() are the plain-browsing page's own mechanism and are not wired into the Backtesting page at all. If this is added later, it must call the lead-in-aware btLoadCandleWindow() (or route through it), not chart.js's own generic loadInitialWindow(), to inherit this fix automatically."
     ],
     "release_notes": "No new migration in this release. Nothing was deployed or migrated as part of this turn, per instruction.",
     "files": [
-        {"path": "includes/controllers/BacktestController.php", "critical": false},
-        {"path": "includes/router.php", "critical": false},
-        {"path": "js/backtest.js", "critical": false},
-        {"path": "pages/backtest.php", "critical": false}
+        {"path": "js/backtest.js", "critical": false}
     ],
     "db_migrations": []
 }

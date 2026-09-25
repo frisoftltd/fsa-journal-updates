@@ -243,24 +243,67 @@ async function openBacktestSession(id) {
     if (typeof resizeTvChart === 'function') resizeTvChart();
 }
 
+// v3.20.8 — a replay session opening with zero lead-in showed one candle stretched to
+// fill the whole pane: Lightweight Charts' price scale and fitContent() both autoscale
+// to whatever's actually loaded, and with a single bar that's the bar's own high/low
+// filling 100% of the vertical axis and its own one time-slot filling 100% of the
+// horizontal one. TradingView's own bar replay always opens with real history behind the
+// replay point so gate 1/2 structure is visible immediately -- BT_LEAD_IN_BARS is that
+// same idea, explicit and tunable rather than an incidental reuse of the general
+// load-older-on-scroll page size (still 500, unrelated, in loadOlderCandles()/chart.js).
+const BT_LEAD_IN_BARS = 300;
+// How many of the loaded bars are actually zoomed to on open/resume/advance -- a fixed,
+// reasonable "typical chart" width instead of fitContent()'s "cram everything into
+// view," which looks fine at 300 bars but would still look wrong (tiny, cramped) if left
+// as the default zoom, and looks broken at 1-2 bars for exactly the reason above.
+const BT_INITIAL_VISIBLE_BARS = 100;
+
 async function btFetchCandles(before, limit) {
-    let action = `get_backtest_candles&session_id=${btActiveSessionId}&limit=${limit || 500}`;
+    let action = `get_backtest_candles&session_id=${btActiveSessionId}&limit=${limit || (BT_LEAD_IN_BARS + 1)}`;
     if (before) action += `&before=${before}`;
     const res = await btApi(action);
     if (res && res.error) { toast('Failed to load candles — ' + res.error, 'error'); return []; }
     return (res && Array.isArray(res.candles)) ? res.candles : [];
 }
 
+/**
+ * Runs on session open, resume, and after every advance -- one shared path, so lead-in
+ * behavior is automatically consistent everywhere a fresh window is loaded rather than
+ * only at session-creation time. get_backtest_candles' own no-lookahead clamp
+ * (BacktestController::getCandles()'s cursorCeiling) is untouched and still applies to
+ * every call here regardless of how many bars are requested -- this only changes how
+ * much HISTORY is requested, never what's allowed after the replay point.
+ *
+ * If the session's start date has fewer than BT_LEAD_IN_BARS candles behind it (e.g. it
+ * starts at the very earliest bar this symbol/timeframe has at all), the server simply
+ * returns however many actually exist -- no error, per the requirement -- and
+ * exhaustedOlder correctly ends up true so loadOlderCandles() doesn't waste a request
+ * trying to fetch history that was never there.
+ */
 async function btLoadCandleWindow() {
-    const rows = await btFetchCandles(null, 500);
+    const rows = await btFetchCandles(null, BT_LEAD_IN_BARS + 1);
     chartState.candles = rows.map(r => ({ time: r.time, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }));
-    chartState.exhaustedOlder = rows.length < 500;
+    chartState.exhaustedOlder = rows.length < (BT_LEAD_IN_BARS + 1);
     chartState.symbol = btSession ? btSession.symbol : null;
     chartState.timeframe = btSession ? btSession.replay_timeframe : '1H';
     chartState.timezone = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     chartState.blindMode = !!(btSession && btSession.blind_mode);
     if (typeof renderChartData === 'function') renderChartData();
-    if (tvChart) tvChart.timeScale().fitContent();
+    btSetInitialVisibleRange();
+}
+
+/** Fixed-width logical range ending at the most recent (= current replay) bar, instead
+ *  of fitContent(). Deliberately requested even when fewer than BT_INITIAL_VISIBLE_BARS
+ *  bars are actually loaded (from can go negative) -- Lightweight Charts renders the
+ *  real bars at their normal width with empty space filling the rest, rather than
+ *  stretching what little data exists to fill the pane. The price axis still autoscales
+ *  to whatever's visible (nothing else can be done about that with only 1-2 real bars),
+ *  but the bar itself renders at a normal, readable width instead of a giant block. */
+function btSetInitialVisibleRange() {
+    if (!tvChart) return;
+    const total = chartState.candles.length;
+    if (!total) return;
+    tvChart.timeScale().setVisibleLogicalRange({ from: total - BT_INITIAL_VISIBLE_BARS, to: total });
 }
 
 /** Returns true on success, false on failure (already shown to the user and bounced

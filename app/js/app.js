@@ -58,12 +58,13 @@ function showPage(id) {
     const titles={dashboard:'Dashboard',trades:'Trade Log',reportcard:'Report Card',stats:'Statistics',backtest:'Backtesting',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges',bfimport:'Import'};
     document.querySelector('.topbar h2').textContent = titles[id]||id;
     document.querySelector('.sidebar').classList.remove('open');
-    // v3.19.2/v3.20.0 — every "this page should look/behave differently" rule (dark
-    // topbar, full-bleed .main, no page padding — css/style.css's "BACKTESTING" block)
-    // keys off this one class, scoped to the Backtesting page only (renamed from
-    // "Chart" in v3.20.0); every other page is completely unaffected since they never
-    // get it.
-    document.body.classList.toggle('backtest-active', id==='backtest');
+    // v3.20.1 — body.backtest-active (dark topbar, full-bleed .main, no page padding —
+    // css/style.css's "BACKTESTING" block) is no longer tied to the Backtesting PAGE as
+    // a whole: Screens A (new-session form) and C (saved backtests) are normal
+    // light-themed content like every other page. Only Screen B (the actual replay
+    // window) is dark/full-bleed, so js/backtest.js::showBacktestScreen() toggles this
+    // class itself, exactly when entering/leaving that one screen — not here.
+    if(id!=='backtest') document.body.classList.remove('backtest-active');
     if(id==='dashboard') loadDashboard();
     if(id==='trades') { loadPairs(); loadTrades(); }
     if(id==='reportcard') loadReportCard();

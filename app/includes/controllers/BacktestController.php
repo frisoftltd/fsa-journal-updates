@@ -75,6 +75,10 @@ class BacktestController {
     public function createSession() {
         $d = jsonInput();
 
+        $sessionName = trim((string) ($d['session_name'] ?? ''));
+        if ($sessionName === '') jsonError('Session name is required.');
+        if (strlen($sessionName) > 120) jsonError('Session name is too long (120 characters max).');
+
         $symbol = strtoupper(trim($d['symbol'] ?? ''));
         $timeframe = trim($d['replay_timeframe'] ?? '');
         if (!in_array($timeframe, ['15m', '1H', '4H', '1D'], true)) jsonError('Invalid replay timeframe.');
@@ -116,11 +120,11 @@ class BacktestController {
 
         $this->db->prepare(
             "INSERT INTO backtest_sessions
-                (user_id, symbol, replay_timeframe, start_time, replay_cursor_ms, risk_pct, fee_rate_pct, blind_mode,
+                (user_id, session_name, symbol, replay_timeframe, start_time, replay_cursor_ms, risk_pct, fee_rate_pct, blind_mode,
                  starting_balance, profit_target_pct, daily_drawdown_pct, max_drawdown_pct, drawdown_type, max_trades_per_day)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )->execute([
-            $this->uid, $symbol, $timeframe, (int) $realStart, (int) $realStart, $riskPct, $feeRatePct, $blindMode,
+            $this->uid, $sessionName, $symbol, $timeframe, (int) $realStart, (int) $realStart, $riskPct, $feeRatePct, $blindMode,
             $startingBalance, $profitTargetPct, $dailyDrawdownPct, $maxDrawdownPct, $drawdownType, $maxTradesPerDay,
         ]);
 
@@ -585,6 +589,7 @@ class BacktestController {
         $starting = (float) $session['starting_balance'];
         return [
             'id' => (int) $session['id'],
+            'session_name' => $session['session_name'],
             'symbol' => $session['blind_mode'] ? null : $session['symbol'],
             'blind_mode' => (bool) $session['blind_mode'],
             'replay_timeframe' => $session['replay_timeframe'],

@@ -1,15 +1,25 @@
 /**
- * FundedControl — Backtesting (Phase 1b, v3.20.0)
- * Session list, setup form, replay controls, order panel, challenge panel.
+ * FundedControl — Backtesting (v3.20.1 — three-screen rework + error handling)
+ *
+ * Three screens, exactly one visible at a time (showBacktestScreen()):
+ *   'form'   — Screen A, new-session setup. Opens directly when the sidebar's
+ *              "Backtesting" link is clicked — no session list first.
+ *   'window' — Screen B, the actual replay (chart/controls/orders/challenge panel).
+ *              Full-bleed + dark; body.backtest-active is toggled here, exactly when
+ *              entering/leaving THIS screen — not page-wide.
+ *   'list'   — Screen C, saved backtests. Reached only via the "View Backtests"
+ *              button inside Screen B (or Screen A's own shortcut to it).
+ *
+ * v3.20.1 fix: every API call in this file is now wrapped so a failure — wrong route,
+ * missing table (migration not yet run), network error, non-JSON error response — shows
+ * a visible "Failed to load ..." message instead of leaving a dropdown/table stuck on
+ * "Loading…" forever with a silently swallowed exception in the console.
  *
  * Reuses js/chart.js's low-level candlestick/volume rendering (chartState, tvChart,
  * initTvChart(), resizeTvChart(), renderChartData(), updateLegendFromCandle()) rather
  * than duplicating it — this file owns session/order/replay orchestration and points
  * chart.js's own fetchCandles() at the session-scoped, no-lookahead-trimmed
  * get_backtest_candles endpoint via window.btFetchCandlesOverride.
- *
- * No-lookahead is enforced server-side (BacktestController::getCandles()) — this file
- * never has to hide anything on its own; it simply never receives future data to hide.
  */
 
 let btActiveSessionId = null;
@@ -17,65 +27,116 @@ let btSession = null; // last full session payload from the server
 let btDirection = 'Long';
 let btAutoplayTimer = null;
 
+/** Every network/API call in this file goes through this — never a bare api() call —
+ *  so a thrown exception (bad JSON, network failure) is converted into the same
+ *  {error: "..."} shape api.php's own application-level errors already use, instead of
+ *  propagating as an uncaught promise rejection that silently halts whatever function
+ *  was awaiting it (exactly what left the symbol dropdown and session list stuck on
+ *  "Loading…" with nothing visible to the user — the actual bug this release fixes). */
+async function btApi(action, method, data) {
+    try {
+        const res = await api(action, method || 'GET', data || null);
+        if (res === null || res === undefined) return { error: 'Empty response from server.' };
+        return res;
+    } catch (e) {
+        console.error('[backtest] API call failed:', action, e);
+        return { error: 'Could not reach the server (or got an unreadable response). Check the browser console/network tab for the failing request.' };
+    }
+}
+
 // ── ENTRY POINT ──────────────────────────────────────────
 async function loadBacktest() {
     if (btActiveSessionId) {
-        // Returning to a session already open in this tab (e.g. via browser back) —
-        // just resize, the data's still loaded.
+        // Returning to an already-open session (e.g. browser back) — just resize.
         if (typeof resizeTvChart === 'function') resizeTvChart();
         return;
     }
-    showBacktestView('list');
-    await loadBacktestSessions();
+    showBacktestScreen('form');
 }
 
-function showBacktestView(view) {
-    document.querySelectorAll('.bt-view').forEach(v => v.classList.remove('active'));
-    const el = document.getElementById('bt-view-' + view);
+function showBacktestScreen(screen) {
+    document.querySelectorAll('.bt-screen').forEach(v => v.classList.remove('active'));
+    const el = document.getElementById('bt-screen-' + screen);
     if (el) el.classList.add('active');
-    if (view === 'list') {
-        stopBtAutoplay();
-        btActiveSessionId = null;
-        loadBacktestSessions();
+
+    // body.backtest-active drives the dark full-bleed layout (css/style.css's
+    // "BACKTESTING" block) -- scoped to exactly this screen, not the whole module, so
+    // Screens A/C stay normal light-themed pages like everywhere else in the app.
+    document.body.classList.toggle('backtest-active', screen === 'window');
+
+    if (screen === 'form') { stopBtAutoplay(); btActiveSessionId = null; populateBtSetupForm(); }
+    if (screen === 'list') { stopBtAutoplay(); btActiveSessionId = null; loadBacktestSessions(); }
+    if (screen === 'window' && typeof resizeTvChart === 'function') {
+        // The chart container only has its real, final size once this screen is
+        // actually visible (display:flex was just applied above) -- resize now rather
+        // than trusting whatever size was computed while it was display:none.
+        setTimeout(resizeTvChart, 0);
     }
-    if (view === 'setup') populateBtSetupForm();
 }
 
-// ── SESSION LIST ─────────────────────────────────────────
+// ── SESSION LIST (Screen C) ──────────────────────────────
 async function loadBacktestSessions() {
     const tbody = document.getElementById('bt-sessions-tbody');
-    const sessions = await api('get_backtest_sessions');
+    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text3)">Loading…</td></tr>';
+    const sessions = await btApi('get_backtest_sessions');
+    if (sessions && sessions.error) {
+        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--red)">Failed to load backtests — ${sessions.error}</td></tr>`;
+        return;
+    }
     if (!Array.isArray(sessions) || !sessions.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text3)">No sessions yet — start one above.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text3)">No sessions yet — click "+ New Backtest" above.</td></tr>';
         return;
     }
     tbody.innerHTML = sessions.map(s => `
         <tr style="cursor:pointer" onclick="openBacktestSession(${s.id})">
+            <td>${escapeHtml(s.session_name || '(untitled)')}</td>
             <td>${s.blind_mode ? '🙈 Blind' : (s.symbol || '—')}</td>
             <td>${s.replay_timeframe}</td>
             <td>${btStatusBadge(s.status)}</td>
             <td class="${pnlCls(s.equity - s.starting_balance)}">${fmt(s.equity)}</td>
-            <td>${s.status === 'passed' ? '✅ Target reached' : (s.status === 'failed' ? '❌ ' + (s.fail_reason || 'Failed') : (s.progress_to_target_pct !== null ? s.progress_to_target_pct + '% to target' : '—'))}</td>
+            <td>${s.status === 'passed' ? '✅ Target reached' : (s.status === 'failed' ? '❌ ' + escapeHtml(s.fail_reason || 'Failed') : (s.progress_to_target_pct !== null ? s.progress_to_target_pct + '% to target' : '—'))}</td>
             <td>${(s.created_at || '').slice(0, 10)}</td>
             <td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openBacktestSession(${s.id})">${s.status === 'active' ? 'Resume' : 'Review'}</button></td>
         </tr>`).join('');
 }
 function btStatusBadge(status) {
     const map = { active: 'badge-long', passed: 'badge-win', failed: 'badge-loss' };
-    return `<span class="badge ${map[status] || ''}">${status}</span>`;
+    const label = { active: 'running', passed: 'passed', failed: 'failed' }[status] || status;
+    return `<span class="badge ${map[status] || ''}">${label}</span>`;
+}
+function escapeHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
 }
 
-// ── SETUP FORM ───────────────────────────────────────────
+// ── SETUP FORM (Screen A) ────────────────────────────────
 async function populateBtSetupForm() {
     document.getElementById('bt-setup-error').textContent = '';
     const symSel = document.getElementById('bt-setup-symbol');
-    const symbols = await api('get_symbols');
-    symSel.innerHTML = (symbols || []).map(s => `<option value="${s.symbol}">${s.display_name}</option>`).join('') || '<option>No symbols configured</option>';
+    symSel.innerHTML = '<option>Loading…</option>';
+
+    const symbols = await btApi('get_symbols');
+    if (symbols && symbols.error) {
+        symSel.innerHTML = '<option>Failed to load symbols</option>';
+        document.getElementById('bt-setup-error').textContent = `Failed to load symbols — ${symbols.error}`;
+        return;
+    }
+    symSel.innerHTML = (Array.isArray(symbols) && symbols.length)
+        ? symbols.map(s => `<option value="${s.symbol}">${escapeHtml(s.display_name)}</option>`).join('')
+        : '<option>No symbols configured</option>';
 
     const prefillSel = document.getElementById('bt-setup-prefill');
-    const challenges = await api('get_challenges');
-    prefillSel.innerHTML = '<option value="">— Custom, don\'t prefill —</option>' +
-        (challenges || []).map(c => `<option value='${JSON.stringify(c).replace(/'/g, "&#39;")}'>${c.name}</option>`).join('');
+    const challenges = await btApi('get_challenges');
+    if (challenges && !challenges.error && Array.isArray(challenges)) {
+        prefillSel.innerHTML = '<option value="">— Custom, don\'t prefill —</option>' +
+            challenges.map(c => `<option value='${JSON.stringify(c).replace(/'/g, "&#39;")}'>${escapeHtml(c.name)}</option>`).join('');
+    } else if (challenges && challenges.error) {
+        // Non-fatal for this form -- the prefill dropdown is a convenience, not a
+        // requirement ("the backtest never requires an existing challenge to run").
+        prefillSel.innerHTML = '<option value="">— Custom, don\'t prefill —</option>';
+        console.warn('[backtest] could not load challenges for prefill:', challenges.error);
+    }
 
     await onBtSetupPairChange();
 }
@@ -84,12 +145,9 @@ async function onBtSetupPairChange() {
     const timeframe = document.getElementById('bt-setup-timeframe').value;
     const rangeEl = document.getElementById('bt-setup-date-range');
     if (!symbol) return;
-    // get_symbols already carries earliest_candle_ms; a per-timeframe exact bound isn't
-    // exposed by a dedicated endpoint yet, so this is a coarse (whole-symbol) hint, not
-    // an exact per-timeframe range -- createBacktestSession() is the real, authoritative
-    // validation, this is just an upfront hint to avoid an obviously-out-of-range guess.
-    const symbols = await api('get_symbols');
-    const s = (symbols || []).find(x => x.symbol === symbol);
+    const symbols = await btApi('get_symbols');
+    if (symbols && symbols.error) return; // already surfaced by populateBtSetupForm()
+    const s = (Array.isArray(symbols) ? symbols : []).find(x => x.symbol === symbol);
     if (s && s.earliest_candle_ms) {
         rangeEl.textContent = `Data from ${new Date(s.earliest_candle_ms).toISOString().slice(0, 10)} onward (${timeframe})`;
         document.getElementById('bt-setup-start-date').min = new Date(s.earliest_candle_ms).toISOString().slice(0, 10);
@@ -110,7 +168,10 @@ function onBtPrefillChange() {
 async function createBacktestSession() {
     const errEl = document.getElementById('bt-setup-error');
     errEl.textContent = '';
+    const name = document.getElementById('bt-setup-name').value.trim();
+    if (!name) { errEl.textContent = 'Session name is required.'; return; }
     const payload = {
+        session_name: name,
         symbol: document.getElementById('bt-setup-symbol').value,
         replay_timeframe: document.getElementById('bt-setup-timeframe').value,
         start_date: document.getElementById('bt-setup-start-date').value,
@@ -124,23 +185,24 @@ async function createBacktestSession() {
         drawdown_type: document.getElementById('bt-setup-dd-type').value,
         max_trades_per_day: document.getElementById('bt-setup-max-trades').value || null,
     };
-    const res = await api('create_backtest_session', 'POST', payload);
+    const res = await btApi('create_backtest_session', 'POST', payload);
     if (res && res.error) { errEl.textContent = res.error; return; }
     if (res && res.success) {
-        toast('Session started');
+        toast('Backtest created');
         openBacktestSession(res.id);
     }
 }
 
-// ── REPLAY ───────────────────────────────────────────────
+// ── REPLAY (Screen B) ────────────────────────────────────
 async function openBacktestSession(id) {
     btActiveSessionId = id;
-    showBacktestView('replay');
+    showBacktestScreen('window');
 
     if (typeof initTvChart === 'function') initTvChart();
     window.btFetchCandlesOverride = (symbol, timeframe, before, limit) => btFetchCandles(before, limit);
 
-    await refreshBtSession();
+    const ok = await refreshBtSession();
+    if (!ok) return;
     await btLoadCandleWindow();
     if (typeof resizeTvChart === 'function') resizeTvChart();
 }
@@ -148,7 +210,8 @@ async function openBacktestSession(id) {
 async function btFetchCandles(before, limit) {
     let action = `get_backtest_candles&session_id=${btActiveSessionId}&limit=${limit || 500}`;
     if (before) action += `&before=${before}`;
-    const res = await api(action);
+    const res = await btApi(action);
+    if (res && res.error) { toast('Failed to load candles — ' + res.error, 'error'); return []; }
     return (res && Array.isArray(res.candles)) ? res.candles : [];
 }
 
@@ -164,16 +227,24 @@ async function btLoadCandleWindow() {
     if (tvChart) tvChart.timeScale().fitContent();
 }
 
+/** Returns true on success, false on failure (already shown to the user and bounced
+ *  back to the session list) — callers use this to decide whether to keep going. */
 async function refreshBtSession() {
-    const s = await api(`get_backtest_session&id=${btActiveSessionId}`);
-    if (!s || s.error) { toast(s ? s.error : 'Session not found', 'error'); showBacktestView('list'); return; }
+    const s = await btApi(`get_backtest_session&id=${btActiveSessionId}`);
+    if (!s || s.error) {
+        toast('Failed to load session — ' + (s ? s.error : 'unknown error'), 'error');
+        showBacktestScreen('list');
+        return false;
+    }
     btSession = s;
+    document.getElementById('bt-window-name').textContent = s.session_name || '(untitled)';
     document.getElementById('bt-replay-symbol').textContent = s.blind_mode ? '🙈 Blind Mode' : `${s.symbol} · ${s.replay_timeframe}`;
     renderChallengePanel(s);
     renderOpenPositions(s.open_positions || []);
     renderPendingOrders(s.pending_orders || []);
     renderBtOutcome(s);
     document.getElementById('bt-replay-status').textContent = s.status === 'active' ? '' : `Session ${s.status}`;
+    return true;
 }
 
 function renderChallengePanel(s) {
@@ -192,10 +263,10 @@ function renderChallengePanel(s) {
 function renderBtOutcome(s) {
     const el = document.getElementById('bt-outcome-banner');
     if (s.status === 'passed') {
-        el.style.display = 'block'; el.style.background = 'rgba(0,212,160,0.12)'; el.style.color = 'var(--green)';
+        el.style.display = 'block'; el.style.background = 'rgba(38,166,154,0.15)'; el.style.color = '#26a69a';
         el.textContent = `✅ PASSED — target reached in ${s.passed_trading_days} trading day(s), ${s.passed_trade_count} trade(s).`;
     } else if (s.status === 'failed') {
-        el.style.display = 'block'; el.style.background = 'rgba(255,77,109,0.12)'; el.style.color = 'var(--red)';
+        el.style.display = 'block'; el.style.background = 'rgba(239,83,80,0.15)'; el.style.color = '#ef5350';
         el.textContent = `❌ FAILED — ${s.fail_reason}`;
     } else {
         el.style.display = 'none';
@@ -204,20 +275,20 @@ function renderBtOutcome(s) {
 
 function renderOpenPositions(positions) {
     const el = document.getElementById('bt-open-positions');
-    if (!positions.length) { el.innerHTML = '<div style="color:var(--text3);font-size:12px">None</div>'; return; }
+    if (!positions.length) { el.innerHTML = '<div style="color:#6b7280;font-size:12px">None</div>'; return; }
     el.innerHTML = positions.map(p => `
-        <div class="bt-panel-row" style="border-bottom:1px solid var(--border);padding-bottom:6px;margin-bottom:6px">
+        <div class="bt-panel-row" style="border-bottom:1px solid #232733;padding-bottom:6px;margin-bottom:6px">
             <span>${p.direction} @ ${fmtPrice5(p.entry_price)}</span>
             <span class="${pnlCls(p.floating_pnl)}">${fmt(p.floating_pnl)}</span>
         </div>
-        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:#8b93a7;margin-bottom:6px">
             <span>SL ${fmtPrice5(p.stop_loss)}${p.take_profit ? ' / TP ' + fmtPrice5(p.take_profit) : ''}</span>
             <button class="btn btn-ghost btn-sm" onclick="closeBtPosition(${p.id})">Close</button>
         </div>`).join('');
 }
 function renderPendingOrders(orders) {
     const el = document.getElementById('bt-pending-orders');
-    if (!orders.length) { el.innerHTML = '<div style="color:var(--text3);font-size:12px">None</div>'; return; }
+    if (!orders.length) { el.innerHTML = '<div style="color:#6b7280;font-size:12px">None</div>'; return; }
     el.innerHTML = orders.map(o => `
         <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
             <span>${o.direction} limit @ ${fmtPrice5(o.limit_price)}</span>
@@ -229,8 +300,8 @@ function fmtPrice5(v) { const n = parseFloat(v); return isNaN(n) ? '—' : n.toF
 // ── ADVANCE ──────────────────────────────────────────────
 async function btAdvance(jumpToLatest) {
     if (!btActiveSessionId || !btSession || btSession.status !== 'active') return;
-    const res = await api('backtest_advance', 'POST', { session_id: btActiveSessionId, jump_to_latest: !!jumpToLatest });
-    if (!res || res.error) { toast(res ? res.error : 'Advance failed', 'error'); stopBtAutoplay(); return; }
+    const res = await btApi('backtest_advance', 'POST', { session_id: btActiveSessionId, jump_to_latest: !!jumpToLatest });
+    if (!res || res.error) { toast('Advance failed — ' + (res ? res.error : 'unknown error'), 'error'); stopBtAutoplay(); return; }
 
     (res.events || []).forEach(ev => {
         const label = { limit_filled: 'Limit order filled', stop_loss: 'Stop loss hit', take_profit: 'Take profit hit' }[ev.type] || ev.type;
@@ -238,6 +309,7 @@ async function btAdvance(jumpToLatest) {
     });
 
     btSession = res.session;
+    document.getElementById('bt-window-name').textContent = btSession.session_name || '(untitled)';
     document.getElementById('bt-replay-symbol').textContent = btSession.blind_mode ? '🙈 Blind Mode' : `${btSession.symbol} · ${btSession.replay_timeframe}`;
     renderChallengePanel(btSession);
     renderOpenPositions(res.open_positions || []);
@@ -275,16 +347,15 @@ function stopBtAutoplay() {
 // ── ORDERS ───────────────────────────────────────────────
 function setBtDirection(dir) {
     btDirection = dir;
-    document.getElementById('bt-dir-long').style.background = dir === 'Long' ? 'var(--green)' : 'var(--bg3)';
-    document.getElementById('bt-dir-long').style.color = dir === 'Long' ? '#fff' : 'var(--text2)';
-    document.getElementById('bt-dir-short').style.background = dir === 'Short' ? 'var(--red)' : 'var(--bg3)';
-    document.getElementById('bt-dir-short').style.color = dir === 'Short' ? '#fff' : 'var(--text2)';
+    document.getElementById('bt-dir-long').classList.toggle('active-long', dir === 'Long');
+    document.getElementById('bt-dir-short').classList.toggle('active-short', dir === 'Short');
 }
 document.addEventListener('DOMContentLoaded', () => {
     const typeSel = document.getElementById('bt-order-type');
     typeSel?.addEventListener('change', () => {
         document.getElementById('bt-limit-price-group').style.display = typeSel.value === 'limit' ? 'flex' : 'none';
     });
+    setBtDirection('Long');
 });
 
 async function placeBtOrder() {
@@ -300,18 +371,18 @@ async function placeBtOrder() {
         take_profit: document.getElementById('bt-order-tp').value || null,
         limit_price: document.getElementById('bt-order-limit').value,
     };
-    const res = await api('backtest_place_order', 'POST', payload);
+    const res = await btApi('backtest_place_order', 'POST', payload);
     if (res && res.error) { errEl.textContent = res.error; return; }
     toast(res.filled ? `Filled @ ${fmtPrice5(res.entry_price)}` : 'Limit order placed');
     await refreshBtSession();
 }
 async function cancelBtOrder(orderId) {
-    const res = await api('backtest_cancel_order', 'POST', { order_id: orderId });
+    const res = await btApi('backtest_cancel_order', 'POST', { order_id: orderId });
     if (res && res.error) { toast(res.error, 'error'); return; }
     await refreshBtSession();
 }
 async function closeBtPosition(tradeId) {
-    const res = await api('backtest_close_position', 'POST', { trade_id: tradeId });
+    const res = await btApi('backtest_close_position', 'POST', { trade_id: tradeId });
     if (res && res.error) { toast(res.error, 'error'); return; }
     toast('Position closed');
     await refreshBtSession();

@@ -1,45 +1,38 @@
 
-<!-- ── BACKTESTING (Phase 1b, v3.20.0) ──
-     Renamed from "Chart" (Phase 1a) — the module is now about running/reviewing
-     backtest sessions, not just passive candle viewing. Three internal views, same
-     "one page per sidebar item, JS-toggled views inside it" pattern Report Card already
-     uses (this app has no client-side router — see CLAUDE.md v3.18.0 for why):
-       #bt-view-list   — session list, pass/fail outcomes, "+ New Session"
-       #bt-view-setup  — session setup form (symbol/timeframe/start date/risk/fees/
-                         blind mode + fully-custom challenge rules, optional prefill)
-       #bt-view-replay — the actual replay: chart, controls, order panel, challenge panel
+<!-- ── BACKTESTING (v3.20.1 — three-screen rework) ──
+     Exactly one of these three is ever visible at a time (js/backtest.js::
+     showBacktestScreen()), never stacked:
+       #bt-screen-form   — Screen A: new-session form. This is what opens when the
+                           sidebar's "Backtesting" link is clicked — no session list
+                           first. Normal light-themed page content (cards/forms), same
+                           design system as every other page.
+       #bt-screen-window — Screen B: the actual replay — chart, controls, order panel,
+                           challenge panel. Full-bleed and dark (like TradingView),
+                           the one screen body.backtest-active applies to; see
+                           css/style.css's "BACKTESTING" block for how that class
+                           locks .main to the viewport and strips the page's own
+                           padding — scoped to this screen only, not the whole module.
+       #bt-screen-list   — Screen C: saved sessions (name, symbol, timeframe, status,
+                           equity, progress). Reached via the "View Backtests" button
+                           inside Screen B; clicking a row reopens it in Screen B.
+                           Normal light-themed content, same as Screen A.
      All logic lives in js/backtest.js. The underlying candlestick+volume chart
      rendering (initTvChart/resizeTvChart/renderChartData/timezone handling) is reused
-     from js/chart.js as-is — Phase 1a's own plain-browsing entry points (loadChart(),
-     the symbol/timezone switchers on that old page) are no longer wired to any nav
-     item now that this page owns the "Chart" route, but the lower-level rendering
-     functions they were built on are exactly what this page's replay view calls into. -->
+     from js/chart.js as-is. -->
 <div class="page" id="page-backtest">
 
-  <!-- ── SESSION LIST ── -->
-  <div class="bt-view active" id="bt-view-list">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-      <div style="font-size:12px;color:var(--text3)">Data: Bybit candles (BTCUSDT/ETHUSDT/BNBUSDT). Live fills come from BitFunded — wicks differ. Read results as indicative, not identical to live.</div>
-      <button class="btn btn-primary btn-sm" onclick="showBacktestView('setup')">+ New Session</button>
-    </div>
-    <div class="card">
-      <div class="card-title">Sessions</div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Symbol</th><th>Timeframe</th><th>Status</th><th>Equity</th><th>Progress</th><th>Created</th><th></th></tr></thead>
-          <tbody id="bt-sessions-tbody"><tr><td colspan="7" style="color:var(--text3)">Loading...</td></tr></tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── SESSION SETUP ── -->
-  <div class="bt-view" id="bt-view-setup">
+  <!-- ── SCREEN A: NEW BACKTEST ── -->
+  <div class="bt-screen active" id="bt-screen-form">
     <div class="card" style="max-width:640px;margin:0 auto">
-      <div class="card-title">New Backtest Session <button class="btn btn-ghost btn-sm" onclick="showBacktestView('list')">← Back</button></div>
+      <div class="card-title">New Backtest <button class="btn btn-ghost btn-sm" onclick="showBacktestScreen('list')">View Backtests</button></div>
+
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Session Name <span style="color:var(--red)">*</span></label>
+        <input type="text" id="bt-setup-name" placeholder="e.g. FSA 1H BTC 10k test" maxlength="120">
+      </div>
 
       <div class="form-grid-2" style="margin-bottom:14px">
-        <div class="form-group"><label>Symbol</label><select id="bt-setup-symbol" onchange="onBtSetupPairChange()"><option>Loading...</option></select></div>
+        <div class="form-group"><label>Symbol</label><select id="bt-setup-symbol" onchange="onBtSetupPairChange()"><option>Loading…</option></select></div>
         <div class="form-group"><label>Replay Timeframe</label>
           <select id="bt-setup-timeframe" onchange="onBtSetupPairChange()">
             <option value="15m">15m</option><option value="1H" selected>1H</option><option value="4H">4H</option><option value="1D">1D</option>
@@ -79,16 +72,34 @@
         <div class="form-group"><label>Max Trades / Day (blank = no limit)</label><input type="number" id="bt-setup-max-trades" min="1"></div>
       </div>
 
-      <button class="btn btn-primary" style="width:100%" onclick="createBacktestSession()">Start Session</button>
+      <button class="btn btn-primary" style="width:100%" onclick="createBacktestSession()">Create Backtest</button>
       <div id="bt-setup-error" style="color:var(--red);font-size:12px;margin-top:8px"></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:10px">Data: Bybit candles. Live fills come from BitFunded — wicks differ. Read results as indicative, not identical to live.</div>
     </div>
   </div>
 
-  <!-- ── REPLAY ── -->
-  <div class="bt-view" id="bt-view-replay">
+  <!-- ── SCREEN C: SAVED BACKTESTS ── -->
+  <div class="bt-screen" id="bt-screen-list">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div class="card-title" style="margin:0">Saved Backtests</div>
+      <button class="btn btn-primary btn-sm" onclick="showBacktestScreen('form')">+ New Backtest</button>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Symbol</th><th>Timeframe</th><th>Status</th><th>Equity</th><th>Progress</th><th>Created</th><th></th></tr></thead>
+          <tbody id="bt-sessions-tbody"><tr><td colspan="8" style="color:var(--text3)">Loading…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SCREEN B: THE BACKTEST WINDOW ── -->
+  <div class="bt-screen" id="bt-screen-window">
     <div class="tv-controls-bar">
-      <button class="btn btn-ghost btn-sm" onclick="showBacktestView('list')" title="Back to session list">←</button>
-      <span id="bt-replay-symbol" style="color:#d1d4dc;font-family:var(--font-mono, monospace);font-size:12px"></span>
+      <button class="btn btn-ghost btn-sm" onclick="showBacktestScreen('list')" title="View Backtests">☰ View Backtests</button>
+      <span id="bt-window-name" style="color:#d1d4dc;font-family:var(--font-head);font-size:13px;font-weight:600"></span>
+      <span id="bt-replay-symbol" style="color:#8b93a7;font-family:var(--font-mono, monospace);font-size:12px"></span>
       <div class="tf-group">
         <button class="btn btn-ghost btn-sm" onclick="btAdvance(false)" title="Next bar">Next Bar ▸</button>
         <button class="btn btn-ghost btn-sm" onclick="btAdvance(true)" title="Jump to the latest available bar">Jump to Latest ▸▸</button>
@@ -101,8 +112,8 @@
       <div id="bt-replay-note" style="margin-left:auto;font-size:11px;color:#6b7280">Bybit data — indicative vs. live BitFunded fills</div>
     </div>
 
-    <div style="display:flex;flex:1;min-height:0">
-      <div class="tv-chart-wrap" style="flex:1">
+    <div class="bt-window-body">
+      <div class="tv-chart-wrap">
         <div class="tv-legend" id="tv-legend"></div>
         <div id="tv-chart"></div>
       </div>
@@ -121,11 +132,11 @@
         <div class="bt-panel-block">
           <div class="bt-panel-title">New Order</div>
           <div class="form-group" style="margin-bottom:8px">
-            <select id="bt-order-type" style="width:100%"><option value="market">Market</option><option value="limit">Limit</option></select>
+            <select id="bt-order-type"><option value="market">Market</option><option value="limit">Limit</option></select>
           </div>
           <div style="display:flex;gap:6px;margin-bottom:8px">
-            <button class="btn btn-sm" id="bt-dir-long" style="flex:1;background:var(--green);color:#fff" onclick="setBtDirection('Long')">Long</button>
-            <button class="btn btn-sm" id="bt-dir-short" style="flex:1;background:var(--bg3);color:var(--text2)" onclick="setBtDirection('Short')">Short</button>
+            <button class="btn btn-sm bt-dir-btn" id="bt-dir-long" onclick="setBtDirection('Long')">Long</button>
+            <button class="btn btn-sm bt-dir-btn" id="bt-dir-short" onclick="setBtDirection('Short')">Short</button>
           </div>
           <div class="form-group" id="bt-limit-price-group" style="display:none;margin-bottom:8px"><label>Limit Price</label><input type="number" id="bt-order-limit" step="any"></div>
           <div class="form-group" style="margin-bottom:8px"><label>Stop Loss</label><input type="number" id="bt-order-sl" step="any"></div>
@@ -136,12 +147,12 @@
 
         <div class="bt-panel-block">
           <div class="bt-panel-title">Open Positions</div>
-          <div id="bt-open-positions"><div style="color:var(--text3);font-size:12px">None</div></div>
+          <div id="bt-open-positions"><div style="color:#6b7280;font-size:12px">None</div></div>
         </div>
 
         <div class="bt-panel-block">
           <div class="bt-panel-title">Pending Orders</div>
-          <div id="bt-pending-orders"><div style="color:var(--text3);font-size:12px">None</div></div>
+          <div id="bt-pending-orders"><div style="color:#6b7280;font-size:12px">None</div></div>
         </div>
       </div>
     </div>

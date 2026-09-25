@@ -189,6 +189,32 @@ legend, candlestick+volume series) are reused by the replay view — see §9.
 
 ## 9. Replay engine architecture
 
+**Three screens (v3.20.1 rework), exactly one visible at a time**
+(`js/backtest.js::showBacktestScreen()`):
+- **Screen A** (`#bt-screen-form`) — new-backtest setup, including the required
+  **Session Name** field. This is what the sidebar's "Backtesting" link opens directly
+  — no session list first.
+- **Screen B** (`#bt-screen-window`) — the actual replay: chart, controls, order panel,
+  challenge panel. Creating a session goes straight here. Full-bleed and dark
+  (`body.backtest-active`, toggled by `showBacktestScreen()` itself exactly when
+  entering/leaving this one screen — not page-wide, so Screens A/C stay normal
+  light-themed content like every other page).
+- **Screen C** (`#bt-screen-list`) — saved backtests (name, symbol, timeframe, status,
+  equity, progress). Reached via "View Backtests" inside Screen B (or a shortcut on
+  Screen A); clicking a row reopens it in Screen B.
+
+**v3.20.1 also fixed a real bug:** the symbol dropdown and session list could get stuck
+on "Loading…" forever with nothing visible to the user. Root cause: no error handling
+anywhere in `backtest.js` — `api()`'s own `res.json()` throws on a non-JSON response
+(e.g. a PHP fatal error from a missing table), and an uncaught exception inside an
+`await` silently aborts the rest of that function. The most likely concrete trigger:
+`get_backtest_sessions` requires `backtest_sessions` to exist, i.e. **the v3.20.0
+migration must actually be applied** before Screen C (or session creation) can work at
+all — if you're seeing this again, check that first. Every API call in `backtest.js` now
+goes through `btApi()`, which normalizes both a thrown exception and an application-level
+`{error}` response into the same shape, so every screen shows a visible "Failed to load
+…" message instead of hanging.
+
 `js/chart.js`'s low-level rendering (`initTvChart()`, `resizeTvChart()`,
 `renderChartData()`, `updateLegendFromCandle()`, the whole `chartState` object) is
 reused as-is for the replay view — `js/backtest.js` points `chartState.symbol`/

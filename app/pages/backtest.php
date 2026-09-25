@@ -47,7 +47,7 @@
           </div>
         </div>
         <div class="form-group" style="margin-bottom:14px">
-          <label>Start Date</label>
+          <label>Start Date (optional — defaults to the earliest available candle)</label>
           <input type="date" id="bt-setup-start-date">
           <span id="bt-setup-date-range" style="font-size:11px;color:var(--text3)"></span>
         </div>

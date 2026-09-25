@@ -96,6 +96,7 @@ $routes = [
     // Backtesting Phase 1b (v3.20.0) — replay engine, challenge simulation, orders
     'get_backtest_sessions'  => ['BacktestController', 'getSessions'],
     'get_backtest_session'   => ['BacktestController', 'getSession'],
+    'get_backtest_symbol_range' => ['BacktestController', 'getSymbolRange'],
     'create_backtest_session'=> ['BacktestController', 'createSession'],
     'get_backtest_candles'   => ['BacktestController', 'getCandles'],
     'backtest_advance'       => ['BacktestController', 'advance'],

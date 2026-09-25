@@ -1,17 +1,18 @@
 {
-    "current_version": "3.20.5",
+    "current_version": "3.20.6",
     "release_date": "2026-09-25",
     "changelog": [
-        "Investigation (done before any fix, per instruction): confirmed delete_backtest_session is a hard delete -- backtest_sessions has no deleted_at column at all, and the same loadSession() query (no extra filter) backs both the list and the loader, so a soft-delete mismatch was structurally impossible. The backend already failed loudly for a missing session (jsonError('Backtest session not found.')) via loadSession(), used by every session-touching endpoint -- that part was never broken. The actual bug was entirely client-side: js/backtest.js's btActiveSessionId is a plain in-memory variable, set when a session opens and cleared only by entering Screen A or a failed session load -- navigating away to Saved Backtests never cleared it. loadBacktest() (called by the sidebar's Backtesting link, and by both \"+ New Backtest\" and \"Create your first backtest\", which just call showPage('backtest')) had an early-return branch that silently resumed whatever session btActiveSessionId still pointed at without checking it still existed -- including a session that had just been deleted. One root cause explained all four reported symptoms.",
-        "Fix: loadBacktest() now unconditionally shows the New Backtest form -- no more implicit resume from a stale in-memory id. Resuming a session is now only ever a deliberate action taken from Saved Backtests (openBacktestFromList()), never implicit from the sidebar or the New Backtest page, per this release's own requirement.",
-        "Fix: loading a deleted or non-existent session id (refreshBtSession()'s failure path) now redirects straight to the New Backtest form instead of Saved Backtests, and does so via the same showBacktestScreen('form') path that resets the stale session reference, so it can never render a phantom replay screen.",
-        "Fix: deleting a session now immediately clears btActiveSessionId/btSession on the client if they pointed at the session just deleted, rather than relying on the next navigation to incidentally reset it.",
-        "Confirmed, no backend change needed: delete_backtest_session's single DELETE already cascades to that session's pending orders and its own simulated trades via the existing ON DELETE CASCADE foreign keys (fk_bpo_session, fk_trades_backtest_session). Live/manual/imported trades all have backtest_session_id = NULL, which a foreign-key CASCADE can never match, so they are structurally impossible for this delete to touch -- confirmed by reading the constraint, not assumed."
+        "Fix: BacktestController::createSession() treated a blank Start Date the same as an out-of-range one, rejecting it with \"Start date must fall within this symbol/timeframe's available history\" even though nothing had actually been entered. Start Date is now genuinely optional -- an empty field starts the session at the earliest available candle for that symbol/timeframe (candle_sync's own earliest_open_time), and the range check only runs at all when a date is actually given.",
+        "New: get_backtest_symbol_range (BacktestController::getSymbolRange()) -- returns candle_sync's earliest/latest open_time for a symbol+timeframe pair. Needed because get_symbols' own earliest_candle_ms is symbol-level only (not scoped to a timeframe) and has no \"latest\" counterpart at all, so the setup form had no source for either a correct per-timeframe earliest date or a max bound.",
+        "The setup form's Start Date field now prefills to that earliest date whenever the symbol or timeframe changes (so the user sees exactly what they'll get by default before editing it), and its min/max are set to the real available range so an out-of-range date can't be picked in the browser's own date picker to begin with. The 'Data from ... onward' helper line is unchanged.",
+        "Label now reads \"Start Date (optional -- defaults to the earliest available candle)\" so the fixed behaviour is visible in the UI, not just in the error handling."
     ],
-    "release_notes": "No new migration in this release -- pure client-side state-management fix plus a read-only backend confirmation. Nothing was deployed or migrated as part of this turn, per instruction.",
+    "release_notes": "No new migration in this release. Nothing was deployed or migrated as part of this turn, per instruction.",
     "files": [
+        {"path": "includes/controllers/BacktestController.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
         {"path": "js/backtest.js", "critical": false},
-        {"path": "js/saved-backtests.js", "critical": false}
+        {"path": "pages/backtest.php", "critical": false}
     ],
     "db_migrations": []
 }

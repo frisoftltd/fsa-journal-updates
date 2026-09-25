@@ -162,18 +162,32 @@ async function populateBtSetupForm() {
 
     await onBtSetupPairChange();
 }
+/**
+ * v3.20.6: Start Date is optional -- leaving it blank means "start at the earliest
+ * available candle" (BacktestController::createSession() now honours this server-side).
+ * This still prefills the field with that same earliest date whenever the symbol or
+ * timeframe changes, so the user sees exactly what they'll get by default and can edit
+ * it -- and sets min/max to the real available range so an out-of-range date can't be
+ * picked in the UI to begin with. Uses get_backtest_symbol_range (candle_sync, scoped to
+ * this exact symbol+timeframe pair) rather than get_symbols' own earliest_candle_ms,
+ * which is symbol-level only (not per-timeframe) and has no "latest" counterpart at all.
+ */
 async function onBtSetupPairChange() {
     const symbol = document.getElementById('bt-setup-symbol').value;
     const timeframe = document.getElementById('bt-setup-timeframe').value;
     const rangeEl = document.getElementById('bt-setup-date-range');
+    const dateInput = document.getElementById('bt-setup-start-date');
     if (!symbol) return;
-    const symbols = await btApi('get_symbols');
-    if (symbols && symbols.error) return; // already surfaced by populateBtSetupForm()
-    const s = (Array.isArray(symbols) ? symbols : []).find(x => x.symbol === symbol);
-    if (s && s.earliest_candle_ms) {
-        rangeEl.textContent = `Data from ${new Date(s.earliest_candle_ms).toISOString().slice(0, 10)} onward (${timeframe})`;
-        document.getElementById('bt-setup-start-date').min = new Date(s.earliest_candle_ms).toISOString().slice(0, 10);
+    const range = await btApi(`get_backtest_symbol_range&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`);
+    if (!range || range.error || range.earliest_open_time === null) {
+        rangeEl.textContent = range && range.error ? '' : 'Not backfilled yet for this timeframe.';
+        return;
     }
+    const earliest = new Date(range.earliest_open_time).toISOString().slice(0, 10);
+    rangeEl.textContent = `Data from ${earliest} onward (${timeframe})`;
+    dateInput.min = earliest;
+    dateInput.max = range.latest_open_time !== null ? new Date(range.latest_open_time).toISOString().slice(0, 10) : '';
+    dateInput.value = earliest;
 }
 function onBtPrefillChange() {
     const raw = document.getElementById('bt-setup-prefill').value;

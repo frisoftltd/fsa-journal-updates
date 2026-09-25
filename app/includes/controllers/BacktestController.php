@@ -66,6 +66,31 @@ class BacktestController {
     }
 
     /**
+     * v3.20.6 — backs the setup form's Start Date prefill/min/max. Symbol-level
+     * symbols.earliest_candle_ms (what ChartController::getSymbols() returns) isn't
+     * enough here: it's not scoped to a timeframe, and it has no "latest" counterpart at
+     * all, so the form previously had no source for either the correct per-timeframe
+     * earliest date or a max bound. candle_sync (via backtestGetSyncState(), the same
+     * function createSession() itself validates against) is the one place both numbers
+     * actually live, per (symbol, timeframe).
+     */
+    public function getSymbolRange() {
+        $symbol = strtoupper(trim($_GET['symbol'] ?? ''));
+        $timeframe = trim($_GET['timeframe'] ?? '');
+        if (!in_array($timeframe, ['15m', '1H', '4H', '1D'], true)) jsonError('Invalid replay timeframe.');
+
+        $sc = $this->db->prepare("SELECT symbol FROM symbols WHERE symbol=? AND enabled=1");
+        $sc->execute([$symbol]);
+        if (!$sc->fetch()) jsonError('Unknown or disabled symbol.');
+
+        $sync = backtestGetSyncState($this->db, $symbol, $timeframe);
+        jsonResponse([
+            'earliest_open_time' => $sync['earliest_open_time'] !== null ? (int) $sync['earliest_open_time'] : null,
+            'latest_open_time' => $sync['latest_open_time'] !== null ? (int) $sync['latest_open_time'] : null,
+        ]);
+    }
+
+    /**
      * Every challenge field is user-entered and fully custom (per the briefing — a
      * dropdown prefill on the frontend just copies numbers into these same inputs
      * before submit; nothing server-side ever reads challenges.* directly). The only
@@ -90,10 +115,21 @@ class BacktestController {
         $sync = backtestGetSyncState($this->db, $symbol, $timeframe);
         if ($sync['earliest_open_time'] === null) jsonError('This symbol/timeframe has not been backfilled yet.');
 
+        // v3.20.6 fix: Start Date is optional -- an empty field means "start at the
+        // earliest available candle," not an invalid date. Previously $startMs was left
+        // null for a blank field and then rejected by the exact same range check used
+        // for a real, out-of-range date, so leaving the field untouched (the common
+        // case) always failed with a "must fall within ... history" error that made no
+        // sense against nothing having been entered at all. The range check itself is
+        // still required, unchanged, whenever a date actually IS given.
         $startDateRaw = trim((string) ($d['start_date'] ?? ''));
-        $startMs = $startDateRaw !== '' ? strtotime($startDateRaw . ' 00:00:00 UTC') * 1000 : null;
-        if (!$startMs || $startMs < (int) $sync['earliest_open_time'] || $startMs > (int) $sync['latest_open_time']) {
-            jsonError('Start date must fall within this symbol/timeframe\'s available history (' . gmdate('Y-m-d', (int) ($sync['earliest_open_time'] / 1000)) . ' to ' . gmdate('Y-m-d', (int) ($sync['latest_open_time'] / 1000)) . ').');
+        if ($startDateRaw === '') {
+            $startMs = (int) $sync['earliest_open_time'];
+        } else {
+            $startMs = strtotime($startDateRaw . ' 00:00:00 UTC') * 1000;
+            if (!$startMs || $startMs < (int) $sync['earliest_open_time'] || $startMs > (int) $sync['latest_open_time']) {
+                jsonError('Start date must fall within this symbol/timeframe\'s available history (' . gmdate('Y-m-d', (int) ($sync['earliest_open_time'] / 1000)) . ' to ' . gmdate('Y-m-d', (int) ($sync['latest_open_time'] / 1000)) . ').');
+            }
         }
         // Snap to the nearest real candle at/after the requested date — the user picks
         // a calendar day, not necessarily an exact bar timestamp.

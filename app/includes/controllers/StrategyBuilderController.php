@@ -170,7 +170,12 @@ class StrategyBuilderController {
         $s->execute([$this->uid]);
         $strategies = $s->fetchAll();
 
-        $tradeStmt = $this->db->prepare("SELECT id, result, r_multiple, net_pnl, fsa_rules FROM trades WHERE user_id=? AND strategy_id=? AND result IN ('Win','Loss','Break Even')");
+        // v3.20.0 — defense in depth: backtest trades never set strategy_id (this
+        // engine doesn't attribute a strategy to a backtest session), so this couldn't
+        // actually match one today, but excluding source='backtest' explicitly means
+        // that stays true even if a future release starts recording a strategy on
+        // backtest trades, rather than depending on strategy_id staying NULL forever.
+        $tradeStmt = $this->db->prepare("SELECT id, result, r_multiple, net_pnl, fsa_rules FROM trades WHERE user_id=? AND strategy_id=? AND source != 'backtest' AND result IN ('Win','Loss','Break Even')");
         $varStmt = $this->db->prepare("SELECT id, label, input_type, options FROM strategy_variables WHERE strategy_id=? ORDER BY sort_order ASC, id ASC");
 
         $ranked = [];

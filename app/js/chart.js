@@ -51,6 +51,11 @@ let chartState = {
     loadingOlder: false,
     exhaustedOlder: false,
     tzFormatterCache: {},
+    // v3.20.0 — set by js/backtest.js for a blind-mode session; always false for the
+    // plain-browsing use of this same chart engine. updateLegendFromCandle() below is
+    // the one place it changes rendering, rather than backtest.js needing its own
+    // parallel copy of the whole legend-building function just to hide two lines of it.
+    blindMode: false,
 };
 
 // ── TIMEZONE MATH ────────────────────────────────────────
@@ -113,16 +118,26 @@ function updateLegendFromCandle(c) {
     const el = document.getElementById('tv-legend');
     if (!el) return;
     if (!c) { el.innerHTML = ''; return; }
-    const dtf = new Intl.DateTimeFormat('en-US', {
-        timeZone: chartState.timezone, year: 'numeric', month: 'short', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-    });
     const chg = c.close - c.open;
     const chgPct = c.open !== 0 ? (chg / c.open * 100) : 0;
     const cls = chg >= 0 ? 'style="color:#26a69a"' : 'style="color:#ef5350"';
+    // Blind mode (v3.20.0, backtest sessions only): the whole point is to prevent
+    // hindsight bias, so the symbol name and the bar's own date/time are the two things
+    // suppressed here — the actual OHLC/volume numbers still show, since a trader has
+    // to see the prices they're trading against; only "which instrument, which date"
+    // is hidden.
+    const titleLine = chartState.blindMode ? 'Blind Mode' : `${chartState.symbol} &middot; ${chartState.timeframe}`;
+    let dateLine = '';
+    if (!chartState.blindMode) {
+        const dtf = new Intl.DateTimeFormat('en-US', {
+            timeZone: chartState.timezone, year: 'numeric', month: 'short', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        });
+        dateLine = `<div>${dtf.format(new Date(c.time))}</div>`;
+    }
     el.innerHTML = `
-        <div class="tv-legend-title">${chartState.symbol} &middot; ${chartState.timeframe}</div>
-        <div>${dtf.format(new Date(c.time))}</div>
+        <div class="tv-legend-title">${titleLine}</div>
+        ${dateLine}
         <div>O <span ${cls}>${fmtPrice(c.open)}</span>
              H <span ${cls}>${fmtPrice(c.high)}</span>
              L <span ${cls}>${fmtPrice(c.low)}</span>
@@ -144,7 +159,18 @@ function fmtVol(v) {
 }
 
 // ── DATA LOADING ─────────────────────────────────────────
+// v3.20.0 — window.btFetchCandlesOverride, when set by js/backtest.js for an active
+// session, replaces the plain (non-session, non-trimmed) get_candles call below with a
+// call to get_backtest_candles instead — same shared scroll-back/render pipeline
+// (loadOlderCandles(), renderChartData()), routed to whichever data source is actually
+// active, rather than backtest.js needing its own parallel copy of this pagination
+// logic just to point it at a different endpoint. Undefined/null for the plain-
+// browsing use of this file (its own page entry point is unreferenced as of v3.20.0's
+// Chart->Backtesting rename, but this function stays generic either way).
 async function fetchCandles(symbol, timeframe, before, limit) {
+    if (typeof window.btFetchCandlesOverride === 'function') {
+        return window.btFetchCandlesOverride(symbol, timeframe, before, limit);
+    }
     let action = `get_candles&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=${limit || 500}`;
     if (before) action += `&before=${before}`;
     const rows = await api(action);

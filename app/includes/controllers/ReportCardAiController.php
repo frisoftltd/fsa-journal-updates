@@ -254,11 +254,14 @@ class ReportCardAiController {
             ];
         }
 
+        // v3.20.0 — source != 'backtest' required: a backtest trade's challenge_id is
+        // NULL, which "OR challenge_id IS NULL" would otherwise fold into a real
+        // period's AI review payload, judging live discipline against simulated trades.
         $ts = $this->db->prepare(
             "SELECT id, trade_date, pair, direction, time_in, time_out, session, risk_amount, actual_risk_pct,
                     planned_risk_pct, risk_deviation_pct, target_r, r_multiple, r_multiple_source, result,
                     exit_reason, exit_quality, net_pnl, stop_loss, take_profit
-             FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND trade_date BETWEEN ? AND ?
+             FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest' AND trade_date BETWEEN ? AND ?
              ORDER BY trade_date, time_in"
         );
         $ts->execute([$userId, $challengeId, $periodStart, $periodEnd]);

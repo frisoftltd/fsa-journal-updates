@@ -25,7 +25,12 @@ class StatsController {
         $chId = $ch['id'] ?? 0;
         $month = $_GET['month'] ?? null;
         $year  = $_GET['year']  ?? null;
-        $where = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL)";
+        // v3.20.0 — source != 'backtest' is required here, not optional: a backtest
+        // trade's own challenge_id is NULL (see migrations/2026_09_25_0001's own
+        // comment for why), which this WHERE's "OR challenge_id IS NULL" branch would
+        // otherwise treat as "belongs to every challenge," pulling simulated trades
+        // into the live Dashboard/Statistics pages' real numbers.
+        $where = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest'";
         $p = [$this->uid, $chId];
         if ($month && $year) { $where .= " AND MONTH(trade_date)=? AND YEAR(trade_date)=?"; $p[] = intval($month); $p[] = intval($year); }
 
@@ -137,7 +142,8 @@ class StatsController {
             : round(staticDrawdownPct($ch), 2);
 
         // Streak
-        $chWhere = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL)";
+        // v3.20.0 — same source != 'backtest' requirement as $where above.
+        $chWhere = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest'";
         $all_results = $qa("SELECT result FROM trades $chWhere AND result IN ('Win','Loss') ORDER BY trade_date,id", [$this->uid, $chId]);
         $max_win = 0; $max_loss = 0; $tmp = 0; $tmp_type = '';
         foreach ($all_results as $t) {
@@ -153,7 +159,8 @@ class StatsController {
         $stats['calendar']  = $qa("SELECT trade_date, COALESCE(SUM(net_pnl),0) as pnl, COUNT(*) as trades FROM trades $chWhere GROUP BY trade_date ORDER BY trade_date", [$this->uid, $chId]);
 
         // Daily loss check
-        $today_pnl = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND trade_date=CURDATE()", [$this->uid, $chId]);
+        // v3.20.0 — same source != 'backtest' requirement as $where above.
+        $today_pnl = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest' AND trade_date=CURDATE()", [$this->uid, $chId]);
         $daily_limit = floatval($ch['daily_loss_limit'] ?? 500);
         $stats['today_pnl'] = $today_pnl;
         $stats['daily_limit_pct'] = $daily_limit > 0 ? abs(min(0, $today_pnl)) / $daily_limit * 100 : 0;

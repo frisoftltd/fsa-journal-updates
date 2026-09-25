@@ -53,7 +53,7 @@ if (localStorage.getItem('fc_sidebar_collapsed') === '1') document.body.classLis
     <a href="#" data-page="trades" onclick="showPage('trades');return false;"><span class="icon">📋</span><span class="nav-label">Trade Log</span></a>
     <a href="#" data-page="reportcard" onclick="showPage('reportcard');return false;"><span class="icon">📝</span><span class="nav-label">Report Card</span><span id="reportcard-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:var(--orange, #F59E0B);margin-left:auto"></span></a>
     <a href="#" data-page="stats" onclick="showPage('stats');return false;"><span class="icon">📈</span><span class="nav-label">Statistics</span></a>
-    <a href="#" data-page="chart" onclick="showPage('chart');return false;"><span class="icon">🕯️</span><span class="nav-label">Chart</span></a>
+    <a href="#" data-page="backtest" onclick="showPage('backtest');return false;"><span class="icon">🕯️</span><span class="nav-label">Backtesting</span></a>
     <div class="nav-section">Tools</div>
     <a href="#" data-page="bfimport" onclick="showPage('bfimport');return false;"><span class="icon">📥</span><span class="nav-label">Import</span></a>
     <a href="#" data-page="calculator" onclick="showPage('calculator');return false;"><span class="icon">🧮</span><span class="nav-label">Risk Calculator</span></a>
@@ -107,7 +107,7 @@ if (localStorage.getItem('fc_sidebar_collapsed') === '1') document.body.classLis
 
   <?php
   // ── Load each page from its own file ──
-  $pages = ['dashboard','trades','reportcard','stats','chart','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
+  $pages = ['dashboard','trades','reportcard','stats','backtest','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
   foreach ($pages as $p) {
       include "pages/{$p}.php";
   }
@@ -151,6 +151,7 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 <script src="js/report-card.js"></script>
 <script src="js/stats.js"></script>
 <script src="js/chart.js"></script>
+<script src="js/backtest.js"></script>
 <script src="js/calculator.js"></script>
 <script src="js/strategy.js"></script>
 <script src="js/strategies.js"></script>

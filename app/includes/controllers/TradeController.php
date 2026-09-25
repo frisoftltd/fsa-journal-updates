@@ -19,7 +19,11 @@ class TradeController {
     public function getAll() {
         $ch = getActiveChallenge();
         $chId = $ch['id'] ?? 0;
-        $where = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL)";
+        // v3.20.0 — source != 'backtest' is required: a backtest trade's own
+        // challenge_id is NULL (see migrations/2026_09_25_0001's own comment), which
+        // "OR challenge_id IS NULL" would otherwise treat as belonging to every real
+        // challenge, surfacing simulated trades in the live Trade Log.
+        $where = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest'";
         $params = [$this->uid, $chId];
         if (!empty($_GET['pair']))   { $where .= " AND pair=?";       $params[] = $_GET['pair']; }
         if (!empty($_GET['result'])) { $where .= " AND result=?";     $params[] = $_GET['result']; }

@@ -67,11 +67,15 @@ class ReviewEngineController {
         if (!in_array($type, ['daily','weekly','monthly','quarterly','yearly'], true)) jsonError('Invalid period_type');
         $challengeId = (isset($_GET['challenge_id']) && $_GET['challenge_id'] !== '') ? validId($_GET['challenge_id']) : null;
 
+        // v3.20.0 — the else branch (no challenge filter at all, "All Combined" scope)
+        // needs source != 'backtest' explicitly: with no challenge_id condition to
+        // exclude a NULL-challenge backtest row by accident, nothing else here would.
+        // The if branch is already safe -- challenge_id=? never matches a NULL row.
         if ($challengeId) {
             $s = $this->db->prepare("SELECT trade_date FROM trades WHERE user_id=? AND challenge_id=? ORDER BY trade_date ASC");
             $s->execute([$this->uid, $challengeId]);
         } else {
-            $s = $this->db->prepare("SELECT trade_date FROM trades WHERE user_id=? ORDER BY trade_date ASC");
+            $s = $this->db->prepare("SELECT trade_date FROM trades WHERE user_id=? AND source != 'backtest' ORDER BY trade_date ASC");
             $s->execute([$this->uid]);
         }
         $dates = $s->fetchAll(PDO::FETCH_COLUMN);
@@ -245,11 +249,13 @@ class ReviewEngineController {
 
     private function fetchTrades($challengeId, $start, $end) {
         $cols = "id,trade_date,time_in,time_out,session,pair,direction,result,pnl,net_pnl,fees,r_multiple,r_multiple_source,risk_amount,strategy_id,emotion_tag,setup_grade,note_saw,note_why,note_unsure,fsa_rules,challenge_id,exit_reason,stop_loss,take_profit,balance_at_entry,planned_risk_pct,actual_risk_pct,risk_deviation_pct,clean_rep,target_r,exit_quality";
+        // v3.20.0 — same reasoning as listPeriods() above: the else branch (no
+        // challenge_id condition) needs source != 'backtest' explicitly.
         if ($challengeId) {
             $s = $this->db->prepare("SELECT $cols FROM trades WHERE user_id=? AND challenge_id=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date ASC, time_in ASC, id ASC");
             $s->execute([$this->uid, $challengeId, $start, $end]);
         } else {
-            $s = $this->db->prepare("SELECT $cols FROM trades WHERE user_id=? AND trade_date BETWEEN ? AND ? ORDER BY trade_date ASC, time_in ASC, id ASC");
+            $s = $this->db->prepare("SELECT $cols FROM trades WHERE user_id=? AND source != 'backtest' AND trade_date BETWEEN ? AND ? ORDER BY trade_date ASC, time_in ASC, id ASC");
             $s->execute([$this->uid, $start, $end]);
         }
         return $s->fetchAll();
@@ -917,11 +923,12 @@ class ReviewEngineController {
     }
 
     private function ruleOvertrading($challengeId, $periodTrades) {
+        // v3.20.0 — same reasoning as listPeriods()/fetchTrades() above.
         if ($challengeId) {
             $s = $this->db->prepare("SELECT trade_date, COUNT(*) c FROM trades WHERE user_id=? AND challenge_id=? GROUP BY trade_date");
             $s->execute([$this->uid, $challengeId]);
         } else {
-            $s = $this->db->prepare("SELECT trade_date, COUNT(*) c FROM trades WHERE user_id=? GROUP BY trade_date");
+            $s = $this->db->prepare("SELECT trade_date, COUNT(*) c FROM trades WHERE user_id=? AND source != 'backtest' GROUP BY trade_date");
             $s->execute([$this->uid]);
         }
         $allDays = $s->fetchAll();

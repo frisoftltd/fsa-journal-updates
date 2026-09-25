@@ -81,15 +81,58 @@ All four scripts also log to `/home/fundedcontrol/htdocs/backtesting-logs/` — 
 above this site's own document root (a sibling of `fundedcontrol.com/` inside `htdocs/`),
 so a direct request for a log file 404s at the vhost level instead of serving plain text.
 
-The Chart page (`pages/chart.php`, `js/chart.js`, `ChartController.php`) reads candles
-only from MySQL via `get_symbols`/`get_candles` — nothing in the browser or in a page
-request ever calls Bybit directly. See `docs/backtesting-pipeline.md` for the full
-backfill/cron/verify/repair runbook — **the file lives at `app/docs/backtesting-
-pipeline.md` in this repo** (v3.19.1: moved there from the repo root, where
-`updater.php`'s `GITHUB_BASE_URL` — `.../main/app` — could never actually reach it; a
-`files` entry pointing at the repo-root path 404'd and failed the whole Update Now).
-Every other repo-root `docs/` file (e.g. `docs/audits/`) is genuinely git-only and not
-meant to deploy — this one file is the exception, deployed on purpose.
+`ChartController.php`'s `get_symbols`/`get_candles` read candles only from MySQL —
+nothing in the browser or in a page request ever calls Bybit directly. See
+`docs/backtesting-pipeline.md` for the full backfill/cron/verify/repair runbook — **the
+file lives at `app/docs/backtesting-pipeline.md` in this repo** (v3.19.1: moved there
+from the repo root, where `updater.php`'s `GITHUB_BASE_URL` — `.../main/app` — could
+never actually reach it; a `files` entry pointing at the repo-root path 404'd and failed
+the whole Update Now). Every other repo-root `docs/` file (e.g. `docs/audits/`) is
+genuinely git-only and not meant to deploy — this one file is the exception, deployed on
+purpose.
+
+### Backtesting Replay Engine (Phase 1b, added v3.20.0)
+
+The sidebar module renamed **"Chart" → "Backtesting"** — same route slot, now session-
+based rather than plain browsing. `pages/backtest.php`/`js/backtest.js` (session list,
+setup form, replay controls, order panel, challenge panel) reuse `js/chart.js`'s
+low-level candlestick/volume rendering as-is rather than duplicating it; `chart.js`'s
+own plain-browsing entry point (`loadChart()`) is no longer wired to any nav item as of
+this rename, but its rendering primitives remain the replay view's actual chart engine.
+`candles`/`candle_sync`/`symbols` and the CLI pipeline above are **unchanged** — the
+briefing was explicit that the pipeline's own naming stays as-is; only the user-facing
+module got renamed.
+
+**Schema:** `backtest_sessions` (fully custom challenge rules per session, never an FK
+to `challenges` — "the backtest never requires an existing challenge to run"),
+`backtest_pending_orders` (a resting limit order, promoted into `trades` only once it
+fills), and `trades` gains `source='backtest'` (extends the existing ENUM) +
+`backtest_session_id`. A backtest trade's `challenge_id` is left `NULL` — the only value
+legal against `trades.challenge_id`'s own FK to `challenges(id)` (added 2026_09_17_0006)
+that's also never mistakable for a real challenge — but NULL alone does **not** exclude
+it from this schema's pervasive `(challenge_id=? OR challenge_id IS NULL)` pattern, so
+`source != 'backtest'` was added explicitly everywhere that pattern (or an unscoped
+`WHERE user_id=?`) appears: `StatsController`, `AlertController`,
+`TradeController::getAll()`, `ReviewEngineController` (three "all combined" branches),
+`ReportCardAiController`, `StrategyBuilderController::getLeaderboard()`. See
+`docs/backtesting-pipeline.md` §13 for the full list and why NULL alone wasn't enough.
+
+**No stored equity/peak-equity columns on `backtest_sessions`** — deriving both live
+from `trades` (`BacktestController::computeSessionState()`) is a deliberate repeat of
+the `challenges.current_balance` fix (v3.13.0 above): a stored, incrementally-updated
+balance drifted silently for five weeks before being dropped in favor of always
+deriving it from trades. Same lesson, applied before it could repeat here.
+
+**No-lookahead** (the briefing's own "critical" requirement):
+`BacktestController::getCandles()` clamps every response to the session's own
+`replay_cursor_ms`, server-side, regardless of what a client asks for — the browser is
+never trusted to hide future candles on its own.
+
+**Pure fill/P&L/drawdown math** lives in `includes/backtest_engine.php` (position
+sizing, P&L, fees, stop/target-touch detection — stop-loss wins if a bar touches both in
+one candle, a deliberately conservative tie-break — and drawdown distance), unit-tested
+standalone via `php includes/backtest_engine.php`, same convention as
+`bitfunded_parser.php`/`bybit_client.php`'s own self-tests.
 
 ---
 

@@ -18,11 +18,15 @@ class AlertController {
         $chId = $ch['id'] ?? 0;
         $alerts = [];
 
-        $stmt = $this->db->prepare("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND trade_date=CURDATE()");
+        // v3.20.0 — source != 'backtest' is required on every trades query in this
+        // controller: a backtest trade's challenge_id is NULL, which "OR challenge_id
+        // IS NULL" would otherwise treat as belonging to the live active challenge,
+        // firing real risk alerts off simulated activity.
+        $stmt = $this->db->prepare("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest' AND trade_date=CURDATE()");
         $stmt->execute([$this->uid, $chId]);
         $today = floatval($stmt->fetchColumn());
 
-        $stmt2 = $this->db->prepare("SELECT COUNT(*) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND trade_date=CURDATE()");
+        $stmt2 = $this->db->prepare("SELECT COUNT(*) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest' AND trade_date=CURDATE()");
         $stmt2->execute([$this->uid, $chId]);
         $tc = intval($stmt2->fetchColumn());
 
@@ -58,7 +62,8 @@ class AlertController {
         // signals live. The same-day 🛑 danger banner below is a different, more urgent
         // signal (an active losing streak right now, not a lookback across days) and was
         // not named in the v3.17.1 briefing, so it's kept.
-        $last3 = $this->db->prepare("SELECT result, trade_date FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND result IN ('Win','Loss') ORDER BY trade_date DESC, id DESC LIMIT 3");
+        // v3.20.0 — same source != 'backtest' requirement as above.
+        $last3 = $this->db->prepare("SELECT result, trade_date FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest' AND result IN ('Win','Loss') ORDER BY trade_date DESC, id DESC LIMIT 3");
         $last3->execute([$this->uid, $chId]);
         $r3 = $last3->fetchAll();
         if (count($r3) >= 3 && $r3[0]['result'] === 'Loss' && $r3[1]['result'] === 'Loss' && $r3[2]['result'] === 'Loss') {

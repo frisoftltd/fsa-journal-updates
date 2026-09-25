@@ -55,19 +55,20 @@ function showPage(id) {
     if(pg) pg.classList.add('active');
     const lnk = document.querySelector(`[data-page="${id}"]`);
     if(lnk) lnk.classList.add('active');
-    const titles={dashboard:'Dashboard',trades:'Trade Log',reportcard:'Report Card',stats:'Statistics',chart:'Chart',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges',bfimport:'Import'};
+    const titles={dashboard:'Dashboard',trades:'Trade Log',reportcard:'Report Card',stats:'Statistics',backtest:'Backtesting',review:'Review',strategy:'Strategy Tester',strategies:'Strategy Lab',leaderboard:'Leaderboard',calculator:'Risk Calculator',profile:'Profile Settings',challenges:'Challenges',bfimport:'Import'};
     document.querySelector('.topbar h2').textContent = titles[id]||id;
     document.querySelector('.sidebar').classList.remove('open');
-    // v3.19.2 — every "chart page should look/behave differently" rule (dark topbar,
-    // full-bleed .main, no page padding — css/style.css's "BACKTESTING CHART" block)
-    // keys off this one class, scoped to the chart page only; every other page is
-    // completely unaffected since they never get it.
-    document.body.classList.toggle('chart-active', id==='chart');
+    // v3.19.2/v3.20.0 — every "this page should look/behave differently" rule (dark
+    // topbar, full-bleed .main, no page padding — css/style.css's "BACKTESTING" block)
+    // keys off this one class, scoped to the Backtesting page only (renamed from
+    // "Chart" in v3.20.0); every other page is completely unaffected since they never
+    // get it.
+    document.body.classList.toggle('backtest-active', id==='backtest');
     if(id==='dashboard') loadDashboard();
     if(id==='trades') { loadPairs(); loadTrades(); }
     if(id==='reportcard') loadReportCard();
     if(id==='stats') loadStats();
-    if(id==='chart') loadChart();
+    if(id==='backtest') loadBacktest();
     if(id==='review') loadReviewEngine();
     if(id==='strategy') loadStrategyTrades();
     if(id==='strategies') loadStrategies();

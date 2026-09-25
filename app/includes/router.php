@@ -93,6 +93,15 @@ $routes = [
     // Backtesting Chart (Phase 1a) — read-only, MySQL only, never calls Bybit
     'get_symbols'            => ['ChartController', 'getSymbols'],
     'get_candles'            => ['ChartController', 'getCandles'],
+    // Backtesting Phase 1b (v3.20.0) — replay engine, challenge simulation, orders
+    'get_backtest_sessions'  => ['BacktestController', 'getSessions'],
+    'get_backtest_session'   => ['BacktestController', 'getSession'],
+    'create_backtest_session'=> ['BacktestController', 'createSession'],
+    'get_backtest_candles'   => ['BacktestController', 'getCandles'],
+    'backtest_advance'       => ['BacktestController', 'advance'],
+    'backtest_place_order'   => ['BacktestController', 'placeOrder'],
+    'backtest_cancel_order'  => ['BacktestController', 'cancelOrder'],
+    'backtest_close_position'=> ['BacktestController', 'closePosition'],
 ];
 
 if (!isset($routes[$action])) {

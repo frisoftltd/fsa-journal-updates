@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.19.0 |
+| Current Version | v3.20.3 |
 
 ### Tech Stack
 
@@ -49,7 +49,26 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Web server | nginx + PHP-FPM |
 | Site root | `/home/fundedcontrol/htdocs/fundedcontrol.com` |
 | Site user | `fundedcontrol` |
-| Database | MySQL 8.4 — database `fundedcontrol`, user `fundedcontrol`, host `127.0.0.1:3306` |
+| Database | **MySQL 8.4** (real MySQL, not MariaDB) — database `fundedcontrol`, user `fundedcontrol`, host `127.0.0.1:3306` |
+
+**This is a real engine change, not just a version bump — it broke migrations in
+practice (v3.20.3).** The old Namecheap shared host ran **MariaDB**, which silently
+accepts a handful of conditional-DDL clauses MySQL has never supported at all:
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, `DROP COLUMN IF EXISTS`, `ADD INDEX IF NOT
+EXISTS`, `DROP INDEX IF EXISTS` are all **MariaDB-only** — MySQL 8.0 and 8.4 both reject
+every one of them with `ERROR 1064`, full stop, no version of MySQL supports this syntax.
+`2026_09_25_0001_create_backtest_tables.sql` and `2026_09_25_0002_add_backtest_session_
+name.sql` both shipped with `ADD COLUMN IF NOT EXISTS` (written and only ever tested
+against the old MariaDB host) and failed outright the first time they actually ran
+against this MySQL 8.4 server — see the v3.20.3 section below. **A conditional `ALTER
+TABLE` in any migration written from here on must use the `information_schema`-check +
+`PREPARE`/`EXECUTE` dynamic-SQL pattern** (query `information_schema.COLUMNS` for a
+column, `.STATISTICS` for an index, `.TABLE_CONSTRAINTS` for a constraint — the FK-exists
+check already in `2026_09_25_0001` was the only thing in that file written this way, and
+is now the template for the column case too) — this works identically on both engines,
+so it's also the right choice for any environment this app might run on next.
+`CREATE TABLE IF NOT EXISTS` is standard SQL, supported by both engines identically, and
+needs no such workaround.
 
 **Everything above replaces the old Namecheap shared-hosting setup as of 2026-09-24.**
 Every other mention of `theittav_journal`, cPanel, or Namecheap-relative paths
@@ -3136,9 +3155,10 @@ schema work** — the old field still exists and still works, but stop adding to
 - Every applied (or baselined) file has its sha256 checksum recorded. If a file is edited after
   it was applied, the checksum no longer matches and the runner stops and reports it instead of
   silently re-running or ignoring the edit.
-- MariaDB commits DDL implicitly, so there is no rollback. A migration that fails partway leaves
-  the schema partly changed — the runner's error output names the exact statement that failed so
-  that state can be reasoned about. Keep migrations small for this reason.
+- DDL commits implicitly on both MySQL and MariaDB, so there is no rollback. A migration that
+  fails partway leaves the schema partly changed — the runner's error output names the exact
+  statement that failed so that state can be reasoned about. Keep migrations small for this
+  reason.
 
 ### Naming
 
@@ -3159,6 +3179,19 @@ date. Example: `2026_09_20_0001_add_default_strategy_id_to_challenges.sql`.
    shipped in `2026_09_15_0001_create_trade_journal.sql` (v3.11.0) and needed a follow-up
    `CONVERT TO CHARACTER SET` migration (`2026_09_15_0002`) to fix, since it wasn't caught before
    both new tables were live. Check this before every `CREATE TABLE`, not after.
+2a. **Never write `ADD COLUMN IF NOT EXISTS`, `DROP COLUMN IF EXISTS`, `ADD INDEX IF NOT EXISTS`,
+   or `DROP INDEX IF EXISTS` in a migration — these are MariaDB-only and MySQL 8.4 (the live
+   database as of the 2026-09-24 Hetzner move, see §1A) rejects every one of them outright with
+   `ERROR 1064`.** `CREATE TABLE IF NOT EXISTS` is fine — that one's standard SQL, identical on
+   both engines. For a conditional `ALTER TABLE` (add a column/index/constraint only if it isn't
+   already there — needed for a retryable migration per the "Operational Lessons" below), query
+   `information_schema.COLUMNS` (or `.STATISTICS` for an index, `.TABLE_CONSTRAINTS` for a
+   constraint) for existence, then build and run the `ALTER` via `PREPARE`/`EXECUTE` only when it's
+   missing — see `2026_09_25_0001_create_backtest_tables.sql`'s `fk_trades_backtest_session` check
+   (the working example this pattern was generalized from) for the exact shape. This exact mistake
+   shipped in `2026_09_25_0001`/`2026_09_25_0002` (written and only ever tested against the old
+   MariaDB host) and errored out the first time either one actually ran against MySQL — fixed in
+   v3.20.3, see that section below.
 3. Add its path to `version.json`'s `"files"` array (`{"path": "migrations/...sql", "critical": false}`) —
    if it's not in the manifest, `updater.php` will never deploy it to the server, full stop.
 4. Bump `current_version`, commit, push, tag, release.
@@ -4204,7 +4237,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.19.0
+Current Version: v3.20.3
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

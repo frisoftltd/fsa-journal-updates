@@ -92,13 +92,27 @@ CREATE TABLE IF NOT EXISTS backtest_sessions (
 -- just the state before it has ever run -- DDL auto-commits per statement, so a retry
 -- after a later statement in this file fails must not choke on an earlier one that
 -- already succeeded). MODIFY COLUMN re-applying an identical definition is already a
--- no-op; ADD COLUMN IF NOT EXISTS (MySQL 8.0+) makes the column add itself skippable;
--- the FK is checked for existence first since ADD CONSTRAINT has no IF NOT EXISTS form.
+-- no-op. ADD COLUMN IF NOT EXISTS is NOT used here (v3.20.3 fix) -- that clause is
+-- MariaDB-only; MySQL (8.0 and 8.4 both) has no such syntax and errors on it outright
+-- (ERROR 1064). This shipped against MariaDB on the old shared host and was never
+-- actually exercised against MySQL until the 2026-09-24 Hetzner move, which is exactly
+-- when it failed -- see CLAUDE.md's migration-authoring rules and the v3.20.3 section
+-- for the general audit. The column and the FK just below it now use the same
+-- information_schema-check + PREPARE/EXECUTE pattern, which works identically on both.
 ALTER TABLE trades
   MODIFY COLUMN source ENUM('manual','import','backtest') NOT NULL DEFAULT 'manual';
 
-ALTER TABLE trades
-  ADD COLUMN IF NOT EXISTS backtest_session_id INT UNSIGNED NULL AFTER source;
+SET @col_exists = (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'trades' AND COLUMN_NAME = 'backtest_session_id'
+);
+SET @add_col_sql = IF(@col_exists = 0,
+  'ALTER TABLE trades ADD COLUMN backtest_session_id INT UNSIGNED NULL AFTER source',
+  'SELECT 1'
+);
+PREPARE add_col_stmt FROM @add_col_sql;
+EXECUTE add_col_stmt;
+DEALLOCATE PREPARE add_col_stmt;
 
 SET @fk_exists = (
   SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS

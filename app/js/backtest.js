@@ -1,19 +1,25 @@
 /**
- * FundedControl — Backtesting (v3.20.1 — three-screen rework + error handling)
+ * FundedControl — Backtesting (v3.20.2 — reliable diagnostics + Saved Backtests split out)
  *
- * Three screens, exactly one visible at a time (showBacktestScreen()):
+ * Two screens, exactly one visible at a time (showBacktestScreen()):
  *   'form'   — Screen A, new-session setup. Opens directly when the sidebar's
  *              "Backtesting" link is clicked — no session list first.
  *   'window' — Screen B, the actual replay (chart/controls/orders/challenge panel).
  *              Full-bleed + dark; body.backtest-active is toggled here, exactly when
  *              entering/leaving THIS screen — not page-wide.
- *   'list'   — Screen C, saved backtests. Reached only via the "View Backtests"
- *              button inside Screen B (or Screen A's own shortcut to it).
+ * Saved Backtests (formerly Screen C) is its own sidebar page as of v3.20.2 —
+ * see pages/saved-backtests.php / js/saved-backtests.js. "View Backtests" buttons here
+ * navigate there via showPage('saved-backtests'), not a screen switch inside this module.
  *
- * v3.20.1 fix: every API call in this file is now wrapped so a failure — wrong route,
- * missing table (migration not yet run), network error, non-JSON error response — shows
- * a visible "Failed to load ..." message instead of leaving a dropdown/table stuck on
- * "Loading…" forever with a silently swallowed exception in the console.
+ * v3.20.2: v3.20.1's btApi() converted a thrown exception into a generic {error:...},
+ * which stopped the infinite spinner but threw away exactly the information needed to
+ * diagnose *why* the call failed (e.g. a PHP fatal from a migration that hasn't been run
+ * on the current server yet reads as raw HTML/plain text, not JSON — res.json() throws,
+ * and the old catch block only ever said "could not reach the server"). btApi() no longer
+ * calls the shared api() helper at all: it does its own fetch(), always reads the body as
+ * text first, and only then tries to parse it as JSON — so a failure surfaces the real
+ * HTTP status and the server's actual response text, not a guess. escapeHtml()/
+ * btStatusBadge() are also used by js/saved-backtests.js, loaded after this file.
  *
  * Reuses js/chart.js's low-level candlestick/volume rendering (chartState, tvChart,
  * initTvChart(), resizeTvChart(), renderChartData(), updateLegendFromCandle()) rather
@@ -27,21 +33,41 @@ let btSession = null; // last full session payload from the server
 let btDirection = 'Long';
 let btAutoplayTimer = null;
 
-/** Every network/API call in this file goes through this — never a bare api() call —
- *  so a thrown exception (bad JSON, network failure) is converted into the same
- *  {error: "..."} shape api.php's own application-level errors already use, instead of
- *  propagating as an uncaught promise rejection that silently halts whatever function
- *  was awaiting it (exactly what left the symbol dropdown and session list stuck on
- *  "Loading…" with nothing visible to the user — the actual bug this release fixes). */
+/** Every network/API call this module (and js/saved-backtests.js) makes goes through
+ *  this — never a bare api() call. Always returns a plain object: either the server's
+ *  own parsed JSON, or {error: "..."} carrying the real HTTP status and raw response
+ *  body when the response wasn't parseable JSON at all (a PHP fatal, a redirect to
+ *  login, a proxy error page). Nothing here ever throws — callers just check .error. */
 async function btApi(action, method, data) {
+    let res;
     try {
-        const res = await api(action, method || 'GET', data || null);
-        if (res === null || res === undefined) return { error: 'Empty response from server.' };
-        return res;
+        const opts = { method: method || 'GET', headers: { 'Content-Type': 'application/json' } };
+        if (data) opts.body = JSON.stringify(data);
+        res = await fetch(`includes/api.php?action=${action}`, opts);
     } catch (e) {
-        console.error('[backtest] API call failed:', action, e);
-        return { error: 'Could not reach the server (or got an unreadable response). Check the browser console/network tab for the failing request.' };
+        console.error('[backtest] network error:', action, e);
+        return { error: 'Network error — the request never reached the server. Check your connection.' };
     }
+    let text;
+    try {
+        text = await res.text();
+    } catch (e) {
+        return { error: `HTTP ${res.status} ${res.statusText} — could not read the response body.` };
+    }
+    let parsed;
+    try {
+        parsed = text === '' ? null : JSON.parse(text);
+    } catch (e) {
+        console.error('[backtest] non-JSON response:', action, res.status, text);
+        // The single most useful diagnostic this file can show: exactly what the server
+        // sent back, not a guess. A PHP fatal (e.g. a missing table because a migration
+        // hasn't been run yet) or an auth redirect both land here.
+        const snippet = text.slice(0, 300).replace(/\s+/g, ' ').trim();
+        return { error: `HTTP ${res.status} ${res.statusText} — server did not return JSON. Response: "${snippet || '(empty)'}"` };
+    }
+    if (parsed === null || parsed === undefined) return { error: `HTTP ${res.status} ${res.statusText} — empty response from server.` };
+    if (!res.ok && !parsed.error) return { error: `HTTP ${res.status} ${res.statusText}` };
+    return parsed;
 }
 
 // ── ENTRY POINT ──────────────────────────────────────────
@@ -61,11 +87,10 @@ function showBacktestScreen(screen) {
 
     // body.backtest-active drives the dark full-bleed layout (css/style.css's
     // "BACKTESTING" block) -- scoped to exactly this screen, not the whole module, so
-    // Screens A/C stay normal light-themed pages like everywhere else in the app.
+    // Screen A stays a normal light-themed page like everywhere else in the app.
     document.body.classList.toggle('backtest-active', screen === 'window');
 
     if (screen === 'form') { stopBtAutoplay(); btActiveSessionId = null; populateBtSetupForm(); }
-    if (screen === 'list') { stopBtAutoplay(); btActiveSessionId = null; loadBacktestSessions(); }
     if (screen === 'window' && typeof resizeTvChart === 'function') {
         // The chart container only has its real, final size once this screen is
         // actually visible (display:flex was just applied above) -- resize now rather
@@ -74,31 +99,6 @@ function showBacktestScreen(screen) {
     }
 }
 
-// ── SESSION LIST (Screen C) ──────────────────────────────
-async function loadBacktestSessions() {
-    const tbody = document.getElementById('bt-sessions-tbody');
-    tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text3)">Loading…</td></tr>';
-    const sessions = await btApi('get_backtest_sessions');
-    if (sessions && sessions.error) {
-        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--red)">Failed to load backtests — ${sessions.error}</td></tr>`;
-        return;
-    }
-    if (!Array.isArray(sessions) || !sessions.length) {
-        tbody.innerHTML = '<tr><td colspan="8" style="color:var(--text3)">No sessions yet — click "+ New Backtest" above.</td></tr>';
-        return;
-    }
-    tbody.innerHTML = sessions.map(s => `
-        <tr style="cursor:pointer" onclick="openBacktestSession(${s.id})">
-            <td>${escapeHtml(s.session_name || '(untitled)')}</td>
-            <td>${s.blind_mode ? '🙈 Blind' : (s.symbol || '—')}</td>
-            <td>${s.replay_timeframe}</td>
-            <td>${btStatusBadge(s.status)}</td>
-            <td class="${pnlCls(s.equity - s.starting_balance)}">${fmt(s.equity)}</td>
-            <td>${s.status === 'passed' ? '✅ Target reached' : (s.status === 'failed' ? '❌ ' + escapeHtml(s.fail_reason || 'Failed') : (s.progress_to_target_pct !== null ? s.progress_to_target_pct + '% to target' : '—'))}</td>
-            <td>${(s.created_at || '').slice(0, 10)}</td>
-            <td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openBacktestSession(${s.id})">${s.status === 'active' ? 'Resume' : 'Review'}</button></td>
-        </tr>`).join('');
-}
 function btStatusBadge(status) {
     const map = { active: 'badge-long', passed: 'badge-win', failed: 'badge-loss' };
     const label = { active: 'running', passed: 'passed', failed: 'failed' }[status] || status;
@@ -119,7 +119,14 @@ async function populateBtSetupForm() {
     const symbols = await btApi('get_symbols');
     if (symbols && symbols.error) {
         symSel.innerHTML = '<option>Failed to load symbols</option>';
-        document.getElementById('bt-setup-error').textContent = `Failed to load symbols — ${symbols.error}`;
+        const errEl = document.getElementById('bt-setup-error');
+        errEl.innerHTML = '';
+        errEl.appendChild(document.createTextNode(`Failed to load symbols — ${symbols.error} `));
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'btn btn-ghost btn-sm';
+        retryBtn.textContent = 'Retry';
+        retryBtn.onclick = populateBtSetupForm;
+        errEl.appendChild(retryBtn);
         return;
     }
     symSel.innerHTML = (Array.isArray(symbols) && symbols.length)
@@ -233,7 +240,9 @@ async function refreshBtSession() {
     const s = await btApi(`get_backtest_session&id=${btActiveSessionId}`);
     if (!s || s.error) {
         toast('Failed to load session — ' + (s ? s.error : 'unknown error'), 'error');
-        showBacktestScreen('list');
+        btActiveSessionId = null; // otherwise the next visit to Backtesting thinks a session is already open and skips straight back to this same broken screen
+        document.body.classList.remove('backtest-active');
+        showPage('saved-backtests');
         return false;
     }
     btSession = s;

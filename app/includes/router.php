@@ -102,6 +102,7 @@ $routes = [
     'backtest_place_order'   => ['BacktestController', 'placeOrder'],
     'backtest_cancel_order'  => ['BacktestController', 'cancelOrder'],
     'backtest_close_position'=> ['BacktestController', 'closePosition'],
+    'delete_backtest_session'=> ['BacktestController', 'deleteSession'],
 ];
 
 if (!isset($routes[$action])) {

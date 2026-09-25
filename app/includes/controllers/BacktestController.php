@@ -278,6 +278,19 @@ class BacktestController {
         }
     }
 
+    /** ON DELETE CASCADE on both fk_bpo_session and fk_trades_backtest_session
+     *  (2026_09_25_0001) means a plain delete here also removes this session's pending
+     *  orders and its simulated trades rows -- nothing left behind to leak into a real
+     *  challenge's trade log, and no separate cleanup query needed. */
+    public function deleteSession() {
+        $d = jsonInput();
+        $id = validId($d['id'] ?? 0);
+        if (!$id) jsonError('Invalid session id.');
+        $this->loadSession($id); // 404s if it doesn't exist or isn't this user's
+        $this->db->prepare("DELETE FROM backtest_sessions WHERE id=? AND user_id=?")->execute([$id, $this->uid]);
+        jsonResponse(['success' => true]);
+    }
+
     public function cancelOrder() {
         $d = jsonInput();
         $orderId = validId($d['order_id'] ?? 0);

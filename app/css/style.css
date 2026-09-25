@@ -34,6 +34,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body);font-si
 .nav a:hover{color:var(--text);background:var(--bg3)}
 .nav a.active{color:var(--blue2);background:var(--bg3);border-left-color:var(--blue)}
 .nav .icon{font-size:15px;width:20px;text-align:center}
+/* Saved Backtests sits directly under Backtesting -- indented to read as its child
+   rather than a sibling module. Collapsed-rail mode (body.sidebar-collapsed .nav a,
+   above) re-centers padding at higher specificity, so this indent only ever shows in
+   the expanded sidebar, exactly where the visual nesting makes sense. */
+.nav a.nav-sub{padding-left:34px}
 .nav-section{padding:14px 18px 4px;font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:2px}
 .sidebar-bottom{padding:14px 16px;border-top:1px solid var(--border)}
 .balance-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px}
@@ -410,6 +415,40 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-dir-btn{flex:1;background:#1c2030;color:#8b93a7;border:1px solid #2a2e39}
 .bt-dir-btn.active-long{background:#26a69a;color:#fff;border-color:#26a69a}
 .bt-dir-btn.active-short{background:#ef5350;color:#fff;border-color:#ef5350}
+.bt-panel-block:last-child{margin-bottom:0}
+
+/* v3.20.2 fix: the "New Order" panel's own <label>/<input>/<select> elements had no
+   override here and were falling back to the global light-theme rule (input,select,
+   textarea{background:var(--bg3);color:var(--text)} — see style.css line ~163), which
+   renders a bright light-grey box with dark text against this panel's #181c27
+   background, and label{color:var(--text3)} at 10px uppercase reads as barely-visible
+   grey-on-near-black. Together this is exactly what "renders as unstyled stacked text"
+   describes — not a missing style, a wrong (light-theme) one bleeding into a dark panel.
+   Scoped to .bt-side-panel specifically so nothing outside the replay window is touched. */
+.bt-side-panel label{color:#8b93a7}
+.bt-side-panel input,.bt-side-panel select{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc}
+.bt-side-panel input::placeholder{color:#5a6272}
+.bt-side-panel input:focus,.bt-side-panel select:focus{border-color:#2962ff}
+
+/* ── BACKTESTING SETUP FORM (Screen A) — grouped sections, centred ── */
+.bt-form-wrap{max-width:640px;margin:0 auto}
+.bt-form-wrap .form-section{margin-bottom:16px}
+.bt-form-wrap .form-section:last-of-type{margin-bottom:18px}
+
+/* ── SAVED BACKTESTS (v3.20.2 — own page, card grid) ── */
+.sb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.sb-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:10px}
+.sb-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.sb-card-name{font-family:var(--font-head);font-weight:600;font-size:14px;color:var(--text);word-break:break-word}
+.sb-card-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--text3);font-family:var(--font-mono, monospace)}
+.sb-card-equity{font-family:var(--font-mono, monospace);font-size:20px;font-weight:500}
+.sb-progress{display:flex;flex-direction:column;gap:4px}
+.sb-progress-bar{height:6px;background:var(--bg3);border-radius:3px;overflow:hidden}
+.sb-progress-fill{height:100%;border-radius:3px;transition:width 0.3s}
+.sb-progress-fill.green{background:var(--green)}
+.sb-progress-fill.red{background:var(--red)}
+.sb-progress-label{font-size:11px;color:var(--text3)}
+.sb-card-actions{display:flex;gap:6px;margin-top:2px}
 
 /* ── PDF PRINT ── */
 @media print{

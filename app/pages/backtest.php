@@ -1,6 +1,6 @@
 
-<!-- ── BACKTESTING (v3.20.1 — three-screen rework) ──
-     Exactly one of these three is ever visible at a time (js/backtest.js::
+<!-- ── BACKTESTING (v3.20.2 — Saved Backtests split into its own page) ──
+     Exactly one of these two is ever visible at a time (js/backtest.js::
      showBacktestScreen()), never stacked:
        #bt-screen-form   — Screen A: new-session form. This is what opens when the
                            sidebar's "Backtesting" link is clicked — no session list
@@ -12,10 +12,9 @@
                            css/style.css's "BACKTESTING" block for how that class
                            locks .main to the viewport and strips the page's own
                            padding — scoped to this screen only, not the whole module.
-       #bt-screen-list   — Screen C: saved sessions (name, symbol, timeframe, status,
-                           equity, progress). Reached via the "View Backtests" button
-                           inside Screen B; clicking a row reopens it in Screen B.
-                           Normal light-themed content, same as Screen A.
+     Saved Backtests (formerly a third screen here) is now its own sidebar page —
+     see pages/saved-backtests.php / js/saved-backtests.js. "View Backtests" navigates
+     there via showPage('saved-backtests'), not a screen switch inside this page.
      All logic lives in js/backtest.js. The underlying candlestick+volume chart
      rendering (initTvChart/resizeTvChart/renderChartData/timezone handling) is reused
      from js/chart.js as-is. -->
@@ -23,81 +22,80 @@
 
   <!-- ── SCREEN A: NEW BACKTEST ── -->
   <div class="bt-screen active" id="bt-screen-form">
-    <div class="card" style="max-width:640px;margin:0 auto">
-      <div class="card-title">New Backtest <button class="btn btn-ghost btn-sm" onclick="showBacktestScreen('list')">View Backtests</button></div>
-
-      <div class="form-group" style="margin-bottom:14px">
-        <label>Session Name <span style="color:var(--red)">*</span></label>
-        <input type="text" id="bt-setup-name" placeholder="e.g. FSA 1H BTC 10k test" maxlength="120">
+    <div class="bt-form-wrap">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="margin:0;font-family:var(--font-head);font-size:20px">New Backtest</h2>
+        <button class="btn btn-ghost btn-sm" onclick="showPage('saved-backtests')">View Backtests</button>
       </div>
 
-      <div class="form-grid-2" style="margin-bottom:14px">
-        <div class="form-group"><label>Symbol</label><select id="bt-setup-symbol" onchange="onBtSetupPairChange()"><option>Loading…</option></select></div>
-        <div class="form-group"><label>Replay Timeframe</label>
-          <select id="bt-setup-timeframe" onchange="onBtSetupPairChange()">
-            <option value="15m">15m</option><option value="1H" selected>1H</option><option value="4H">4H</option><option value="1D">1D</option>
-          </select>
+      <div class="card form-section">
+        <div class="card-title">Session</div>
+        <div class="form-group" style="margin-bottom:0">
+          <label>Session Name <span style="color:var(--red)">*</span></label>
+          <input type="text" id="bt-setup-name" placeholder="e.g. FSA 1H BTC 10k test" maxlength="120">
         </div>
       </div>
-      <div class="form-group" style="margin-bottom:14px">
-        <label>Start Date</label>
-        <input type="date" id="bt-setup-start-date">
-        <span id="bt-setup-date-range" style="font-size:11px;color:var(--text3)"></span>
-      </div>
-      <div class="form-grid-2" style="margin-bottom:14px">
-        <div class="form-group"><label>Risk % per Trade</label><input type="number" id="bt-setup-risk-pct" value="1" step="0.1" min="0.01" max="100"></div>
-        <div class="form-group"><label>Fee Rate % per Fill</label><input type="number" id="bt-setup-fee-rate" value="0.055" step="0.001" min="0"></div>
-      </div>
-      <div class="form-group" style="margin-bottom:18px">
-        <label><input type="checkbox" id="bt-setup-blind" style="width:auto;margin-right:6px">Blind mode (hide symbol &amp; dates during replay)</label>
+
+      <div class="card form-section">
+        <div class="card-title">Market &amp; Data</div>
+        <div class="form-grid-2" style="margin-bottom:14px">
+          <div class="form-group"><label>Symbol</label><select id="bt-setup-symbol" onchange="onBtSetupPairChange()"><option>Loading…</option></select></div>
+          <div class="form-group"><label>Replay Timeframe</label>
+            <select id="bt-setup-timeframe" onchange="onBtSetupPairChange()">
+              <option value="15m">15m</option><option value="1H" selected>1H</option><option value="4H">4H</option><option value="1D">1D</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:14px">
+          <label>Start Date</label>
+          <input type="date" id="bt-setup-start-date">
+          <span id="bt-setup-date-range" style="font-size:11px;color:var(--text3)"></span>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label><input type="checkbox" id="bt-setup-blind" style="width:auto;margin-right:6px">Blind mode (hide symbol &amp; dates during replay)</label>
+        </div>
       </div>
 
-      <div class="card-title" style="margin-top:4px">Challenge Rules — fully custom</div>
-      <div class="form-group" style="margin-bottom:14px">
-        <label>Prefill from an existing challenge (optional — every field below stays editable)</label>
-        <select id="bt-setup-prefill" onchange="onBtPrefillChange()"><option value="">— Custom, don't prefill —</option></select>
-      </div>
-      <div class="form-grid-2" style="margin-bottom:14px">
-        <div class="form-group"><label>Account Size ($)</label><input type="number" id="bt-setup-balance" value="10000" step="100" min="1"></div>
-        <div class="form-group"><label>Profit Target (%)</label><input type="number" id="bt-setup-target" value="8" step="0.1" min="0.01"></div>
-      </div>
-      <div class="form-grid-2" style="margin-bottom:14px">
-        <div class="form-group"><label>Daily Drawdown (%)</label><input type="number" id="bt-setup-daily-dd" value="5" step="0.1" min="0.01"></div>
-        <div class="form-group"><label>Max Drawdown (%)</label><input type="number" id="bt-setup-max-dd" value="10" step="0.1" min="0.01"></div>
-      </div>
-      <div class="form-grid-2" style="margin-bottom:18px">
-        <div class="form-group"><label>Drawdown Type</label>
-          <select id="bt-setup-dd-type"><option value="static">Static (from starting balance)</option><option value="trailing">Trailing (from equity peak)</option></select>
+      <div class="card form-section">
+        <div class="card-title">Risk</div>
+        <div class="form-grid-2" style="margin-bottom:0">
+          <div class="form-group"><label>Risk % per Trade</label><input type="number" id="bt-setup-risk-pct" value="1" step="0.1" min="0.01" max="100"></div>
+          <div class="form-group"><label>Fee Rate % per Fill</label><input type="number" id="bt-setup-fee-rate" value="0.055" step="0.001" min="0"></div>
         </div>
-        <div class="form-group"><label>Max Trades / Day (blank = no limit)</label><input type="number" id="bt-setup-max-trades" min="1"></div>
+      </div>
+
+      <div class="card form-section">
+        <div class="card-title">Challenge Rules — fully custom</div>
+        <div class="form-group" style="margin-bottom:14px">
+          <label>Prefill from an existing challenge (optional — every field below stays editable)</label>
+          <select id="bt-setup-prefill" onchange="onBtPrefillChange()"><option value="">— Custom, don't prefill —</option></select>
+        </div>
+        <div class="form-grid-2" style="margin-bottom:14px">
+          <div class="form-group"><label>Account Size ($)</label><input type="number" id="bt-setup-balance" value="10000" step="100" min="1"></div>
+          <div class="form-group"><label>Profit Target (%)</label><input type="number" id="bt-setup-target" value="8" step="0.1" min="0.01"></div>
+        </div>
+        <div class="form-grid-2" style="margin-bottom:14px">
+          <div class="form-group"><label>Daily Drawdown (%)</label><input type="number" id="bt-setup-daily-dd" value="5" step="0.1" min="0.01"></div>
+          <div class="form-group"><label>Max Drawdown (%)</label><input type="number" id="bt-setup-max-dd" value="10" step="0.1" min="0.01"></div>
+        </div>
+        <div class="form-grid-2" style="margin-bottom:0">
+          <div class="form-group"><label>Drawdown Type</label>
+            <select id="bt-setup-dd-type"><option value="static">Static (from starting balance)</option><option value="trailing">Trailing (from equity peak)</option></select>
+          </div>
+          <div class="form-group"><label>Max Trades / Day (blank = no limit)</label><input type="number" id="bt-setup-max-trades" min="1"></div>
+        </div>
       </div>
 
       <button class="btn btn-primary" style="width:100%" onclick="createBacktestSession()">Create Backtest</button>
       <div id="bt-setup-error" style="color:var(--red);font-size:12px;margin-top:8px"></div>
-      <div style="font-size:11px;color:var(--text3);margin-top:10px">Data: Bybit candles. Live fills come from BitFunded — wicks differ. Read results as indicative, not identical to live.</div>
-    </div>
-  </div>
-
-  <!-- ── SCREEN C: SAVED BACKTESTS ── -->
-  <div class="bt-screen" id="bt-screen-list">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-      <div class="card-title" style="margin:0">Saved Backtests</div>
-      <button class="btn btn-primary btn-sm" onclick="showBacktestScreen('form')">+ New Backtest</button>
-    </div>
-    <div class="card">
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Name</th><th>Symbol</th><th>Timeframe</th><th>Status</th><th>Equity</th><th>Progress</th><th>Created</th><th></th></tr></thead>
-          <tbody id="bt-sessions-tbody"><tr><td colspan="8" style="color:var(--text3)">Loading…</td></tr></tbody>
-        </table>
-      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:10px;text-align:center">Data: Bybit candles. Live fills come from BitFunded — wicks differ. Read results as indicative, not identical to live.</div>
     </div>
   </div>
 
   <!-- ── SCREEN B: THE BACKTEST WINDOW ── -->
   <div class="bt-screen" id="bt-screen-window">
     <div class="tv-controls-bar">
-      <button class="btn btn-ghost btn-sm" onclick="showBacktestScreen('list')" title="View Backtests">☰ View Backtests</button>
+      <button class="btn btn-ghost btn-sm" onclick="showPage('saved-backtests')" title="View Backtests">☰ View Backtests</button>
       <span id="bt-window-name" style="color:#d1d4dc;font-family:var(--font-head);font-size:13px;font-weight:600"></span>
       <span id="bt-replay-symbol" style="color:#8b93a7;font-family:var(--font-mono, monospace);font-size:12px"></span>
       <div class="tf-group">

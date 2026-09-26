@@ -70,6 +70,38 @@ function backtestDrawdownDistance(string $drawdownType, float $startingBalance, 
     return max(0.0, $basis - $equity);
 }
 
+/**
+ * v3.20.10 — combines N ascending-by-open_time raw candle rows into ONE synthetic
+ * candle spanning all of them (open of the first, close of the last, high/low across
+ * all, volume summed). Backs the replay window's timeframe switcher: displaying a
+ * higher timeframe than the session's own replay timeframe while a candle at that
+ * coarser resolution is still "in progress" requires building its elapsed portion from
+ * the finer, already-revealed replay-timeframe candles — the stored higher-timeframe
+ * series holds the real, COMPLETE future candle for that same window, which would leak
+ * lookahead if read directly while replay hasn't reached its close yet. Expects each row
+ * to have open_time/open/high/low/close/volume (BacktestController's own raw DB row
+ * shape, before the open_time->time API rename) — returns null for an empty input.
+ */
+function backtestAggregateCandles(array $rows): ?array {
+    if (empty($rows)) return null;
+    $high = -INF;
+    $low = INF;
+    $volume = 0.0;
+    foreach ($rows as $r) {
+        $high = max($high, (float) $r['high']);
+        $low = min($low, (float) $r['low']);
+        $volume += (float) $r['volume'];
+    }
+    return [
+        'open_time' => (int) $rows[0]['open_time'],
+        'open' => (float) $rows[0]['open'],
+        'high' => $high,
+        'low' => $low,
+        'close' => (float) $rows[count($rows) - 1]['close'],
+        'volume' => $volume,
+    ];
+}
+
 // ── SELF-TEST ────────────────────────────────────────────────────────────
 // Run standalone: `php includes/backtest_engine.php` — no DB, no network. Same
 // convention as bitfunded_parser.php/bybit_client.php's own self-tests.
@@ -118,6 +150,23 @@ function backtest_engine_self_test(): void {
     $check('trailing distance: peak 10800, equity 9500 -> 1300 used (from peak, not starting)', backtestDrawdownDistance('trailing', 10000, 10800, 9500), 1300.0);
     $check('distance never negative: equity above basis -> 0 used, not negative', backtestDrawdownDistance('static', 10000, 10000, 10500), 0.0);
     $check('static distance ignores peak entirely: same equity, different peak -> same distance', backtestDrawdownDistance('static', 10000, 15000, 9500), 500.0);
+
+    // Candle aggregation — three 1H bars folding into one partial 4H bar.
+    $check('aggregate: empty input -> null', backtestAggregateCandles([]), null);
+    $threeHourBars = [
+        ['open_time' => 1000, 'open' => 100, 'high' => 105, 'low' => 98, 'close' => 102, 'volume' => 10],
+        ['open_time' => 2000, 'open' => 102, 'high' => 110, 'low' => 101, 'close' => 108, 'volume' => 20],
+        ['open_time' => 3000, 'open' => 108, 'high' => 109, 'low' => 95, 'close' => 97, 'volume' => 15],
+    ];
+    $agg = backtestAggregateCandles($threeHourBars);
+    $check('aggregate: open_time = first bar\'s', $agg['open_time'], 1000);
+    $check('aggregate: open = first bar\'s open', $agg['open'], 100.0);
+    $check('aggregate: close = last bar\'s close', $agg['close'], 97.0);
+    $check('aggregate: high = max across all bars', $agg['high'], 110.0);
+    $check('aggregate: low = min across all bars', $agg['low'], 95.0);
+    $check('aggregate: volume = sum across all bars', $agg['volume'], 45.0);
+    $oneBar = backtestAggregateCandles([['open_time' => 5000, 'open' => 50, 'high' => 55, 'low' => 48, 'close' => 52, 'volume' => 5]]);
+    $check('aggregate: a single bar aggregates to itself', $oneBar, ['open_time' => 5000, 'open' => 50.0, 'high' => 55.0, 'low' => 48.0, 'close' => 52.0, 'volume' => 5.0]);
 
     fwrite(STDOUT, "backtest_engine.php self-test: $pass passed, $fail failed\n");
     if ($fail > 0) exit(1);

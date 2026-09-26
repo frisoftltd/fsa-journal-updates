@@ -100,6 +100,7 @@ $routes = [
     'create_backtest_session'=> ['BacktestController', 'createSession'],
     'get_backtest_candles'   => ['BacktestController', 'getCandles'],
     'backtest_advance'       => ['BacktestController', 'advance'],
+    'backtest_rewind'        => ['BacktestController', 'rewind'],
     'backtest_place_order'   => ['BacktestController', 'placeOrder'],
     'backtest_cancel_order'  => ['BacktestController', 'cancelOrder'],
     'backtest_close_position'=> ['BacktestController', 'closePosition'],

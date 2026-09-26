@@ -98,11 +98,25 @@
       <button class="btn btn-ghost btn-sm" onclick="showPage('saved-backtests')" title="View Backtests">☰ View Backtests</button>
       <span id="bt-window-name" style="color:#d1d4dc;font-family:var(--font-head);font-size:13px;font-weight:600"></span>
       <span id="bt-replay-symbol" style="color:#8b93a7;font-family:var(--font-mono, monospace);font-size:12px"></span>
+      <!-- v3.20.10: the replay cursor's own timestamp, always visible -- required
+           precisely because Prev Bar removes candles after the cursor from the chart;
+           making the current position explicit here is what keeps that "visible rather
+           than alarming" instead of just candles disappearing with no context. -->
+      <span id="bt-cursor-time" style="color:#d1d4dc;font-family:var(--font-mono, monospace);font-size:12px;font-weight:600" title="Current replay position (UTC)"></span>
+      <span style="color:#6b7280;font-size:11px" title="This is what actually steps forward/back -- independent of what timeframe you're viewing below">Replay <b id="bt-replay-clock-tf" style="color:#d1d4dc"></b></span>
+      <div class="tf-group" id="bt-display-tf-group" title="Change what's displayed -- does not change the replay clock">
+        <span style="color:#6b7280;font-size:11px;align-self:center">Viewing</span>
+        <button class="btn btn-ghost btn-sm bt-display-tf-btn" data-tf="15m" onclick="setBtDisplayTimeframe('15m')">15m</button>
+        <button class="btn btn-ghost btn-sm bt-display-tf-btn" data-tf="1H" onclick="setBtDisplayTimeframe('1H')">1H</button>
+        <button class="btn btn-ghost btn-sm bt-display-tf-btn" data-tf="4H" onclick="setBtDisplayTimeframe('4H')">4H</button>
+        <button class="btn btn-ghost btn-sm bt-display-tf-btn" data-tf="1D" onclick="setBtDisplayTimeframe('1D')">1D</button>
+      </div>
       <div class="tf-group">
+        <button class="btn btn-ghost btn-sm" onclick="btRewind()" title="Prev bar">◂ Prev Bar</button>
         <button class="btn btn-ghost btn-sm" onclick="btAdvance(false)" title="Next bar">Next Bar ▸</button>
         <button class="btn btn-ghost btn-sm" onclick="btAdvance(true)" title="Jump to the latest available bar">Jump to Latest ▸▸</button>
-        <select id="bt-replay-speed" style="width:auto;min-width:90px" title="Auto-play speed">
-          <option value="0">Manual</option><option value="1">1x</option><option value="2">2x</option><option value="5">5x</option><option value="10">10x</option>
+        <select id="bt-replay-speed" style="width:auto;min-width:70px" title="Auto-play speed">
+          <option value="1" selected>1x</option><option value="2">2x</option><option value="5">5x</option><option value="10">10x</option>
         </select>
         <button class="btn btn-ghost btn-sm" id="bt-play-btn" onclick="toggleBtAutoplay()">▶ Play</button>
       </div>
@@ -124,6 +138,9 @@
           <div class="bt-meter"><span>Max Drawdown</span><div class="bt-meter-bar"><div id="bt-meter-max" class="bt-meter-fill red"></div></div><span id="bt-val-max">—</span></div>
           <div class="bt-panel-row"><span>Trades today</span><span id="bt-val-trades-today">—</span></div>
           <div class="bt-panel-row"><span>Equity</span><span id="bt-val-equity">—</span></div>
+          <!-- v3.20.10: rewind_count is never hidden -- "repeatedly rewinding losing
+               trades is visible rather than hidden" is the explicit point of this row. -->
+          <div class="bt-panel-row" id="bt-rewind-count-row" style="display:none"><span>Rewinds</span><span id="bt-val-rewind-count">0</span></div>
           <div id="bt-outcome-banner" style="display:none;margin-top:8px;padding:8px;border-radius:6px;font-size:12px"></div>
         </div>
 

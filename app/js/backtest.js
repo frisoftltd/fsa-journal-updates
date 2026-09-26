@@ -1,5 +1,5 @@
 /**
- * FundedControl — Backtesting (v3.20.9 — sensible default start point + lead-in fix)
+ * FundedControl — Backtesting (v3.20.10 — Prev Bar/rewind, timeframe switch, stable chart)
  *
  * Two screens, exactly one visible at a time (showBacktestScreen()):
  *   'form'   — Screen A, new-session setup. ALWAYS what opens when the sidebar's
@@ -41,6 +41,12 @@ let btActiveSessionId = null;
 let btSession = null; // last full session payload from the server
 let btDirection = 'Long';
 let btAutoplayTimer = null;
+// v3.20.10 — what's being DISPLAYED, independent of btSession.replay_timeframe (which
+// is always what actually drives the clock — advance()/rewind() never read this). Reset
+// to the session's own replay_timeframe every time a session is freshly opened/resumed
+// (see refreshBtSession()'s isFirstLoad branch), then only ever changed by the user via
+// setBtDisplayTimeframe().
+let btDisplayTimeframe = null;
 
 /** Every network/API call this module (and js/saved-backtests.js) makes goes through
  *  this — never a bare api() call. Always returns a plain object: either the server's
@@ -243,9 +249,16 @@ async function createBacktestSession() {
 // ── REPLAY (Screen B) ────────────────────────────────────
 async function openBacktestSession(id) {
     btActiveSessionId = id;
+    // Reset for this session -- refreshBtSession() sets it to the session's own
+    // replay_timeframe once it knows what that is. Also drops any stable price range
+    // left over from whatever was viewed before, so a freshly opened/resumed session
+    // starts from a clean natural fit rather than inheriting an unrelated one.
+    btDisplayTimeframe = null;
+    btResetPriceRangeStabilizer();
     showBacktestScreen('window');
 
     if (typeof initTvChart === 'function') initTvChart();
+    btInstallPriceRangeStabilizer();
     window.btFetchCandlesOverride = (symbol, timeframe, before, limit) => btFetchCandles(before, limit);
 
     const ok = await refreshBtSession();
@@ -263,14 +276,18 @@ async function openBacktestSession(id) {
 // same idea, explicit and tunable rather than an incidental reuse of the general
 // load-older-on-scroll page size (still 500, unrelated, in loadOlderCandles()/chart.js).
 const BT_LEAD_IN_BARS = 300;
-// How many of the loaded bars are actually zoomed to on open/resume/advance -- a fixed,
-// reasonable "typical chart" width instead of fitContent()'s "cram everything into
-// view," which looks fine at 300 bars but would still look wrong (tiny, cramped) if left
-// as the default zoom, and looks broken at 1-2 bars for exactly the reason above.
+// How many of the loaded bars are actually zoomed to on open/resume/advance/rewind -- a
+// fixed, reasonable "typical chart" width instead of fitContent()'s "cram everything
+// into view," which looks fine at 300 bars but would still look wrong (tiny, cramped) if
+// left as the default zoom, and looks broken at 1-2 bars for exactly the reason above.
 const BT_INITIAL_VISIBLE_BARS = 100;
+// v3.20.10 — empty bars of room to the right of the replay cursor, TradingView-replay
+// style: the cursor sits left-of-center in its window, not pinned at the right edge.
+const BT_RIGHT_MARGIN_BARS = 20;
 
 async function btFetchCandles(before, limit) {
-    let action = `get_backtest_candles&session_id=${btActiveSessionId}&limit=${limit || (BT_LEAD_IN_BARS + 1)}`;
+    const tf = btDisplayTimeframe || (btSession ? btSession.replay_timeframe : '1H');
+    let action = `get_backtest_candles&session_id=${btActiveSessionId}&timeframe=${encodeURIComponent(tf)}&limit=${limit || (BT_LEAD_IN_BARS + 1)}`;
     if (before) action += `&before=${before}`;
     const res = await btApi(action);
     if (res && res.error) { toast('Failed to load candles — ' + res.error, 'error'); return []; }
@@ -278,12 +295,14 @@ async function btFetchCandles(before, limit) {
 }
 
 /**
- * Runs on session open, resume, and after every advance -- one shared path, so lead-in
- * behavior is automatically consistent everywhere a fresh window is loaded rather than
- * only at session-creation time. get_backtest_candles' own no-lookahead clamp
- * (BacktestController::getCandles()'s cursorCeiling) is untouched and still applies to
- * every call here regardless of how many bars are requested -- this only changes how
- * much HISTORY is requested, never what's allowed after the replay point.
+ * Runs on session open, resume, after every advance/rewind, and on a display-timeframe
+ * switch -- one shared path, so lead-in behavior and the stable visible range are
+ * automatically consistent everywhere a fresh window is loaded rather than only at
+ * session-creation time. get_backtest_candles' own no-lookahead clamp
+ * (BacktestController::getCandles()'s replayCeiling) is untouched and still applies to
+ * every call here regardless of how many bars are requested or what timeframe is
+ * displayed -- this only changes how much HISTORY is requested, never what's allowed
+ * after the replay point.
  *
  * If the session's start date has fewer than BT_LEAD_IN_BARS candles behind it (e.g. it
  * starts at the very earliest bar this symbol/timeframe has at all), the server simply
@@ -296,25 +315,91 @@ async function btLoadCandleWindow() {
     chartState.candles = rows.map(r => ({ time: r.time, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }));
     chartState.exhaustedOlder = rows.length < (BT_LEAD_IN_BARS + 1);
     chartState.symbol = btSession ? btSession.symbol : null;
-    chartState.timeframe = btSession ? btSession.replay_timeframe : '1H';
+    chartState.timeframe = btDisplayTimeframe || (btSession ? btSession.replay_timeframe : '1H');
     chartState.timezone = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     chartState.blindMode = !!(btSession && btSession.blind_mode);
     if (typeof renderChartData === 'function') renderChartData();
-    btSetInitialVisibleRange();
+    btSetVisibleRange();
 }
 
-/** Fixed-width logical range ending at the most recent (= current replay) bar, instead
- *  of fitContent(). Deliberately requested even when fewer than BT_INITIAL_VISIBLE_BARS
- *  bars are actually loaded (from can go negative) -- Lightweight Charts renders the
- *  real bars at their normal width with empty space filling the rest, rather than
- *  stretching what little data exists to fill the pane. The price axis still autoscales
- *  to whatever's visible (nothing else can be done about that with only 1-2 real bars),
- *  but the bar itself renders at a normal, readable width instead of a giant block. */
-function btSetInitialVisibleRange() {
+/**
+ * v3.20.10: fixed-width logical range with room to the right of the cursor, recomputed
+ * fresh from the CURRENT candle count every time this runs. Since btFetchCandles()
+ * always asks for "the most recent BT_LEAD_IN_BARS+1 candles ending at the cursor," the
+ * last loaded bar is always the cursor itself regardless of how far replay has advanced
+ * -- so recomputing this range from chartState.candles.length on every call is
+ * mathematically identical to shifting the same fixed-width window forward/back by
+ * however many bars actually changed, without needing to track a delta explicitly. This
+ * is what keeps the visible bar count constant and the cursor's own screen position
+ * consistent while stepping, per the requirement -- replacing fitContent()'s "cram
+ * everything into view" (v3.20.8) with a real fixed zoom level, now also shifted off the
+ * right edge instead of pinned to it. Deliberately requested even when fewer bars are
+ * actually loaded (from/to can extend past the real data) -- Lightweight Charts renders
+ * the real bars at normal width with empty space filling the rest, rather than
+ * stretching sparse data to fill the pane.
+ */
+function btSetVisibleRange() {
     if (!tvChart) return;
     const total = chartState.candles.length;
     if (!total) return;
-    tvChart.timeScale().setVisibleLogicalRange({ from: total - BT_INITIAL_VISIBLE_BARS, to: total });
+    const leftBars = BT_INITIAL_VISIBLE_BARS - BT_RIGHT_MARGIN_BARS;
+    tvChart.timeScale().setVisibleLogicalRange({ from: total - leftBars, to: total + BT_RIGHT_MARGIN_BARS });
+}
+
+/**
+ * v3.20.10 — stops the vertical "bounce" on every step. Lightweight Charts' default
+ * price-scale behavior re-fits to whatever's visible every time the data or visible
+ * range changes even slightly, which is what made the price axis wobble bar-to-bar. This
+ * installs a custom autoscaleInfoProvider on the candle series: it starts from the
+ * library's own natural computed range (padded a little), then only ever WIDENS that
+ * stored range when a new bar's price would actually fall outside it -- never re-tightens
+ * to a fresh fit on a step where the range happens to be narrower, which is exactly what
+ * "keep the visible price range stable... only adjust when price would leave the visible
+ * range" asks for. Widening (not snapping to a new tight fit) is the closest this
+ * library's public API gets to "shift smoothly rather than snapping" for the price axis.
+ * Reset (btResetPriceRangeStabilizer()) on a fresh session open/resume and on a display-
+ * timeframe switch, since a genuinely new dataset should start from a clean natural fit.
+ */
+let btPriceRangeState = null;
+function btInstallPriceRangeStabilizer() {
+    if (!tvCandleSeries) return;
+    tvCandleSeries.applyOptions({
+        autoscaleInfoProvider: (original) => {
+            const res = original();
+            if (!res || !res.priceRange) return res;
+            const natural = res.priceRange;
+            const pad = Math.max((natural.maxValue - natural.minValue) * 0.08, Math.abs(natural.maxValue) * 0.001, 0.0001);
+            if (!btPriceRangeState) {
+                btPriceRangeState = { minValue: natural.minValue - pad, maxValue: natural.maxValue + pad };
+            } else {
+                if (natural.minValue < btPriceRangeState.minValue) btPriceRangeState.minValue = natural.minValue - pad;
+                if (natural.maxValue > btPriceRangeState.maxValue) btPriceRangeState.maxValue = natural.maxValue + pad;
+            }
+            return { priceRange: btPriceRangeState };
+        },
+    });
+}
+function btResetPriceRangeStabilizer() {
+    btPriceRangeState = null;
+}
+
+// ── DISPLAY TIMEFRAME SWITCHER ────────────────────────────
+/** Changes only what's DISPLAYED -- btSession.replay_timeframe (the clock) is untouched;
+ *  advance()/rewind() never read btDisplayTimeframe at all. The same replay timestamp is
+ *  preserved automatically: btFetchCandles(null, ...) always asks for "the most recent
+ *  N candles ending at the current cursor," regardless of which timeframe that request is
+ *  for, so switching timeframes re-fetches lead-in history at the new resolution ending
+ *  at exactly the same instant. */
+async function setBtDisplayTimeframe(tf) {
+    if (!btSession || tf === btDisplayTimeframe) return;
+    btDisplayTimeframe = tf;
+    setActiveBtDisplayTfButton();
+    btResetPriceRangeStabilizer();
+    await btLoadCandleWindow();
+    if (typeof resizeTvChart === 'function') resizeTvChart();
+}
+function setActiveBtDisplayTfButton() {
+    document.querySelectorAll('.bt-display-tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === btDisplayTimeframe));
 }
 
 /** Returns true on success, false on failure (already shown to the user and bounced
@@ -332,15 +417,49 @@ async function refreshBtSession() {
         showBacktestScreen('form');
         return false;
     }
+    // A fresh open/resume (not a mid-session refresh after placing/cancelling an order)
+    // -- reset the display timeframe to the session's own replay timeframe so each
+    // session starts viewing at its native resolution by default.
+    const isFirstLoad = !btSession || btSession.id !== s.id;
     btSession = s;
-    document.getElementById('bt-window-name').textContent = s.session_name || '(untitled)';
-    document.getElementById('bt-replay-symbol').textContent = s.blind_mode ? '🙈 Blind Mode' : `${s.symbol} · ${s.replay_timeframe}`;
+    if (isFirstLoad) btDisplayTimeframe = s.replay_timeframe;
+    renderBtHeader(s);
+    setActiveBtDisplayTfButton();
     renderChallengePanel(s);
     renderOpenPositions(s.open_positions || []);
     renderPendingOrders(s.pending_orders || []);
     renderBtOutcome(s);
     document.getElementById('bt-replay-status').textContent = s.status === 'active' ? '' : `Session ${s.status}`;
     return true;
+}
+
+/** Shared by refreshBtSession(), btAdvance() and btRewind() -- three separate call sites
+ *  as of v3.20.10, all needing the exact same header fields kept in sync. */
+function renderBtHeader(s) {
+    document.getElementById('bt-window-name').textContent = s.session_name || '(untitled)';
+    document.getElementById('bt-replay-symbol').textContent = s.blind_mode ? '🙈 Blind Mode' : `${s.symbol} · ${s.replay_timeframe}`;
+    document.getElementById('bt-replay-clock-tf').textContent = s.replay_timeframe;
+    document.getElementById('bt-cursor-time').textContent = fmtCursorTime(s.replay_cursor_ms);
+    // "The session records a rewind count, so repeatedly rewinding losing trades is
+    // visible rather than hidden" -- shown only once it's actually non-zero, so a
+    // never-rewound session doesn't carry a distracting "Rewinds: 0" row all the time.
+    if (s.rewind_count > 0) {
+        document.getElementById('bt-rewind-count-row').style.display = 'flex';
+        document.getElementById('bt-val-rewind-count').textContent = s.rewind_count;
+    }
+}
+/** UTC, explicitly labelled -- the replay cursor is fundamentally a UTC timestamp
+ *  server-side (candles.open_time, backtest_sessions.replay_cursor_ms), and converting
+ *  it to a locally-formatted time here would be a second, unrelated timezone concern.
+ *  Shown even in blind mode, deliberately: blind mode otherwise hides "which date" (see
+ *  updateLegendFromCandle()'s dateLine) to avoid hindsight bias, but this ticket asks for
+ *  the cursor timestamp "prominently in the controls bar at all times," specifically so a
+ *  Prev Bar step (which removes candles from the chart) is visible/traceable rather than
+ *  alarming. Flagged here as a deliberate exception, not an oversight, in case blind-mode
+ *  purity is ever prioritized over rewind-safety visibility for this one element. */
+function fmtCursorTime(ms) {
+    if (!ms) return '—';
+    return new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 }
 
 function renderChallengePanel(s) {
@@ -405,8 +524,7 @@ async function btAdvance(jumpToLatest) {
     });
 
     btSession = res.session;
-    document.getElementById('bt-window-name').textContent = btSession.session_name || '(untitled)';
-    document.getElementById('bt-replay-symbol').textContent = btSession.blind_mode ? '🙈 Blind Mode' : `${btSession.symbol} · ${btSession.replay_timeframe}`;
+    renderBtHeader(btSession);
     renderChallengePanel(btSession);
     renderOpenPositions(res.open_positions || []);
     renderBtOutcome(btSession);
@@ -422,11 +540,46 @@ async function btAdvance(jumpToLatest) {
     }
 }
 
+/**
+ * v3.20.10 — Prev Bar. Two-phase confirm: the first call (no {confirmed:true}) only ever
+ * COUNTS what would be undone server-side and reports it back without writing anything;
+ * a step that would undo one or more trades shows a confirm() naming exactly how many
+ * before re-calling with confirmed:true. A step into empty history that undoes nothing
+ * never prompts. btLoadCandleWindow() re-fetches the window from scratch afterward, which
+ * naturally trims any candle after the new (earlier) cursor with no extra client-side
+ * logic needed -- the same no-lookahead clamp every other load already goes through.
+ */
+async function btRewind() {
+    if (!btActiveSessionId || !btSession || btSession.status !== 'active') return;
+    let res = await btApi('backtest_rewind', 'POST', { session_id: btActiveSessionId });
+    if (res && res.error) { toast('Rewind failed — ' + res.error, 'error'); return; }
+    if (res && res.confirm_required) {
+        const n = res.trades_affected;
+        const proceed = confirm(`Stepping back will undo ${n} trade${n === 1 ? '' : 's'} -- ${n === 1 ? 'its outcome' : 'their outcomes'} will be removed from equity and stats (kept in the log, flagged as rewound). Continue?`);
+        if (!proceed) return;
+        res = await btApi('backtest_rewind', 'POST', { session_id: btActiveSessionId, confirmed: true });
+        if (res && res.error) { toast('Rewind failed — ' + res.error, 'error'); return; }
+    }
+    if (!res || !res.success) return;
+    if (res.trades_rewound > 0) toast(`Rewound — ${res.trades_rewound} trade${res.trades_rewound === 1 ? '' : 's'} undone`);
+
+    btSession = res.session;
+    renderBtHeader(btSession);
+    renderChallengePanel(btSession);
+    renderOpenPositions(res.open_positions || []);
+    renderBtOutcome(btSession);
+    document.getElementById('bt-replay-status').textContent = btSession.status === 'active' ? '' : `Session ${btSession.status}`;
+
+    await btLoadCandleWindow();
+}
+
 function toggleBtAutoplay() {
     const btn = document.getElementById('bt-play-btn');
     if (btAutoplayTimer) { stopBtAutoplay(); return; }
-    const speed = parseFloat(document.getElementById('bt-replay-speed').value) || 0;
-    if (speed <= 0) { toast('Choose a speed other than Manual to auto-play', 'error'); return; }
+    // "Manual" is no longer an option in the speed dropdown (v3.20.10) -- Play always
+    // works now; the || 1 fallback is defensive only (the dropdown can't actually submit
+    // an empty/zero value any more), not a real Manual-mode case to route around.
+    const speed = parseFloat(document.getElementById('bt-replay-speed').value) || 1;
     btn.textContent = '⏸ Pause';
     const intervalMs = Math.max(150, 1500 / speed);
     btAutoplayTimer = setInterval(() => {

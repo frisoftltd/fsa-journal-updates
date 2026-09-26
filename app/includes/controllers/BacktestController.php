@@ -231,29 +231,75 @@ class BacktestController {
     /**
      * The one rule this whole method exists to enforce: never return a candle whose
      * open_time is later than the session's own replay_cursor_ms, no matter what a
-     * client's `before`/`limit` params ask for. $effectiveBefore is clamped server-side
-     * — trimmed here, not left to the browser to hide, per the briefing's own explicit
-     * "critical" requirement.
+     * client's `before`/`limit`/`timeframe` params ask for. The browser is never trusted
+     * to hide future data on its own, on any timeframe.
+     *
+     * v3.20.10 — accepts an optional `timeframe` query param (the replay window's own
+     * timeframe switcher, distinct from the session's fixed `replay_timeframe`, which is
+     * always what actually drives the clock — see advance()/rewind(), neither of which
+     * ever reads this param). Two cases:
+     *   - display timeframe <= replay timeframe (same or finer): real stored candles at
+     *     that timeframe, clamped to the REPLAY timeframe's own boundary (not a
+     *     display-sized one) so viewing finer resolution can never reveal anything the
+     *     replay clock hasn't actually reached yet.
+     *   - display timeframe > replay timeframe (coarser, e.g. viewing 4H while replaying
+     *     on 1H): every fully-elapsed coarser bar before the current one is real, stored
+     *     data (safe — genuinely in the past). The CURRENT, still-in-progress coarser bar
+     *     cannot be read from the stored series at all — that row holds the real,
+     *     complete future candle for that window, not what's actually been revealed —
+     *     so it's synthesized from the real replay-timeframe candles that have actually
+     *     elapsed within it (backtestAggregateCandles()), which is exactly "a partially
+     *     formed higher-timeframe candle shows only the elapsed portion."
      */
     public function getCandles() {
         $id = validId($_GET['session_id'] ?? 0);
         if (!$id) jsonError('Invalid session id.');
         $session = $this->loadSession($id);
 
-        $stepMs = backtestTimeframeStepMs($session['replay_timeframe']);
-        $cursorCeiling = (int) $session['replay_cursor_ms'] + $stepMs; // +stepMs: get_candles' own `before` param is exclusive, so this makes the cursor bar itself includable
+        $replayTf = $session['replay_timeframe'];
+        $replayStepMs = backtestTimeframeStepMs($replayTf);
+        // +replayStepMs: get_candles' own `before` param is exclusive, so this makes the
+        // cursor bar itself includable. This is the ONE true no-lookahead boundary,
+        // independent of whatever timeframe is being displayed.
+        $replayCeiling = (int) $session['replay_cursor_ms'] + $replayStepMs;
+
+        $displayTf = trim($_GET['timeframe'] ?? '');
+        if ($displayTf === '') $displayTf = $replayTf;
+        if (!in_array($displayTf, ['15m', '1H', '4H', '1D'], true)) jsonError('Invalid display timeframe.');
+        $displayStepMs = backtestTimeframeStepMs($displayTf);
 
         $limit = isset($_GET['limit']) ? max(1, min(2000, (int) $_GET['limit'])) : 500;
         $before = isset($_GET['before']) && $_GET['before'] !== '' ? (int) $_GET['before'] : null;
-        $effectiveBefore = $before !== null ? min($before, $cursorCeiling) : $cursorCeiling;
 
-        $s = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time < ? ORDER BY open_time DESC LIMIT ?");
-        $s->bindValue(1, $session['symbol']);
-        $s->bindValue(2, $session['replay_timeframe']);
-        $s->bindValue(3, $effectiveBefore, PDO::PARAM_INT);
-        $s->bindValue(4, $limit, PDO::PARAM_INT);
-        $s->execute();
-        $rows = array_reverse($s->fetchAll());
+        if ($displayStepMs <= $replayStepMs) {
+            $effectiveBefore = $before !== null ? min($before, $replayCeiling) : $replayCeiling;
+            $rows = $this->fetchStoredCandles($session['symbol'], $displayTf, $effectiveBefore, $limit);
+        } else {
+            // UTC-epoch-aligned start of the coarser bar the cursor currently sits
+            // inside (real exchange kline data is always epoch-aligned, e.g. 4H bars
+            // open at 00:00/04:00/08:00 UTC etc. — never an arbitrary offset).
+            $alignedStart = intdiv((int) $session['replay_cursor_ms'], $displayStepMs) * $displayStepMs;
+            $olderCeiling = $before !== null ? min($before, $alignedStart) : $alignedStart;
+            // The synthesized in-progress bar only belongs on the page that's actually
+            // at the "live edge" of the replay -- a request paginating further back into
+            // pure history ($before at or before $alignedStart) is asking for older,
+            // fully-elapsed bars only, and gets exactly that with no synthetic bar
+            // appended, exactly like every other page of this same scroll-back query.
+            $includePartial = ($before === null || $before > $alignedStart);
+            $olderLimit = $includePartial ? max(1, $limit - 1) : $limit;
+            $rows = $this->fetchStoredCandles($session['symbol'], $displayTf, $olderCeiling, $olderLimit);
+
+            if ($includePartial) {
+                $elapsed = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time >= ? AND open_time < ? ORDER BY open_time ASC");
+                $elapsed->bindValue(1, $session['symbol']);
+                $elapsed->bindValue(2, $replayTf);
+                $elapsed->bindValue(3, $alignedStart, PDO::PARAM_INT);
+                $elapsed->bindValue(4, $replayCeiling, PDO::PARAM_INT);
+                $elapsed->execute();
+                $partial = backtestAggregateCandles($elapsed->fetchAll());
+                if ($partial !== null) $rows[] = $partial;
+            }
+        }
 
         jsonResponse([
             'candles' => array_map(fn($r) => [
@@ -261,7 +307,21 @@ class BacktestController {
                 'low' => (float) $r['low'], 'close' => (float) $r['close'], 'volume' => (float) $r['volume'],
             ], $rows),
             'replay_cursor_ms' => (int) $session['replay_cursor_ms'],
+            'timeframe' => $displayTf,
         ]);
+    }
+
+    /** Real, stored candles at $timeframe strictly before $before, most-recent $limit of
+     *  them, ascending. Shared by both branches of getCandles() -- the only difference
+     *  between them is what $before/$limit/$timeframe are computed as. */
+    private function fetchStoredCandles(string $symbol, string $timeframe, int $before, int $limit): array {
+        $s = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time < ? ORDER BY open_time DESC LIMIT ?");
+        $s->bindValue(1, $symbol);
+        $s->bindValue(2, $timeframe);
+        $s->bindValue(3, $before, PDO::PARAM_INT);
+        $s->bindValue(4, $limit, PDO::PARAM_INT);
+        $s->execute();
+        return array_reverse($s->fetchAll());
     }
 
     // ── REPLAY ADVANCE ───────────────────────────────────────
@@ -320,6 +380,108 @@ class BacktestController {
             'session' => $this->sessionSummary($session, $finalState),
             'open_positions' => $finalState['open_positions'],
             'more_available' => $jumpToLatest && $lastBar['open_time'] < $latestAvailable,
+        ]);
+    }
+
+    /**
+     * v3.20.10 — Prev Bar. Steps replay_cursor_ms back exactly one bar of the session's
+     * OWN replay timeframe (never a display timeframe — the clock only moves in the unit
+     * the session was created with) and undoes everything that happened strictly after
+     * the new cursor, so stale P&L can never survive a rewind:
+     *   - a trade OPENED after the new cursor never happened from this point of view —
+     *     flagged backtest_rewound=1 (excluded from every equity/stats query in this
+     *     controller), never deleted, per the requirement that it stay visible in the log.
+     *   - a trade opened BEFORE the new cursor but closed AFTER it is reopened: its close
+     *     is undone (result back to 'Open', exit fields cleared), its entry is left
+     *     exactly as it was. Its fee is recomputed to entry-only via backtestFee() (a
+     *     pure function of entry_price/lot_size/fee_rate_pct) rather than "subtracted"
+     *     from the stored combined total — settleTrade() overwrites `fees` with
+     *     entry+exit combined and there is no separate stored entry-only column, but the
+     *     fee formula is deterministic, so recomputing it returns exactly what was
+     *     originally charged at fill time.
+     *   - a pending order PLACED after the new cursor never existed from this point of
+     *     view either — deleted outright (unlike a trade, an order that never filled has
+     *     no execution facts of its own worth preserving in a log).
+     *   - a pending order that FILLED after the new cursor (i.e. its trade is one of the
+     *     ones just flagged rewound) returns to status='pending', trade_id=NULL — the
+     *     fill itself is exactly the kind of "thing that happened after the cursor" this
+     *     whole method undoes.
+     *   - session status/pass/fail rolls back to 'active' if the bar that set it is now
+     *     after the new cursor.
+     * rewind_count accumulates how many trade OUTCOMES were actually undone (fully
+     * rewound + reopened-from-closed), not how many times this endpoint was called — a
+     * step back into empty history doesn't move the count, so it stays a meaningful
+     * measure of "how much has been erased," per the requirement.
+     *
+     * Two-phase confirm: with no {confirmed:true} in the body, this only ever COUNTS what
+     * would be undone and reports it back without writing anything — the frontend uses
+     * this to show "this will undo N trade(s)" before the user commits. A step back that
+     * would undo nothing needs no confirmation and applies immediately.
+     */
+    public function rewind() {
+        $d = jsonInput();
+        $id = validId($d['session_id'] ?? 0);
+        if (!$id) jsonError('Invalid session id.');
+        $session = $this->loadSession($id);
+
+        $stepMs = backtestTimeframeStepMs($session['replay_timeframe']);
+        $newCursorMs = (int) $session['replay_cursor_ms'] - $stepMs;
+
+        // Snap to a real candle, same "the cursor always sits on a real bar" principle
+        // createSession() itself already uses — a rewind must never leave the cursor on
+        // an arbitrary timestamp between two actual bars.
+        $prevBar = $this->db->prepare("SELECT open_time FROM candles WHERE symbol=? AND timeframe=? AND open_time <= ? ORDER BY open_time DESC LIMIT 1");
+        $prevBar->execute([$session['symbol'], $session['replay_timeframe'], $newCursorMs]);
+        $realNewCursor = $prevBar->fetchColumn();
+        if ($realNewCursor === false || (int) $realNewCursor < (int) $session['start_time']) {
+            jsonError('Already at the start of this session — nothing to step back to.');
+        }
+        $realNewCursor = (int) $realNewCursor;
+        $newCursorDt = gmdate('Y-m-d H:i:s', (int) ($realNewCursor / 1000));
+
+        $openedAfter = $this->db->prepare("SELECT id FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND time_in > ?");
+        $openedAfter->execute([$id, $newCursorDt]);
+        $openedAfterIds = array_map('intval', array_column($openedAfter->fetchAll(), 'id'));
+
+        $reopen = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND time_in <= ? AND time_out IS NOT NULL AND time_out > ?");
+        $reopen->execute([$id, $newCursorDt, $newCursorDt]);
+        $reopenRows = $reopen->fetchAll();
+
+        $affected = count($openedAfterIds) + count($reopenRows);
+        if (empty($d['confirmed']) && $affected > 0) {
+            jsonResponse(['confirm_required' => true, 'trades_affected' => $affected]);
+            return;
+        }
+
+        if ($openedAfterIds) {
+            $in = implode(',', array_fill(0, count($openedAfterIds), '?'));
+            $this->db->prepare("UPDATE trades SET backtest_rewound=1 WHERE id IN ($in)")->execute($openedAfterIds);
+            $this->db->prepare("UPDATE backtest_pending_orders SET status='pending', trade_id=NULL WHERE trade_id IN ($in)")->execute($openedAfterIds);
+        }
+        foreach ($reopenRows as $t) {
+            $entryFee = round(backtestFee((float) $t['lot_size'], (float) $t['entry_price'], (float) $session['fee_rate_pct']), 4);
+            $this->db->prepare(
+                "UPDATE trades SET result='Open', exit_price=NULL, time_out=NULL, fees=?, pnl=NULL, net_pnl=NULL, exit_reason=NULL, r_multiple=NULL, r_multiple_source=NULL WHERE id=?"
+            )->execute([$entryFee, $t['id']]);
+        }
+        $this->db->prepare("DELETE FROM backtest_pending_orders WHERE session_id=? AND placed_at_bar_time > ?")->execute([$id, $realNewCursor]);
+
+        $clearFail = $session['fail_bar_time'] !== null && (int) $session['fail_bar_time'] > $realNewCursor;
+        $clearPass = $session['passed_at_bar_time'] !== null && (int) $session['passed_at_bar_time'] > $realNewCursor;
+        if ($clearFail || $clearPass) {
+            $this->db->prepare(
+                "UPDATE backtest_sessions SET status='active', fail_reason=NULL, fail_bar_time=NULL, fail_equity=NULL, passed_at_bar_time=NULL, passed_trading_days=NULL, passed_trade_count=NULL WHERE id=?"
+            )->execute([$id]);
+        }
+        $this->db->prepare("UPDATE backtest_sessions SET replay_cursor_ms=?, rewind_count = rewind_count + ? WHERE id=?")->execute([$realNewCursor, $affected, $id]);
+
+        $session = $this->loadSession($id);
+        $state = $this->computeSessionState($session);
+        jsonResponse([
+            'success' => true,
+            'trades_rewound' => $affected,
+            'session' => $this->sessionSummary($session, $state),
+            'open_positions' => $state['open_positions'],
         ]);
     }
 
@@ -403,7 +565,7 @@ class BacktestController {
         $d = jsonInput();
         $tradeId = validId($d['trade_id'] ?? 0);
         if (!$tradeId) jsonError('Invalid trade id.');
-        $t = $this->db->prepare("SELECT * FROM trades WHERE id=? AND user_id=? AND source='backtest'");
+        $t = $this->db->prepare("SELECT * FROM trades WHERE id=? AND user_id=? AND source='backtest' AND backtest_rewound=0");
         $t->execute([$tradeId, $this->uid]);
         $trade = $t->fetch();
         if (!$trade) jsonError('Backtest trade not found.');
@@ -482,7 +644,7 @@ class BacktestController {
             $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'price' => (float) $order['limit_price']];
         }
 
-        $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND result='Open'");
+        $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
         $open->execute([$session['id']]);
         foreach ($open->fetchAll() as $trade) {
             $stop = (float) $trade['stop_loss'];
@@ -555,7 +717,7 @@ class BacktestController {
      * getSessions()' list view, which doesn't need a live mark, just a summary.
      */
     private function computeSessionState(array $session, ?array $markBar = null): array {
-        $closed = $this->db->prepare("SELECT trade_date, net_pnl FROM trades WHERE backtest_session_id=? AND source='backtest' AND result IN ('Win','Loss','Break Even') ORDER BY time_out ASC, id ASC");
+        $closed = $this->db->prepare("SELECT trade_date, net_pnl FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result IN ('Win','Loss','Break Even') ORDER BY time_out ASC, id ASC");
         $closed->execute([$session['id']]);
         $closedRows = $closed->fetchAll();
 
@@ -570,7 +732,7 @@ class BacktestController {
         }
         $closedEquity = $running;
 
-        $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND result='Open'");
+        $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
         $open->execute([$session['id']]);
         $openRows = $open->fetchAll();
 
@@ -591,7 +753,7 @@ class BacktestController {
         if ($peak < $closedEquity + $floatingTotal) $peak = $closedEquity + $floatingTotal;
 
         $todayDate = $markBar ? gmdate('Y-m-d', (int) ($markBar['open_time'] / 1000)) : gmdate('Y-m-d', (int) ($session['replay_cursor_ms'] / 1000));
-        $tradesToday = $this->db->prepare("SELECT COUNT(*) FROM trades WHERE backtest_session_id=? AND source='backtest' AND trade_date=?");
+        $tradesToday = $this->db->prepare("SELECT COUNT(*) FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND trade_date=?");
         $tradesToday->execute([$session['id'], $todayDate]);
 
         // Today's own realised change (from $closedRows, already fetched above — no
@@ -683,7 +845,7 @@ class BacktestController {
         // breach, so the trade log and the recorded fail_equity agree with each other
         // (an open position left dangling would keep moving after the session is
         // already over, silently disagreeing with the frozen fail_equity snapshot).
-        $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND result='Open'");
+        $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
         $open->execute([$session['id']]);
         foreach ($open->fetchAll() as $trade) {
             $this->settleTrade($trade, (float) $bar['close'], 'Manual Closing', (float) $session['fee_rate_pct']);
@@ -734,6 +896,12 @@ class BacktestController {
             'passed_at_bar_time' => $session['passed_at_bar_time'] !== null ? (int) $session['passed_at_bar_time'] : null,
             'passed_trading_days' => $session['passed_trading_days'] !== null ? (int) $session['passed_trading_days'] : null,
             'passed_trade_count' => $session['passed_trade_count'] !== null ? (int) $session['passed_trade_count'] : null,
+            // v3.20.10 — how many trade outcomes a rewind has ever undone for this
+            // session (see rewind()'s own docblock for exactly what counts). 0 for every
+            // session created before this migration ran, correctly (the column defaults
+            // to 0, and there is nothing to backfill — no rewind could have happened
+            // before this feature existed).
+            'rewind_count' => (int) ($session['rewind_count'] ?? 0),
             'created_at' => $session['created_at'],
         ];
     }

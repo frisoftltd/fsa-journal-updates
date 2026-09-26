@@ -1,5 +1,5 @@
 /**
- * FundedControl — Backtesting (v3.20.5 — no implicit session resume)
+ * FundedControl — Backtesting (v3.20.9 — sensible default start point + lead-in fix)
  *
  * Two screens, exactly one visible at a time (showBacktestScreen()):
  *   'form'   — Screen A, new-session setup. ALWAYS what opens when the sidebar's
@@ -163,14 +163,24 @@ async function populateBtSetupForm() {
     await onBtSetupPairChange();
 }
 /**
- * v3.20.6: Start Date is optional -- leaving it blank means "start at the earliest
- * available candle" (BacktestController::createSession() now honours this server-side).
- * This still prefills the field with that same earliest date whenever the symbol or
- * timeframe changes, so the user sees exactly what they'll get by default and can edit
- * it -- and sets min/max to the real available range so an out-of-range date can't be
- * picked in the UI to begin with. Uses get_backtest_symbol_range (candle_sync, scoped to
- * this exact symbol+timeframe pair) rather than get_symbols' own earliest_candle_ms,
- * which is symbol-level only (not per-timeframe) and has no "latest" counterpart at all.
+ * v3.20.6: Start Date is optional -- leaving it blank means "start at the absolute
+ * earliest available candle" (BacktestController::createSession() honours this
+ * server-side, unchanged by v3.20.9). min/max are set to the real available range so an
+ * out-of-range date can't be picked in the UI to begin with. Uses
+ * get_backtest_symbol_range (candle_sync, scoped to this exact symbol+timeframe pair)
+ * rather than get_symbols' own earliest_candle_ms, which is symbol-level only (not
+ * per-timeframe) and has no "latest" counterpart at all.
+ *
+ * v3.20.9: the field now PREFILLS to range.default_start_time, not earliest_open_time.
+ * Defaulting to the absolute earliest candle meant every session created without
+ * touching this field opened with zero lead-in history by definition -- v3.20.8's
+ * 300-bar lead-in fetch was already correctly deployed and correctly implemented, it
+ * simply had nothing before the very first candle to fetch. default_start_time
+ * (BacktestController::getSymbolRange()) is DEFAULT_LEAD_IN_BARS candles into history
+ * instead, so a session created with the default prefill actually has that history
+ * behind it. The "Data from ... onward" helper line still reports the true earliest
+ * date (min stays there too) -- a user who deliberately wants to start at the very
+ * beginning can still type/pick it, or clear the field entirely.
  */
 async function onBtSetupPairChange() {
     const symbol = document.getElementById('bt-setup-symbol').value;
@@ -187,7 +197,8 @@ async function onBtSetupPairChange() {
     rangeEl.textContent = `Data from ${earliest} onward (${timeframe})`;
     dateInput.min = earliest;
     dateInput.max = range.latest_open_time !== null ? new Date(range.latest_open_time).toISOString().slice(0, 10) : '';
-    dateInput.value = earliest;
+    const defaultStartMs = (range.default_start_time !== null && range.default_start_time !== undefined) ? range.default_start_time : range.earliest_open_time;
+    dateInput.value = new Date(defaultStartMs).toISOString().slice(0, 10);
 }
 function onBtPrefillChange() {
     const raw = document.getElementById('bt-setup-prefill').value;

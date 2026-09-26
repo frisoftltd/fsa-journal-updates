@@ -4,6 +4,23 @@ require_once 'includes/emotion_states.php';
 require_once 'includes/journal_taxonomy.php';
 requireLogin();
 $u = currentUser();
+
+// v3.20.9 — cache-busting for local JS/CSS, tied to the deployed app version. Without
+// this, a browser (or an intermediate proxy/CDN) can keep serving a stale cached copy of
+// a JS/CSS file after Update Now replaces it on the server -- exactly the kind of stale-
+// asset confusion that already masked whether a fix had actually landed once in this
+// release series (see CLAUDE.md v3.20.9). version.json is written into this same
+// directory by updater.php's own apply step (LOCAL_VERSION_FILE = __DIR__.'/version.json'
+// in updater.php) -- read defensively since it won't exist in a fresh checkout that's
+// never been through an Update Now.
+$__assetVer = 'dev';
+$__versionFile = __DIR__ . '/version.json';
+if (is_file($__versionFile)) {
+    $__versionData = json_decode((string) file_get_contents($__versionFile), true);
+    if (is_array($__versionData) && !empty($__versionData['current_version'])) {
+        $__assetVer = $__versionData['current_version'];
+    }
+}
 ?><!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14,8 +31,8 @@ $u = currentUser();
 <link rel="apple-touch-icon" sizes="180x180" href="favicon-180.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css">
-<link rel="stylesheet" href="css/brand.css">
+<link rel="stylesheet" href="css/style.css?v=<?= urlencode($__assetVer) ?>">
+<link rel="stylesheet" href="css/brand.css?v=<?= urlencode($__assetVer) ?>">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -146,22 +163,12 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 </script>
 
 <!-- ══ JS MODULES ══ -->
-<script src="js/app.js"></script>
-<script src="js/dashboard.js"></script>
-<script src="js/trades.js"></script>
-<script src="js/report-card.js"></script>
-<script src="js/stats.js"></script>
-<script src="js/chart.js"></script>
-<script src="js/backtest.js"></script>
-<script src="js/saved-backtests.js"></script>
-<script src="js/calculator.js"></script>
-<script src="js/strategy.js"></script>
-<script src="js/strategies.js"></script>
-<script src="js/leaderboard.js"></script>
-<script src="js/review.js"></script>
-<script src="js/profile.js"></script>
-<script src="js/challenges.js"></script>
-<script src="js/import.js"></script>
-<script src="js/bfimport.js"></script>
+<?php foreach ([
+    'app', 'dashboard', 'trades', 'report-card', 'stats', 'chart', 'backtest',
+    'saved-backtests', 'calculator', 'strategy', 'strategies', 'leaderboard',
+    'review', 'profile', 'challenges', 'import', 'bfimport',
+] as $__jsModule): ?>
+<script src="js/<?= $__jsModule ?>.js?v=<?= urlencode($__assetVer) ?>"></script>
+<?php endforeach; ?>
 </body>
 </html>

@@ -35,6 +35,13 @@ class BacktestController {
     // box regardless of how far behind "now" a session's replay cursor has fallen.
     // The client re-calls if the response says there's still more to catch up on.
     const MAX_JUMP_BARS = 2000;
+    // v3.20.9 — how many bars of real history the setup form defaults Start Date to
+    // being *behind*, so a session created without touching the field still opens with
+    // genuine lead-in chart context (js/backtest.js's BT_LEAD_IN_BARS uses the same
+    // number for how much history it *requests* on chart load; keep both in sync if this
+    // ever changes — see getSymbolRange()'s own docblock for why the default can't just
+    // be the absolute earliest candle).
+    const DEFAULT_LEAD_IN_BARS = 300;
 
     public function __construct() {
         $this->db = getDB();
@@ -73,6 +80,22 @@ class BacktestController {
      * earliest date or a max bound. candle_sync (via backtestGetSyncState(), the same
      * function createSession() itself validates against) is the one place both numbers
      * actually live, per (symbol, timeframe).
+     *
+     * v3.20.9 — also returns default_start_time: DEFAULT_LEAD_IN_BARS candles after
+     * earliest_open_time, not earliest_open_time itself. v3.20.6 defaulted the form to
+     * the absolute earliest candle, and v3.20.8 added a 300-bar lead-in fetch on session
+     * open — but the earliest candle that exists has, by definition, zero candles before
+     * it, so a session anchored there can never have any lead-in no matter how correctly
+     * the fetch logic runs (confirmed against the live deployed js/backtest.js directly,
+     * not assumed — the v3.20.8 code was already there and already correct). The fix is
+     * to stop defaulting to the pathological zero-lead-in point: default_start_time is
+     * the real Nth candle counted from the earliest (LIMIT/OFFSET, immune to any gaps in
+     * the series, not earliest_open_time + N*stepMs), or earliest_open_time itself if
+     * fewer than DEFAULT_LEAD_IN_BARS candles exist at all for this pair. Leaving the
+     * field blank still means the literal absolute earliest candle (createSession()'s own
+     * documented v3.20.6 behavior, unchanged) — this only changes what the field is
+     * *prefilled* with by default, a deliberate, narrower choice than also redefining
+     * what a blank field means.
      */
     public function getSymbolRange() {
         $symbol = strtoupper(trim($_GET['symbol'] ?? ''));
@@ -84,9 +107,24 @@ class BacktestController {
         if (!$sc->fetch()) jsonError('Unknown or disabled symbol.');
 
         $sync = backtestGetSyncState($this->db, $symbol, $timeframe);
+        $earliest = $sync['earliest_open_time'] !== null ? (int) $sync['earliest_open_time'] : null;
+        $defaultStart = $earliest;
+        if ($earliest !== null) {
+            $nth = $this->db->prepare("SELECT open_time FROM candles WHERE symbol=? AND timeframe=? ORDER BY open_time ASC LIMIT 1 OFFSET ?");
+            $nth->bindValue(1, $symbol);
+            $nth->bindValue(2, $timeframe);
+            $nth->bindValue(3, self::DEFAULT_LEAD_IN_BARS, PDO::PARAM_INT);
+            $nth->execute();
+            $nthOpenTime = $nth->fetchColumn();
+            // fetchColumn() returns false, not null, when OFFSET exhausts the result set
+            // (fewer than DEFAULT_LEAD_IN_BARS candles exist at all) -- $defaultStart
+            // correctly stays at $earliest in that case, per the docblock above.
+            if ($nthOpenTime !== false) $defaultStart = (int) $nthOpenTime;
+        }
         jsonResponse([
-            'earliest_open_time' => $sync['earliest_open_time'] !== null ? (int) $sync['earliest_open_time'] : null,
+            'earliest_open_time' => $earliest,
             'latest_open_time' => $sync['latest_open_time'] !== null ? (int) $sync['latest_open_time'] : null,
+            'default_start_time' => $defaultStart,
         ]);
     }
 
@@ -127,8 +165,29 @@ class BacktestController {
             $startMs = (int) $sync['earliest_open_time'];
         } else {
             $startMs = strtotime($startDateRaw . ' 00:00:00 UTC') * 1000;
-            if (!$startMs || $startMs < (int) $sync['earliest_open_time'] || $startMs > (int) $sync['latest_open_time']) {
-                jsonError('Start date must fall within this symbol/timeframe\'s available history (' . gmdate('Y-m-d', (int) ($sync['earliest_open_time'] / 1000)) . ' to ' . gmdate('Y-m-d', (int) ($sync['latest_open_time'] / 1000)) . ').');
+            if (!$startMs) jsonError('Invalid start date.');
+            // v3.20.9 fix: this was comparing a UTC-midnight timestamp against
+            // earliest_open_time/latest_open_time's own exact millisecond values, but a
+            // real exchange candle's open_time is essentially never exactly midnight UTC
+            // -- it opens whenever the underlying market/backfill actually starts, which
+            // for BTCUSDT 1H is some specific hour on 2020-03-25, not 00:00:00 that day.
+            // The setup form's own helper text and Start Date prefill are both calendar-
+            // day truncations of that same timestamp (new Date(ms).toISOString().slice(0,
+            // 10)) -- so the exact date the UI told the user to use (the earliest day
+            // shown) was numerically *before* earliest_open_time and got rejected by its
+            // own displayed lower bound. Confirmed by reading what the frontend actually
+            // sends (a native <input type="date">'s .value is always plain YYYY-MM-DD,
+            // never locale- or timezone-shaped -- that part of the original bug report
+            // doesn't hold up) against what candle_sync actually stores, not assumed.
+            // Comparing calendar days instead of raw milliseconds matches the granularity
+            // a date picker can even express, and the snap-to-nearest-real-candle query
+            // right below this block already resolves the sub-day gap correctly once a
+            // valid calendar day is let through -- both bounds are inclusive, unchanged.
+            $requestedDay = gmdate('Y-m-d', (int) ($startMs / 1000));
+            $earliestDay = gmdate('Y-m-d', (int) ($sync['earliest_open_time'] / 1000));
+            $latestDay = gmdate('Y-m-d', (int) ($sync['latest_open_time'] / 1000));
+            if ($requestedDay < $earliestDay || $requestedDay > $latestDay) {
+                jsonError("Start date must fall within this symbol/timeframe's available history ($earliestDay to $latestDay).");
             }
         }
         // Snap to the nearest real candle at/after the requested date — the user picks

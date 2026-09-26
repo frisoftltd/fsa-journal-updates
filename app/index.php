@@ -165,8 +165,8 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 <!-- ══ JS MODULES ══ -->
 <?php foreach ([
     'app', 'dashboard', 'trades', 'report-card', 'stats', 'chart', 'backtest',
-    'saved-backtests', 'calculator', 'strategy', 'strategies', 'leaderboard',
-    'review', 'profile', 'challenges', 'import', 'bfimport',
+    'backtest-drawings', 'saved-backtests', 'calculator', 'strategy', 'strategies',
+    'leaderboard', 'review', 'profile', 'challenges', 'import', 'bfimport',
 ] as $__jsModule): ?>
 <script src="js/<?= $__jsModule ?>.js?v=<?= urlencode($__assetVer) ?>"></script>
 <?php endforeach; ?>

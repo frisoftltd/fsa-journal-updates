@@ -123,7 +123,18 @@ function showBacktestScreen(screen) {
     // to load, or been abandoned deliberately).
     if (screen === 'form' && typeof _setUrlHash === 'function') _setUrlHash('backtest', null);
 
-    if (screen === 'form') { stopBtAutoplay(); btActiveSessionId = null; populateBtSetupForm(); }
+    if (screen === 'form') {
+        stopBtAutoplay(); btActiveSessionId = null; populateBtSetupForm();
+        // v3.21.0 — leaving a session's replay window: drop its drawing-tool state so
+        // the next session opened doesn't inherit a still-selected tool or selection.
+        // The drawings array itself is fully replaced by loadBtDrawings() on the next
+        // open anyway, but the active tool/selection are separate, longer-lived state.
+        if (typeof btActiveTool !== 'undefined') {
+            btActiveTool = null; btDrawInProgress = null; btSelectedDrawingId = null; btDragState = null;
+            if (typeof setBtActiveToolButton === 'function') setBtActiveToolButton();
+            if (typeof btHideDrawSettingsPopover === 'function') btHideDrawSettingsPopover();
+        }
+    }
     if (screen === 'window' && typeof resizeTvChart === 'function') {
         // The chart container only has its real, final size once this screen is
         // actually visible (display:flex was just applied above) -- resize now rather
@@ -275,12 +286,16 @@ async function openBacktestSession(id) {
 
     if (typeof initTvChart === 'function') initTvChart();
     btInstallPriceRangeStabilizer();
+    if (typeof btInitDrawOverlay === 'function') btInitDrawOverlay();
     window.btFetchCandlesOverride = (symbol, timeframe, before, limit) => btFetchCandles(before, limit);
 
     const ok = await refreshBtSession();
     if (!ok) return;
     await btLoadCandleWindow();
     if (typeof resizeTvChart === 'function') resizeTvChart();
+    // v3.21.0 — drawings are scoped per session; load them once the session itself is
+    // confirmed to exist (refreshBtSession() already returned true above).
+    if (typeof loadBtDrawings === 'function') await loadBtDrawings();
 }
 
 // v3.20.8 — a replay session opening with zero lead-in showed one candle stretched to
@@ -336,6 +351,11 @@ async function btLoadCandleWindow() {
     chartState.blindMode = !!(btSession && btSession.blind_mode);
     if (typeof renderChartData === 'function') renderChartData();
     btSetVisibleRange();
+    // v3.21.0 — drawings are anchored to real time+price, not pixels or a bar's logical
+    // index into this array, so a full replace of chartState.candles (which is exactly
+    // what just happened) doesn't itself invalidate anything -- this just repaints them
+    // at their current, correctly-recomputed screen positions against the new window.
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
 }
 
 /**

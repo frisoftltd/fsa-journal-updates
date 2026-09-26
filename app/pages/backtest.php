@@ -130,6 +130,24 @@
     </div>
 
     <div class="bt-window-body">
+      <!-- v3.21.0 — drawing tools. #bt-draw-overlay itself (the transparent canvas all
+           drawings render/interact on) is created by js/backtest-drawings.js::
+           btInitDrawOverlay() and appended into .tv-chart-wrap at runtime, not in this
+           markup -- it needs a real <canvas> sized from #tv-chart's own live dimensions,
+           which don't exist yet at page-load time. -->
+      <div class="bt-draw-toolbar" id="bt-draw-toolbar" title="Drawing tools">
+        <button class="bt-tool-btn" data-tool="" onclick="btSelectTool(null)" title="Cursor">↖</button>
+        <div class="bt-draw-toolbar-sep"></div>
+        <button class="bt-tool-btn" data-tool="position_long" onclick="btSelectTool('position_long')" title="Long Position">📈</button>
+        <button class="bt-tool-btn" data-tool="position_short" onclick="btSelectTool('position_short')" title="Short Position">📉</button>
+        <button class="bt-tool-btn" data-tool="fib_retracement" onclick="btSelectTool('fib_retracement')" title="Fibonacci Retracement">Fib</button>
+        <button class="bt-tool-btn" data-tool="trend_line" onclick="btSelectTool('trend_line')" title="Trend Line">╱</button>
+        <button class="bt-tool-btn" data-tool="horizontal_line" onclick="btSelectTool('horizontal_line')" title="Horizontal Line">—</button>
+        <button class="bt-tool-btn" data-tool="horizontal_ray" onclick="btSelectTool('horizontal_ray')" title="Horizontal Ray">⟶</button>
+        <div class="bt-draw-toolbar-sep"></div>
+        <button class="bt-util-btn active" id="bt-magnet-btn" onclick="btToggleMagnet()" title="Magnet — snap to candle open/high/low/close">🧲</button>
+        <button class="bt-util-btn" onclick="btDeleteSelected()" title="Delete selected (Del)">🗑</button>
+      </div>
       <div class="tv-chart-wrap">
         <div class="tv-legend" id="tv-legend"></div>
         <div id="tv-chart"></div>

@@ -105,6 +105,11 @@ $routes = [
     'backtest_cancel_order'  => ['BacktestController', 'cancelOrder'],
     'backtest_close_position'=> ['BacktestController', 'closePosition'],
     'delete_backtest_session'=> ['BacktestController', 'deleteSession'],
+    // Backtesting drawing tools (v3.21.0) — pure CRUD, never read by the replay engine
+    'get_backtest_drawings'   => ['BacktestDrawingController', 'getAll'],
+    'add_backtest_drawing'    => ['BacktestDrawingController', 'add'],
+    'update_backtest_drawing' => ['BacktestDrawingController', 'update'],
+    'delete_backtest_drawing' => ['BacktestDrawingController', 'delete'],
 ];
 
 if (!isset($routes[$action])) {

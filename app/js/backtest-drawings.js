@@ -316,14 +316,34 @@ async function btSaveNewDrawing(tool, points, settings) {
     btDrawings.push(drawing);
     return drawing;
 }
+// v3.21.6 — the settings panel fires a save on every individual field change (colour
+// pickers and the opacity slider fire on 'input' too, for live preview -- see
+// btWireDrawSettingsPopover), so a few seconds of adjusting several fib settings can
+// issue a dozen-plus overlapping requests for the same drawing. Investigated this ticket's
+// "settings don't persist" report end to end first (full round trip verified against a
+// simulated backend: payload includes settings, the server write is unconditional and
+// correctly scoped, a fresh reload restores both settings and geometry, and even 40+
+// rapid overlapping saves under artificial network jitter didn't reproduce loss in this
+// environment) -- couldn't force a failure, but concurrent requests with no ordering
+// guarantee is a genuine, textbook risk regardless: if an EARLIER request's response
+// happens to reach the server after a LATER one on a real network, its older payload
+// wins the final write, silently reverting whatever the later request had just saved.
+// Serializing per-drawing closes that risk outright rather than leaving it to chance.
+const btDrawingSaveQueue = {}; // id -> Promise chain, one link per queued save
 async function btUpdateDrawing(id, patch) {
-    const body = { id };
-    if (patch.points) body.points = patch.points;
-    if (patch.settings) body.settings = patch.settings;
-    const res = await btApi('update_backtest_drawing', 'POST', body);
-    if (res && res.error) { toast('Could not save changes — ' + res.error, 'error'); return; }
     const d = btDrawings.find(x => x.id === id);
     if (d) { if (patch.points) d.points = patch.points; if (patch.settings) Object.assign(d.settings, patch.settings); }
+    const prior = btDrawingSaveQueue[id] || Promise.resolve();
+    const thisSave = prior.then(async () => {
+        if (!d) return;
+        // Re-read d.points/d.settings now, not at queue time -- by the time this save's
+        // turn comes, it always transmits whatever is truly current, so a burst of rapid
+        // edits collapses into however many requests actually fire, each one correct.
+        const res = await btApi('update_backtest_drawing', 'POST', { id, points: d.points, settings: d.settings });
+        if (res && res.error) toast('Could not save changes — ' + res.error, 'error');
+    });
+    btDrawingSaveQueue[id] = thisSave;
+    await thisSave;
 }
 async function btDeleteDrawing(id) {
     const res = await btApi('delete_backtest_drawing', 'POST', { id });
@@ -896,19 +916,26 @@ function btDrawFib(ctx, d, selected) {
         if (label !== null) {
             ctx.fillStyle = level.color;
             ctx.font = `${s.font_size || 10}px monospace`;
-            const margin = 4;
             const vOffset = s.label_v === 'top' ? -6 : s.label_v === 'bottom' ? 12 : 3;
+            // v3.21.6 — labels were anchored right at the line's own end and aligned so
+            // the text grew back OVER the line (e.g. label_h='right' used textAlign='right'
+            // with x near lineRight, putting the text's own body across the last stretch
+            // of the line itself -- exactly "0.618 6799.39 sitting on the line" from the
+            // ticket). Flipped: the label now starts just PAST the line's end, on the
+            // chosen side, and grows AWAY from the line -- textAlign is the opposite of
+            // what it was, since growing away from a right-side anchor means left-aligned
+            // text, and growing away from a left-side anchor means right-aligned text.
+            const gap = 6, edgeMargin = 4;
+            const textWidth = ctx.measureText(label).width;
+            let x;
             if (s.label_h === 'left') {
-                ctx.textAlign = 'left';
-                ctx.fillText(label, Math.max(lineLeft + margin, 2), y + vOffset);
-            } else {
-                // Anchored at the line's own right end (its actual anchor, or the canvas
-                // edge only when extend is on) -- but never past the price scale panel,
-                // and never left of the line's own start either.
                 ctx.textAlign = 'right';
-                const x = Math.min(lineRight - margin, plotRight - margin);
-                ctx.fillText(label, Math.max(x, lineLeft + margin), y + vOffset);
+                x = Math.max(lineLeft - gap, edgeMargin + textWidth);
+            } else {
+                ctx.textAlign = 'left';
+                x = Math.min(lineRight + gap, plotRight - edgeMargin - textWidth);
             }
+            ctx.fillText(label, x, y + vOffset);
         }
     });
     if (selected) { btDrawHandle(ctx, p1.x, p1.y, s.trend_color || '#787b86'); btDrawHandle(ctx, p2.x, p2.y, s.trend_color || '#787b86'); }

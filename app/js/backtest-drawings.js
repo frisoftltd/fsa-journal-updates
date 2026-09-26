@@ -840,8 +840,17 @@ function btDrawFib(ctx, d, selected) {
         ctx.setLineDash([]);
     }
 
+    // v3.21.5 — 0% conventionally anchors to the SECOND point placed (where the drag
+    // ended -- the most recent price extreme, which a retracement measures FROM) and
+    // 100% to the FIRST (the origin of the move); Reverse flips this to the opposite
+    // pairing. Previously 0% anchored to the FIRST point unconditionally when
+    // reverse=false, which is why a low-to-high draw (first click low, second click high)
+    // came out "inverted from what the user expects": 0% landed at the low and 100% at
+    // the high, the opposite of the standard reading ("price retraced X% down from the
+    // recent high"). reverse itself already defaulted to false in the stored settings --
+    // the bug was in this formula's own direction, not the checkbox's default value.
     const levelY = level => {
-        const ratio = s.reverse ? (1 - level.ratio) : level.ratio;
+        const ratio = s.reverse ? level.ratio : (1 - level.ratio);
         const price = price1 + (price2 - price1) * ratio;
         return { price, y: btPriceToY(price) };
     };
@@ -861,15 +870,30 @@ function btDrawFib(ctx, d, selected) {
         const { price, y } = levelY(level);
         if (y === null) return;
 
-        if (s.show_levels !== false) {
-            ctx.strokeStyle = level.color; ctx.lineWidth = s.width || 1; ctx.setLineDash(btLineDash(s.style));
-            ctx.beginPath(); ctx.moveTo(lineLeft, y); ctx.lineTo(lineRight, y); ctx.stroke();
-            ctx.setLineDash([]);
-        }
+        // v3.21.5 — the level LINE always renders when a level is enabled; Prices/Levels
+        // below only ever affect the TEXT label. Previously show_levels also hid the line
+        // itself, conflating two different things the ticket explicitly separated:
+        // "Levels controls whether the ratio shows, Prices controls whether the price
+        // shows, and the two are independent" -- a label toggle, not a line toggle.
+        ctx.strokeStyle = level.color; ctx.lineWidth = s.width || 1; ctx.setLineDash(btLineDash(s.style));
+        ctx.beginPath(); ctx.moveTo(lineLeft, y); ctx.lineTo(lineRight, y); ctx.stroke();
+        ctx.setLineDash([]);
 
-        if (s.show_prices !== false) {
-            const ratioText = s.levels_format === 'percent' ? `${(level.ratio * 100).toFixed(1)}%` : `${level.ratio}`;
-            const label = s.show_levels !== false ? `${ratioText} — ${fmtPrice5(price)}` : fmtPrice5(price);
+        // Independent truth table, per the ticket: both on -> one combined label with
+        // clear spacing (a single fillText call, never two overlapping ones); only Levels
+        // -> ratio alone; only Prices -> price alone (previously this branch rendered
+        // NOTHING at all, since the whole label was gated on show_prices even when Levels
+        // was the one actually on -- "Prices off, Levels on: the label disappears
+        // entirely" from the ticket); both off -> no label.
+        const ratioText = s.levels_format === 'percent' ? `${(level.ratio * 100).toFixed(1)}%` : `${level.ratio}`;
+        const priceText = fmtPrice5(price);
+        const showRatio = s.show_levels !== false, showPrice = s.show_prices !== false;
+        let label = null;
+        if (showRatio && showPrice) label = `${ratioText} — ${priceText}`;
+        else if (showRatio) label = ratioText;
+        else if (showPrice) label = priceText;
+
+        if (label !== null) {
             ctx.fillStyle = level.color;
             ctx.font = `${s.font_size || 10}px monospace`;
             const margin = 4;

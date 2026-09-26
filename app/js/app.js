@@ -47,7 +47,12 @@ function chartOpts(extra={}){
 }
 
 // ── NAV ──────────────────────────────────────────────────
-function showPage(id) {
+// v3.20.11 — `param` carries a sub-identifier for a page that needs one to fully
+// restore, currently only Backtesting's own open session id (#backtest:42). Every other
+// page ignores it. Called both from onclick handlers (no param) and from URL-hash
+// restoration (see _restoreFromHash() below), which is what makes a refresh or a copied
+// link land back on the exact same session, not just the same page.
+function showPage(id, param) {
     if(id==='settings') id='profile';
     document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
     document.querySelectorAll('.nav a').forEach(a=>a.classList.remove('active'));
@@ -65,11 +70,12 @@ function showPage(id) {
     // window) is dark/full-bleed, so js/backtest.js::showBacktestScreen() toggles this
     // class itself, exactly when entering/leaving that one screen — not here.
     if(id!=='backtest') document.body.classList.remove('backtest-active');
+    _setUrlHash(id, param);
     if(id==='dashboard') loadDashboard();
     if(id==='trades') { loadPairs(); loadTrades(); }
     if(id==='reportcard') loadReportCard();
     if(id==='stats') loadStats();
-    if(id==='backtest') loadBacktest();
+    if(id==='backtest') loadBacktest(param);
     if(id==='saved-backtests') loadSavedBacktests();
     if(id==='review') loadReviewEngine();
     if(id==='strategy') loadStrategyTrades();
@@ -80,6 +86,45 @@ function showPage(id) {
     if(id==='challenges') loadChallenges();
     if(id==='bfimport') loadBfImport();
 }
+
+// ── URL-BASED PAGE PERSISTENCE (v3.20.11) ─────────────────
+// Minimal hash router, no server-side routing changes: #<page> or #<page>:<param>. Every
+// showPage() call writes the hash; a refresh, a copied link, or the browser's own back/
+// forward button all restore the same place via _restoreFromHash(). App-wide, not just
+// Backtesting -- the param slot exists only because Backtesting's replay window needs
+// one; every other page just uses the bare #<page> form.
+function _setUrlHash(page, param) {
+    const target = '#' + page + (param ? ':' + param : '');
+    if (location.hash === target) return; // avoid pushing a no-op history entry
+    location.hash = target;
+}
+function _parseUrlHash() {
+    const raw = location.hash.replace(/^#/, '');
+    if (!raw) return null;
+    const i = raw.indexOf(':');
+    return i === -1 ? { page: raw, param: null } : { page: raw.slice(0, i), param: raw.slice(i + 1) };
+}
+function _restoreFromHash() {
+    const parsed = _parseUrlHash();
+    const page = (parsed && document.getElementById('page-' + parsed.page)) ? parsed.page : 'dashboard';
+    showPage(page, parsed ? parsed.param : null);
+}
+// Fires on the browser's back/forward buttons -- and also on location.hash assignments
+// we make ourselves inside showPage(), which is why this checks whether anything is
+// actually different before re-running a whole page load: without that check, every
+// single in-app navigation would trigger a second, redundant showPage() call a moment
+// later (setting the hash always fires 'hashchange', regardless of who set it).
+window.addEventListener('hashchange', () => {
+    const parsed = _parseUrlHash();
+    const targetPage = (parsed && document.getElementById('page-' + parsed.page)) ? parsed.page : 'dashboard';
+    const targetParam = parsed ? parsed.param : null;
+    const activeLink = document.querySelector('.nav a.active');
+    const currentPage = activeLink ? activeLink.dataset.page : null;
+    const alreadyThere = targetPage === currentPage &&
+        (targetPage !== 'backtest' || String(typeof btActiveSessionId !== 'undefined' ? (btActiveSessionId || '') : '') === String(targetParam || ''));
+    if (alreadyThere) return;
+    showPage(targetPage, targetParam);
+});
 
 // ── SIDEBAR COLLAPSE (v3.19.2) ───────────────────────────
 // WordPress-admin-style icon rail; css/style.css's body.sidebar-collapsed rules do all
@@ -111,7 +156,10 @@ document.addEventListener('DOMContentLoaded',async()=>{
     const collapseBtn = document.getElementById('sidebar-collapse-btn');
     if(collapseBtn && document.body.classList.contains('sidebar-collapsed')) collapseBtn.title = 'Expand sidebar';
 
-    showPage('dashboard');
+    // v3.20.11 — restore whatever page (and, for Backtesting, session) the URL hash
+    // says, instead of always landing on the dashboard. A fresh visit with no hash at
+    // all falls through to 'dashboard' inside _restoreFromHash() itself.
+    _restoreFromHash();
     // v3.17.1 — the topbar "+ Trade" button (#topbar-trade-btn) is present on every page,
     // not just Trades, so its STOP gate needs an initial check here rather than only ever
     // running from loadTrades(). refreshNewTradeGate() lives in js/trades.js.

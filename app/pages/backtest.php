@@ -113,12 +113,17 @@
       </div>
       <div class="tf-group">
         <button class="btn btn-ghost btn-sm" onclick="btRewind()" title="Prev bar">◂ Prev Bar</button>
-        <button class="btn btn-ghost btn-sm" onclick="btAdvance(false)" title="Next bar">Next Bar ▸</button>
-        <button class="btn btn-ghost btn-sm" onclick="btAdvance(true)" title="Jump to the latest available bar">Jump to Latest ▸▸</button>
+        <button class="btn btn-ghost btn-sm" onclick="btAdvance()" title="Next bar">Next Bar ▸</button>
+        <!-- v3.20.11: "Jump to Latest" removed -- a replay whose cursor is already the
+             latest visible point has nothing to jump to. -->
         <select id="bt-replay-speed" style="width:auto;min-width:70px" title="Auto-play speed">
           <option value="1" selected>1x</option><option value="2">2x</option><option value="5">5x</option><option value="10">10x</option>
         </select>
         <button class="btn btn-ghost btn-sm" id="bt-play-btn" onclick="toggleBtAutoplay()">▶ Play</button>
+        <!-- v3.20.11: the step size adapts to whichever timeframe is finer (viewed vs.
+             session replay) -- always shown so a click's actual effect is never a
+             surprise. Kept updated by setBtStepLabel() in js/backtest.js. -->
+        <span id="bt-step-label" style="color:#6b7280;font-size:11px;align-self:center" title="What one click of Next Bar/Prev Bar actually advances by"></span>
       </div>
       <div id="bt-replay-status" style="color:#8b93a7;font-size:11px"></div>
       <div id="bt-replay-note" style="margin-left:auto;font-size:11px;color:#6b7280">Bybit data — indicative vs. live BitFunded fills</div>

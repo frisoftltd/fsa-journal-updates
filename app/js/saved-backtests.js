@@ -88,12 +88,13 @@ function sbCardHtml(s) {
     </div>`;
 }
 
-/** Navigates to the Backtesting page and immediately opens this session in Screen B —
- *  openBacktestSession() (js/backtest.js) manipulates #bt-screen-window's own DOM, which
- *  only exists on the Backtesting page, so that page has to actually be active first. */
+/** Navigates to the Backtesting page and opens this session in Screen B, in one call —
+ *  v3.20.11: showPage('backtest', id) forwards id to loadBacktest(id), which opens that
+ *  session directly instead of showing the form, and also persists it to the URL hash
+ *  (#backtest:<id>) so a refresh lands back here. Previously this called showPage('backtest')
+ *  and openBacktestSession(id) as two separate steps. */
 function openBacktestFromList(id) {
-    showPage('backtest');
-    openBacktestSession(id);
+    showPage('backtest', id);
 }
 
 async function deleteBacktestSession(id, btn) {

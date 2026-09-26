@@ -92,12 +92,18 @@ async function btApi(action, method, data) {
  *  Backtests (only entering Screen A or a failed session load ever did). That's exactly
  *  what let a deleted session's replay window keep reopening from the sidebar link, from
  *  "+ New Backtest," and from "Create your first backtest" -- all three just call
- *  showPage('backtest'), which calls this. Per this release's own requirement, the
- *  sidebar's Backtesting link always opens the New Backtest form; resuming a session is
- *  a deliberate action taken only from Saved Backtests (openBacktestFromList()), never
- *  implicit here. showBacktestScreen('form') itself resets btActiveSessionId to null as
- *  a side effect, so this can never leave a stale reference behind either. */
-async function loadBacktest() {
+ *  showPage('backtest') with NO session id, which calls this. Per that release's own
+ *  requirement, the sidebar's Backtesting link always opens the New Backtest form.
+ *
+ *  v3.20.11: `sessionId`, when given, opens straight to that session instead -- this is
+ *  what restoring a #backtest:<id> URL hash on page load/refresh uses (see
+ *  js/app.js::_restoreFromHash()), and what openBacktestFromList() (Saved Backtests)
+ *  now uses too, via showPage('backtest', id) instead of its own separate two-call
+ *  sequence. Both are still deliberate, explicit resumes (a real URL the user landed on,
+ *  or a real click on a specific saved session) -- the sidebar link itself never passes
+ *  an id, so clicking it plainly still always shows the form, unchanged from v3.20.5. */
+async function loadBacktest(sessionId) {
+    if (sessionId) { openBacktestSession(parseInt(sessionId, 10)); return; }
     showBacktestScreen('form');
 }
 
@@ -110,6 +116,12 @@ function showBacktestScreen(screen) {
     // "BACKTESTING" block) -- scoped to exactly this screen, not the whole module, so
     // Screen A stays a normal light-themed page like everywhere else in the app.
     document.body.classList.toggle('backtest-active', screen === 'window');
+
+    // v3.20.11 — drop the session id from the URL hash the moment there's no longer a
+    // specific session open, so a refresh at this point lands back on the plain form
+    // instead of trying to reopen whatever was last viewed (which may have just failed
+    // to load, or been abandoned deliberately).
+    if (screen === 'form' && typeof _setUrlHash === 'function') _setUrlHash('backtest', null);
 
     if (screen === 'form') { stopBtAutoplay(); btActiveSessionId = null; populateBtSetupForm(); }
     if (screen === 'window' && typeof resizeTvChart === 'function') {
@@ -249,6 +261,10 @@ async function createBacktestSession() {
 // ── REPLAY (Screen B) ────────────────────────────────────
 async function openBacktestSession(id) {
     btActiveSessionId = id;
+    // v3.20.11 — set optimistically; if the session turns out not to load,
+    // refreshBtSession()'s failure path calls showBacktestScreen('form'), which itself
+    // resets the hash back to the plain '#backtest' -- so this self-corrects either way.
+    if (typeof _setUrlHash === 'function') _setUrlHash('backtest', id);
     // Reset for this session -- refreshBtSession() sets it to the session's own
     // replay_timeframe once it knows what that is. Also drops any stable price range
     // left over from whatever was viewed before, so a freshly opened/resumed session
@@ -394,12 +410,29 @@ async function setBtDisplayTimeframe(tf) {
     if (!btSession || tf === btDisplayTimeframe) return;
     btDisplayTimeframe = tf;
     setActiveBtDisplayTfButton();
+    setBtStepLabel();
     btResetPriceRangeStabilizer();
     await btLoadCandleWindow();
     if (typeof resizeTvChart === 'function') resizeTvChart();
 }
 function setActiveBtDisplayTfButton() {
     document.querySelectorAll('.bt-display-tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === btDisplayTimeframe));
+}
+/**
+ * v3.20.11 — client-side mirror of BacktestController::resolveStepTimeframe(): the step
+ * size is the FINER of (viewed timeframe, session's own replay timeframe). Purely for
+ * the visible "Step: X" label ("the user always knows what one click does") -- the
+ * server always computes its own copy independently from the same two inputs sent on
+ * every advance/rewind call and is the only one that actually enforces it.
+ * backtestStepMsFor() is chart.js's own existing helper, loaded before this file.
+ */
+function setBtStepLabel() {
+    const el = document.getElementById('bt-step-label');
+    if (!el || !btSession) return;
+    const replayTf = btSession.replay_timeframe;
+    const viewTf = btDisplayTimeframe || replayTf;
+    const stepTf = backtestStepMsFor(viewTf) < backtestStepMsFor(replayTf) ? viewTf : replayTf;
+    el.textContent = `Step: ${stepTf}`;
 }
 
 /** Returns true on success, false on failure (already shown to the user and bounced
@@ -440,6 +473,7 @@ function renderBtHeader(s) {
     document.getElementById('bt-replay-symbol').textContent = s.blind_mode ? '🙈 Blind Mode' : `${s.symbol} · ${s.replay_timeframe}`;
     document.getElementById('bt-replay-clock-tf').textContent = s.replay_timeframe;
     document.getElementById('bt-cursor-time').textContent = fmtCursorTime(s.replay_cursor_ms);
+    setBtStepLabel();
     // "The session records a rewind count, so repeatedly rewinding losing trades is
     // visible rather than hidden" -- shown only once it's actually non-zero, so a
     // never-rewound session doesn't carry a distracting "Rewinds: 0" row all the time.
@@ -513,9 +547,16 @@ function renderPendingOrders(orders) {
 function fmtPrice5(v) { const n = parseFloat(v); return isNaN(n) ? '—' : n.toFixed(Math.abs(n) >= 100 ? 2 : (Math.abs(n) >= 1 ? 4 : 6)); }
 
 // ── ADVANCE ──────────────────────────────────────────────
-async function btAdvance(jumpToLatest) {
+/**
+ * v3.20.11 — "Jump to Latest" is gone; this is Next Bar only now, always exactly one
+ * adaptive step. Sends display_timeframe on every call so the server's own
+ * resolveStepTimeframe() (BacktestController.php) agrees with whatever
+ * setBtStepLabel()/the client independently computed for display — same formula, same
+ * inputs, on both sides.
+ */
+async function btAdvance() {
     if (!btActiveSessionId || !btSession || btSession.status !== 'active') return;
-    const res = await btApi('backtest_advance', 'POST', { session_id: btActiveSessionId, jump_to_latest: !!jumpToLatest });
+    const res = await btApi('backtest_advance', 'POST', { session_id: btActiveSessionId, display_timeframe: btDisplayTimeframe });
     if (!res || res.error) { toast('Advance failed — ' + (res ? res.error : 'unknown error'), 'error'); stopBtAutoplay(); return; }
 
     (res.events || []).forEach(ev => {
@@ -531,13 +572,6 @@ async function btAdvance(jumpToLatest) {
     if (btSession.status !== 'active') { stopBtAutoplay(); document.getElementById('bt-replay-status').textContent = `Session ${btSession.status}`; }
 
     await btLoadCandleWindow();
-
-    if (jumpToLatest && res.more_available) {
-        // Safety-capped batch (BacktestController::MAX_JUMP_BARS) -- more history to
-        // catch up on than one request processes; continue automatically rather than
-        // requiring the user to click again for what looks like one action to them.
-        setTimeout(() => btAdvance(true), 50);
-    }
 }
 
 /**
@@ -548,16 +582,18 @@ async function btAdvance(jumpToLatest) {
  * never prompts. btLoadCandleWindow() re-fetches the window from scratch afterward, which
  * naturally trims any candle after the new (earlier) cursor with no extra client-side
  * logic needed -- the same no-lookahead clamp every other load already goes through.
+ * v3.20.11: also sends display_timeframe, so a rewind steps back by the same adaptive
+ * amount Next Bar would have stepped forward by.
  */
 async function btRewind() {
     if (!btActiveSessionId || !btSession || btSession.status !== 'active') return;
-    let res = await btApi('backtest_rewind', 'POST', { session_id: btActiveSessionId });
+    let res = await btApi('backtest_rewind', 'POST', { session_id: btActiveSessionId, display_timeframe: btDisplayTimeframe });
     if (res && res.error) { toast('Rewind failed — ' + res.error, 'error'); return; }
     if (res && res.confirm_required) {
         const n = res.trades_affected;
         const proceed = confirm(`Stepping back will undo ${n} trade${n === 1 ? '' : 's'} -- ${n === 1 ? 'its outcome' : 'their outcomes'} will be removed from equity and stats (kept in the log, flagged as rewound). Continue?`);
         if (!proceed) return;
-        res = await btApi('backtest_rewind', 'POST', { session_id: btActiveSessionId, confirmed: true });
+        res = await btApi('backtest_rewind', 'POST', { session_id: btActiveSessionId, display_timeframe: btDisplayTimeframe, confirmed: true });
         if (res && res.error) { toast('Rewind failed — ' + res.error, 'error'); return; }
     }
     if (!res || !res.success) return;
@@ -584,7 +620,7 @@ function toggleBtAutoplay() {
     const intervalMs = Math.max(150, 1500 / speed);
     btAutoplayTimer = setInterval(() => {
         if (!btSession || btSession.status !== 'active') { stopBtAutoplay(); return; }
-        btAdvance(false);
+        btAdvance();
     }, intervalMs);
 }
 function stopBtAutoplay() {

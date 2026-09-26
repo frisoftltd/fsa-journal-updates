@@ -30,11 +30,6 @@ class BacktestController {
 
     // Bybit's own standard taker fee, used as this app's default fee_rate_pct.
     const DEFAULT_FEE_RATE_PCT = 0.0550;
-    // Safety cap on how many bars a single "jump to latest" request will actually
-    // simulate before returning — keeps one request bounded and fast on a 2 vCPU/4GB
-    // box regardless of how far behind "now" a session's replay cursor has fallen.
-    // The client re-calls if the response says there's still more to catch up on.
-    const MAX_JUMP_BARS = 2000;
     // v3.20.9 — how many bars of real history the setup form defaults Start Date to
     // being *behind*, so a session created without touching the field still opens with
     // genuine lead-in chart context (js/backtest.js's BT_LEAD_IN_BARS uses the same
@@ -213,13 +208,18 @@ class BacktestController {
         $maxTradesPerDay = (isset($d['max_trades_per_day']) && $d['max_trades_per_day'] !== '') ? max(1, (int) $d['max_trades_per_day']) : null;
         $blindMode = !empty($d['blind_mode']) ? 1 : 0;
 
+        // v3.20.11 — cursor_step_tf records which timeframe replay_cursor_ms's own bar
+        // came from (see the migration's own comment for why this is needed at all). The
+        // very first bar a session ever shows is always at the session's own
+        // replay_timeframe -- adaptive stepping only takes it finer than that later, via
+        // advance()/rewind() explicitly updating this column alongside the cursor.
         $this->db->prepare(
             "INSERT INTO backtest_sessions
-                (user_id, session_name, symbol, replay_timeframe, start_time, replay_cursor_ms, risk_pct, fee_rate_pct, blind_mode,
+                (user_id, session_name, symbol, replay_timeframe, start_time, replay_cursor_ms, cursor_step_tf, risk_pct, fee_rate_pct, blind_mode,
                  starting_balance, profit_target_pct, daily_drawdown_pct, max_drawdown_pct, drawdown_type, max_trades_per_day)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )->execute([
-            $this->uid, $sessionName, $symbol, $timeframe, (int) $realStart, (int) $realStart, $riskPct, $feeRatePct, $blindMode,
+            $this->uid, $sessionName, $symbol, $timeframe, (int) $realStart, (int) $realStart, $timeframe, $riskPct, $feeRatePct, $blindMode,
             $startingBalance, $profitTargetPct, $dailyDrawdownPct, $maxDrawdownPct, $drawdownType, $maxTradesPerDay,
         ]);
 
@@ -230,55 +230,59 @@ class BacktestController {
 
     /**
      * The one rule this whole method exists to enforce: never return a candle whose
-     * open_time is later than the session's own replay_cursor_ms, no matter what a
+     * open_time is later than the session's own no-lookahead ceiling, no matter what a
      * client's `before`/`limit`/`timeframe` params ask for. The browser is never trusted
      * to hide future data on its own, on any timeframe.
      *
-     * v3.20.10 — accepts an optional `timeframe` query param (the replay window's own
-     * timeframe switcher, distinct from the session's fixed `replay_timeframe`, which is
-     * always what actually drives the clock — see advance()/rewind(), neither of which
-     * ever reads this param). Two cases:
-     *   - display timeframe <= replay timeframe (same or finer): real stored candles at
-     *     that timeframe, clamped to the REPLAY timeframe's own boundary (not a
-     *     display-sized one) so viewing finer resolution can never reveal anything the
-     *     replay clock hasn't actually reached yet.
-     *   - display timeframe > replay timeframe (coarser, e.g. viewing 4H while replaying
-     *     on 1H): every fully-elapsed coarser bar before the current one is real, stored
-     *     data (safe — genuinely in the past). The CURRENT, still-in-progress coarser bar
-     *     cannot be read from the stored series at all — that row holds the real,
-     *     complete future candle for that window, not what's actually been revealed —
-     *     so it's synthesized from the real replay-timeframe candles that have actually
-     *     elapsed within it (backtestAggregateCandles()), which is exactly "a partially
-     *     formed higher-timeframe candle shows only the elapsed portion."
+     * v3.20.11 — the ceiling is now `replay_cursor_ms + stepMs(cursor_step_tf)`, not
+     * `+ stepMs(replay_timeframe)`. Adaptive stepping means the session's clock can move
+     * in a FINER unit than its own nominal replay_timeframe whenever the user is viewing
+     * a finer display timeframe (see advance()/rewind()'s resolveStepTimeframe()) —
+     * cursor_step_tf records which resolution the most recently revealed bar actually
+     * came from, and the ceiling has to be computed from THAT, not the session's fixed
+     * label, or a finer step would either over-reveal (ceiling too generous) or
+     * under-reveal (ceiling too tight) depending on which way the mismatch ran.
+     *
+     * Whether the CURRENTLY DISPLAYED timeframe's own bar (the one containing the
+     * cursor) needs synthesizing is now a direct question — does the ceiling fall
+     * strictly before that bar's own end? — rather than a proxy comparison between two
+     * timeframes' durations (v3.20.10's `displayStepMs <= replayStepMs`), because
+     * cursor_step_tf can now be finer than replay_timeframe while the display timeframe
+     * sits anywhere relative to either of them. If the bar is only partially revealed,
+     * it's synthesized from real, already-revealed 15m candles (the finest timeframe
+     * this app tracks, always safe and always available wherever coarser data is) via
+     * backtestAggregateCandles() — the stored series at the DISPLAY timeframe itself
+     * would hold the real, complete FUTURE candle for that same window.
      */
     public function getCandles() {
         $id = validId($_GET['session_id'] ?? 0);
         if (!$id) jsonError('Invalid session id.');
         $session = $this->loadSession($id);
 
-        $replayTf = $session['replay_timeframe'];
-        $replayStepMs = backtestTimeframeStepMs($replayTf);
-        // +replayStepMs: get_candles' own `before` param is exclusive, so this makes the
-        // cursor bar itself includable. This is the ONE true no-lookahead boundary,
-        // independent of whatever timeframe is being displayed.
-        $replayCeiling = (int) $session['replay_cursor_ms'] + $replayStepMs;
+        $cursorStepMs = backtestTimeframeStepMs($session['cursor_step_tf']);
+        // Exclusive `before` semantics -- +cursorStepMs makes the most recently revealed
+        // bar itself includable.
+        $ceiling = (int) $session['replay_cursor_ms'] + $cursorStepMs;
 
         $displayTf = trim($_GET['timeframe'] ?? '');
-        if ($displayTf === '') $displayTf = $replayTf;
+        if ($displayTf === '') $displayTf = $session['replay_timeframe'];
         if (!in_array($displayTf, ['15m', '1H', '4H', '1D'], true)) jsonError('Invalid display timeframe.');
         $displayStepMs = backtestTimeframeStepMs($displayTf);
 
         $limit = isset($_GET['limit']) ? max(1, min(2000, (int) $_GET['limit'])) : 500;
         $before = isset($_GET['before']) && $_GET['before'] !== '' ? (int) $_GET['before'] : null;
 
-        if ($displayStepMs <= $replayStepMs) {
-            $effectiveBefore = $before !== null ? min($before, $replayCeiling) : $replayCeiling;
+        // UTC-epoch-aligned start/end of the display-timeframe bar the cursor currently
+        // sits inside (real exchange kline data is always epoch-aligned, e.g. 4H bars
+        // open at 00:00/04:00/08:00 UTC etc. — never an arbitrary offset).
+        $alignedStart = intdiv((int) $session['replay_cursor_ms'], $displayStepMs) * $displayStepMs;
+        $barEnd = $alignedStart + $displayStepMs;
+        $needsSynthesis = $ceiling < $barEnd;
+
+        if (!$needsSynthesis) {
+            $effectiveBefore = $before !== null ? min($before, $ceiling) : $ceiling;
             $rows = $this->fetchStoredCandles($session['symbol'], $displayTf, $effectiveBefore, $limit);
         } else {
-            // UTC-epoch-aligned start of the coarser bar the cursor currently sits
-            // inside (real exchange kline data is always epoch-aligned, e.g. 4H bars
-            // open at 00:00/04:00/08:00 UTC etc. — never an arbitrary offset).
-            $alignedStart = intdiv((int) $session['replay_cursor_ms'], $displayStepMs) * $displayStepMs;
             $olderCeiling = $before !== null ? min($before, $alignedStart) : $alignedStart;
             // The synthesized in-progress bar only belongs on the page that's actually
             // at the "live edge" of the replay -- a request paginating further back into
@@ -290,11 +294,10 @@ class BacktestController {
             $rows = $this->fetchStoredCandles($session['symbol'], $displayTf, $olderCeiling, $olderLimit);
 
             if ($includePartial) {
-                $elapsed = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time >= ? AND open_time < ? ORDER BY open_time ASC");
+                $elapsed = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe='15m' AND open_time >= ? AND open_time < ? ORDER BY open_time ASC");
                 $elapsed->bindValue(1, $session['symbol']);
-                $elapsed->bindValue(2, $replayTf);
-                $elapsed->bindValue(3, $alignedStart, PDO::PARAM_INT);
-                $elapsed->bindValue(4, $replayCeiling, PDO::PARAM_INT);
+                $elapsed->bindValue(2, $alignedStart, PDO::PARAM_INT);
+                $elapsed->bindValue(3, $ceiling, PDO::PARAM_INT);
                 $elapsed->execute();
                 $partial = backtestAggregateCandles($elapsed->fetchAll());
                 if ($partial !== null) $rows[] = $partial;
@@ -326,6 +329,36 @@ class BacktestController {
 
     // ── REPLAY ADVANCE ───────────────────────────────────────
 
+    /**
+     * v3.20.11 — resolves what ONE click of Next Bar/Prev Bar/Play actually advances by:
+     * the FINER of (whatever the client says it's currently viewing, the session's own
+     * fixed replay_timeframe). Viewing 15m while replaying a nominally 1H session steps
+     * 15 minutes at a time (finer than the session's own label — the whole point of this
+     * release: "the 4H candle must be seen developing, never appearing whole" applies
+     * symmetrically to entry timing on a finer view too). Viewing 4H/1D while replaying
+     * 1H still only steps 1H at a time — going COARSER than the session's own
+     * replay_timeframe in one click was never a real feature to begin with (that's just
+     * "view a bigger picture," handled entirely by getCandles()'s own display-timeframe
+     * synthesis) and isn't how a prop-firm challenge's own timeframe is meant to be sped
+     * past. No display timeframe given at all falls back to the session's own
+     * replay_timeframe, matching pre-v3.20.11 behavior exactly.
+     */
+    private function resolveStepTimeframe(array $session, $requestedDisplayTf): string {
+        $replayTf = $session['replay_timeframe'];
+        $displayTf = trim((string) ($requestedDisplayTf ?? ''));
+        if ($displayTf === '') return $replayTf;
+        if (!in_array($displayTf, ['15m', '1H', '4H', '1D'], true)) jsonError('Invalid display timeframe.');
+        return backtestTimeframeStepMs($displayTf) < backtestTimeframeStepMs($replayTf) ? $displayTf : $replayTf;
+    }
+
+    /**
+     * v3.20.11 — "Jump to Latest" is removed (a replay whose cursor is already the
+     * latest visible point has nothing to jump to); this is Next Bar only now, always
+     * exactly one step at whatever resolveStepTimeframe() resolves to for this click.
+     * cursor_step_tf is updated alongside replay_cursor_ms every time, so
+     * get_backtest_candles' own no-lookahead ceiling always knows which resolution the
+     * bar just revealed actually came from (see that method's own docblock).
+     */
     public function advance() {
         $d = jsonInput();
         $id = validId($d['session_id'] ?? 0);
@@ -333,61 +366,55 @@ class BacktestController {
         $session = $this->loadSession($id);
         if ($session['status'] !== 'active') jsonError('This session is already ' . $session['status'] . ' — nothing further to replay.');
 
-        $jumpToLatest = !empty($d['jump_to_latest']);
-        $stepMs = backtestTimeframeStepMs($session['replay_timeframe']);
+        $stepTf = $this->resolveStepTimeframe($session, $d['display_timeframe'] ?? null);
 
-        $sync = backtestGetSyncState($this->db, $session['symbol'], $session['replay_timeframe']);
-        $latestAvailable = (int) ($sync['latest_open_time'] ?? $session['replay_cursor_ms']);
+        $nextBar = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time > ? ORDER BY open_time ASC LIMIT 1");
+        $nextBar->bindValue(1, $session['symbol']);
+        $nextBar->bindValue(2, $stepTf);
+        $nextBar->bindValue(3, (int) $session['replay_cursor_ms'], PDO::PARAM_INT);
+        $nextBar->execute();
+        $bar = $nextBar->fetch();
 
-        $barsLimit = $jumpToLatest ? self::MAX_JUMP_BARS : 1;
-        $nextBars = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time > ? ORDER BY open_time ASC LIMIT ?");
-        $nextBars->bindValue(1, $session['symbol']);
-        $nextBars->bindValue(2, $session['replay_timeframe']);
-        $nextBars->bindValue(3, (int) $session['replay_cursor_ms'], PDO::PARAM_INT);
-        $nextBars->bindValue(4, $barsLimit, PDO::PARAM_INT);
-        $nextBars->execute();
-        $bars = $nextBars->fetchAll();
-
-        if (empty($bars)) {
-            jsonResponse(['success' => true, 'advanced' => 0, 'session' => $this->sessionSummary($session, $this->computeSessionState($session)), 'more_available' => false]);
+        if (!$bar) {
+            jsonResponse(['success' => true, 'advanced' => 0, 'session' => $this->sessionSummary($session, $this->computeSessionState($session)), 'step_timeframe' => $stepTf]);
+            return;
         }
+        $bar['open_time'] = (int) $bar['open_time'];
 
-        $events = [];
-        $lastBar = null;
-        foreach ($bars as $bar) {
-            $bar['open_time'] = (int) $bar['open_time'];
-            $lastBar = $bar;
-            $events = array_merge($events, $this->evaluateBar($session, $bar));
+        $events = $this->evaluateBar($session, $bar);
 
-            $this->db->prepare("UPDATE backtest_sessions SET replay_cursor_ms=? WHERE id=?")->execute([$bar['open_time'], $session['id']]);
-            $session['replay_cursor_ms'] = $bar['open_time'];
+        $this->db->prepare("UPDATE backtest_sessions SET replay_cursor_ms=?, cursor_step_tf=? WHERE id=?")->execute([$bar['open_time'], $stepTf, $session['id']]);
+        $session['replay_cursor_ms'] = $bar['open_time'];
+        $session['cursor_step_tf'] = $stepTf;
 
-            $state = $this->computeSessionState($session, $bar);
-            $failed = $this->checkChallengeRules($session, $state, $bar);
-            if ($failed) { $session['status'] = 'failed'; break; }
-            $passed = $this->checkProfitTarget($session, $state, $bar);
-            if ($passed) { $session['status'] = 'passed'; break; }
+        $state = $this->computeSessionState($session, $bar);
+        if ($this->checkChallengeRules($session, $state, $bar)) {
+            $session['status'] = 'failed';
+        } elseif ($this->checkProfitTarget($session, $state, $bar)) {
+            $session['status'] = 'passed';
         }
 
         $session = $this->loadSession($id); // re-read: status/fail/pass columns may have just changed
-        $finalState = $this->computeSessionState($session, $lastBar);
+        $finalState = $this->computeSessionState($session, $bar);
 
         jsonResponse([
             'success' => true,
-            'advanced' => count($bars),
-            'last_bar_time' => $lastBar['open_time'],
+            'advanced' => 1,
+            'last_bar_time' => $bar['open_time'],
             'events' => $events,
             'session' => $this->sessionSummary($session, $finalState),
             'open_positions' => $finalState['open_positions'],
-            'more_available' => $jumpToLatest && $lastBar['open_time'] < $latestAvailable,
+            'step_timeframe' => $stepTf,
         ]);
     }
 
     /**
-     * v3.20.10 — Prev Bar. Steps replay_cursor_ms back exactly one bar of the session's
-     * OWN replay timeframe (never a display timeframe — the clock only moves in the unit
-     * the session was created with) and undoes everything that happened strictly after
-     * the new cursor, so stale P&L can never survive a rewind:
+     * v3.20.10 — Prev Bar. Steps replay_cursor_ms back exactly one bar at
+     * resolveStepTimeframe()'s own resolution (v3.20.11 — the same adaptive step
+     * advance() uses; a display_timeframe finer than the session's replay_timeframe
+     * steps back that finer amount, never coarser than replay_timeframe) and undoes
+     * everything that happened strictly after the new cursor, so stale P&L can never
+     * survive a rewind:
      *   - a trade OPENED after the new cursor never happened from this point of view —
      *     flagged backtest_rewound=1 (excluded from every equity/stats query in this
      *     controller), never deleted, per the requirement that it stay visible in the log.
@@ -424,14 +451,15 @@ class BacktestController {
         if (!$id) jsonError('Invalid session id.');
         $session = $this->loadSession($id);
 
-        $stepMs = backtestTimeframeStepMs($session['replay_timeframe']);
+        $stepTf = $this->resolveStepTimeframe($session, $d['display_timeframe'] ?? null);
+        $stepMs = backtestTimeframeStepMs($stepTf);
         $newCursorMs = (int) $session['replay_cursor_ms'] - $stepMs;
 
-        // Snap to a real candle, same "the cursor always sits on a real bar" principle
-        // createSession() itself already uses — a rewind must never leave the cursor on
-        // an arbitrary timestamp between two actual bars.
+        // Snap to a real candle at the step's own resolution, same "the cursor always
+        // sits on a real bar" principle createSession() itself already uses — a rewind
+        // must never leave the cursor on an arbitrary timestamp between two actual bars.
         $prevBar = $this->db->prepare("SELECT open_time FROM candles WHERE symbol=? AND timeframe=? AND open_time <= ? ORDER BY open_time DESC LIMIT 1");
-        $prevBar->execute([$session['symbol'], $session['replay_timeframe'], $newCursorMs]);
+        $prevBar->execute([$session['symbol'], $stepTf, $newCursorMs]);
         $realNewCursor = $prevBar->fetchColumn();
         if ($realNewCursor === false || (int) $realNewCursor < (int) $session['start_time']) {
             jsonError('Already at the start of this session — nothing to step back to.');
@@ -473,7 +501,7 @@ class BacktestController {
                 "UPDATE backtest_sessions SET status='active', fail_reason=NULL, fail_bar_time=NULL, fail_equity=NULL, passed_at_bar_time=NULL, passed_trading_days=NULL, passed_trade_count=NULL WHERE id=?"
             )->execute([$id]);
         }
-        $this->db->prepare("UPDATE backtest_sessions SET replay_cursor_ms=?, rewind_count = rewind_count + ? WHERE id=?")->execute([$realNewCursor, $affected, $id]);
+        $this->db->prepare("UPDATE backtest_sessions SET replay_cursor_ms=?, cursor_step_tf=?, rewind_count = rewind_count + ? WHERE id=?")->execute([$realNewCursor, $stepTf, $affected, $id]);
 
         $session = $this->loadSession($id);
         $state = $this->computeSessionState($session);
@@ -482,6 +510,7 @@ class BacktestController {
             'trades_rewound' => $affected,
             'session' => $this->sessionSummary($session, $state),
             'open_positions' => $state['open_positions'],
+            'step_timeframe' => $stepTf,
         ]);
     }
 
@@ -589,9 +618,18 @@ class BacktestController {
         return $row;
     }
 
+    /** The market-fill/close price at exactly the current cursor position. Always reads
+     *  the 15m candle at that exact timestamp (v3.20.11) rather than
+     *  $session['replay_timeframe'] or cursor_step_tf -- adaptive stepping means the
+     *  cursor can now sit at a resolution finer than the session's own nominal
+     *  replay_timeframe, and a query for e.g. a 1H candle at a 15m-aligned, non-hour
+     *  timestamp (14:15) would simply find nothing. 15m candles exist everywhere
+     *  coarser ones do and the cursor is always exactly on a real bar boundary of
+     *  whichever resolution the last step used -- since every one of this app's four
+     *  timeframes is a whole multiple of 15m, that boundary is always 15m-aligned too. */
     private function currentBar(array $session): ?array {
-        $s = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time=?");
-        $s->execute([$session['symbol'], $session['replay_timeframe'], $session['replay_cursor_ms']]);
+        $s = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe='15m' AND open_time=?");
+        $s->execute([$session['symbol'], $session['replay_cursor_ms']]);
         $row = $s->fetch();
         if (!$row) return null;
         $row['open_time'] = (int) $row['open_time'];

@@ -159,9 +159,44 @@ function btScheduleRedraw() {
 // verified race condition, replaced by capture-phase listeners deciding synchronously.
 
 // ── COORDINATE HELPERS ─────────────────────────────────────
+// v3.21.4 — coordinateToTime()/timeToCoordinate() only ever resolve a REAL candle's own
+// time; verified via Playwright that coordinateToTime(x) returns null for any x past the
+// last loaded candle (e.g. the chart's own right-offset margin) even though
+// coordinateToLogical(x) happily returns a valid, continuous logical index out there
+// (barSpacing-based, works for any x on the pane). This is exactly why placement/dragging
+// silently did nothing in that empty space: btPixelToPoint() requires a non-null time,
+// and the direct time API can't ever produce one where no candle exists. Both directions
+// now fall back to the logical-index scale, extrapolating a "projected" time from the
+// nearest real edge candle using the timeframe's own fixed bar interval -- this app's
+// candles are always evenly spaced by timeframe, so this is exact, not approximate, and
+// deliberately symmetric (btTimeToX undoes exactly what btXToTime computed) so a
+// drawing's own anchor round-trips through save/reload without drifting.
+function btLastRealLogical() {
+    return (chartState.candles && chartState.candles.length) ? chartState.candles.length - 1 : null;
+}
+function btStepSec() {
+    return (backtestStepMsFor(chartState.timeframe) || 3600000) / 1000;
+}
 function btTimeToX(time) {
     if (!tvChart) return null;
-    const x = tvChart.timeScale().timeToCoordinate(time);
+    const ts = tvChart.timeScale();
+    const direct = ts.timeToCoordinate(time);
+    if (direct !== null && direct !== undefined) return direct;
+    const lastIdx = btLastRealLogical();
+    if (lastIdx === null) return null;
+    const stepSec = btStepSec();
+    const lastTime = toDisplaySeconds(chartState.candles[lastIdx].time, chartState.timezone);
+    const firstTime = toDisplaySeconds(chartState.candles[0].time, chartState.timezone);
+    // A projected anchor (beyond the last real candle, or before the first) isn't a real
+    // data point, so timeToCoordinate can't resolve it -- reconstruct the same logical
+    // index btXToTime would have produced when this time was first computed, then let
+    // the chart's own logicalToCoordinate() (continuous, extrapolates via bar spacing)
+    // place it on screen.
+    let logical;
+    if (time >= lastTime) logical = lastIdx + (time - lastTime) / stepSec;
+    else if (time <= firstTime) logical = (time - firstTime) / stepSec;
+    else return null; // inside the loaded range but not a real point -- a genuine gap, not ours to guess at
+    const x = ts.logicalToCoordinate(logical);
     return (x === null || x === undefined) ? null : x;
 }
 function btPriceToY(price) {
@@ -171,7 +206,27 @@ function btPriceToY(price) {
 }
 function btXToTime(x) {
     if (!tvChart) return null;
-    return tvChart.timeScale().coordinateToTime(x);
+    const ts = tvChart.timeScale();
+    const direct = ts.coordinateToTime(x);
+    if (direct !== null && direct !== undefined) return direct;
+    const lastIdx = btLastRealLogical();
+    if (lastIdx === null) return null;
+    const logical = ts.coordinateToLogical(x);
+    if (logical === null || logical === undefined) return null;
+    const stepSec = btStepSec();
+    if (logical > lastIdx) {
+        const lastTime = toDisplaySeconds(chartState.candles[lastIdx].time, chartState.timezone);
+        return Math.round(lastTime + (logical - lastIdx) * stepSec);
+    }
+    if (logical < 0) {
+        const firstTime = toDisplaySeconds(chartState.candles[0].time, chartState.timezone);
+        return Math.round(firstTime + logical * stepSec);
+    }
+    // Inside the loaded range's logical span but coordinateToTime still returned null --
+    // would mean a genuine gap in the series; fall back to the nearest real candle rather
+    // than dropping the point entirely.
+    const idx = Math.max(0, Math.min(lastIdx, Math.round(logical)));
+    return toDisplaySeconds(chartState.candles[idx].time, chartState.timezone);
 }
 function btYToPrice(y) {
     if (!tvCandleSeries) return null;
@@ -224,15 +279,26 @@ function btSnapPrice(time, rawPrice, y) {
     if (best === null || bestPxDist > BT_MAGNET_SNAP_PX) return rawPrice;
     return best;
 }
+/** v3.21.4 — previously searched for and snapped to the single nearest REAL candle with
+ *  no distance cutoff at all, unconditionally. That's exactly what silently undid
+ *  btXToTime()'s new empty-space extrapolation: any projected time past the last candle
+ *  is, by definition, always "nearest" to that same last candle, so every anchor placed
+ *  in the empty space got dragged straight back onto it. Rewritten to round to the
+ *  nearest bar-interval boundary via the same logical-index math btXToTime() uses,
+ *  instead of a nearest-candle search -- this app's candles are always evenly spaced by
+ *  timeframe, so for an in-range time this produces the exact same real candle as before
+ *  (bar-alignment is unchanged for on-chart placement), while a time beyond either edge
+ *  now rounds to the nearest projected bar instead of collapsing onto the edge candle. */
 function btSnapTimeToCandle(rawTime) {
-    if (!chartState.candles.length) return rawTime;
-    let nearest = null, nearestDist = Infinity;
-    for (const c of chartState.candles) {
-        const ct = toDisplaySeconds(c.time, chartState.timezone);
-        const dist = Math.abs(ct - rawTime);
-        if (dist < nearestDist) { nearestDist = dist; nearest = ct; }
-    }
-    return nearest === null ? rawTime : nearest;
+    const lastIdx = btLastRealLogical();
+    if (lastIdx === null) return rawTime;
+    const stepSec = btStepSec();
+    const firstTime = toDisplaySeconds(chartState.candles[0].time, chartState.timezone);
+    const lastTime = toDisplaySeconds(chartState.candles[lastIdx].time, chartState.timezone);
+    const logical = Math.round((rawTime - firstTime) / stepSec);
+    if (logical >= 0 && logical <= lastIdx) return toDisplaySeconds(chartState.candles[logical].time, chartState.timezone);
+    if (logical > lastIdx) return Math.round(lastTime + (logical - lastIdx) * stepSec);
+    return Math.round(firstTime + logical * stepSec);
 }
 
 // ── PERSISTENCE ────────────────────────────────────────────
@@ -443,7 +509,7 @@ function btOnDrawDblClick(e) {
     if (hit) {
         e.stopPropagation(); // don't also let chart.js's own dblclick-to-fitContent() fire
         btSelectedDrawingId = hit.drawing.id;
-        btShowDrawSettingsPopover(hit.drawing);
+        btShowDrawSettingsPopover(hit.drawing, e.clientX, e.clientY);
         btScheduleRedraw();
     }
 }
@@ -875,6 +941,34 @@ function btDrawPlaceOrderButton(ctx, d, left, yEntry) {
 }
 
 // ── SETTINGS POPOVER (right-click, or double-click, on a drawing) ──
+// v3.21.4 — the settings panel is now a floating, draggable window instead of a fixed-
+// position popover. "Remembered position" only ever means a position the user actually
+// dragged it to (persisted to localStorage so it survives a reload); until that happens,
+// every open computes a fresh default beside whichever drawing was clicked, per the
+// ticket's own "don't cover the tool being edited by default" requirement. Once dragged,
+// that choice sticks for every future drawing's settings too, same as most desktop apps
+// remembering a dialog's last position regardless of what triggered it. Documented here
+// as the resolution to what would otherwise be two competing requirements.
+const BT_DRAW_POPOVER_POS_KEY = 'fc_bt_draw_popover_pos';
+let btDrawPopoverPos = undefined; // undefined = not loaded yet; null = loaded, none saved
+
+function btLoadPopoverPos() {
+    if (btDrawPopoverPos !== undefined) return btDrawPopoverPos;
+    btDrawPopoverPos = null;
+    try {
+        const raw = localStorage.getItem(BT_DRAW_POPOVER_POS_KEY);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.left === 'number' && typeof parsed.top === 'number') btDrawPopoverPos = parsed;
+        }
+    } catch (e) { /* localStorage unavailable or corrupt value -- fall back to computing a default */ }
+    return btDrawPopoverPos;
+}
+function btSavePopoverPos(left, top) {
+    btDrawPopoverPos = { left, top };
+    try { localStorage.setItem(BT_DRAW_POPOVER_POS_KEY, JSON.stringify(btDrawPopoverPos)); } catch (e) { /* ignore -- position just won't persist across reloads */ }
+}
+
 function btShowDrawSettingsPopover(d, clientX, clientY) {
     let pop = document.getElementById('bt-draw-settings-popover');
     if (!pop) {
@@ -884,14 +978,67 @@ function btShowDrawSettingsPopover(d, clientX, clientY) {
         document.body.appendChild(pop);
     }
     pop.innerHTML = btDrawSettingsHtml(d);
-    pop.style.display = 'block';
-    const rect = btDrawOverlay.getBoundingClientRect();
-    const left = clientX !== undefined ? clientX : rect.left + rect.width / 2;
-    const top = clientY !== undefined ? clientY : rect.top + rect.height / 2;
-    // Keep the popover on-screen even when opened near the right/bottom edge of the chart.
-    pop.style.left = Math.min(left, window.innerWidth - 260) + 'px';
-    pop.style.top = Math.min(top, window.innerHeight - 300) + 'px';
+    // Measure the ACTUAL rendered size before placing it on screen -- the previous
+    // version clamped against a guessed ~300px height, which was already wrong for the
+    // fib settings dialog (v3.21.2, easily 500+px of real content) and is exactly what
+    // "opens pinned low, gets clipped by the viewport" was describing. Positioned
+    // off-screen for one synchronous layout pass so nothing visibly jumps.
+    pop.style.left = '-9999px'; pop.style.top = '-9999px'; pop.style.display = 'flex';
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    const margin = 8;
+
+    const remembered = btLoadPopoverPos();
+    let left, top;
+    if (remembered) {
+        left = remembered.left;
+        top = remembered.top;
+    } else {
+        // Beside the drawing, not on top of it: open to the right of the click point with
+        // a small gap, or to the left if there isn't room on the right.
+        const overlayRect = btDrawOverlay ? btDrawOverlay.getBoundingClientRect() : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+        const anchorX = clientX !== undefined ? clientX : overlayRect.left + overlayRect.width / 2;
+        const anchorY = clientY !== undefined ? clientY : overlayRect.top + overlayRect.height / 2;
+        const gap = 16;
+        left = (anchorX + gap + w <= window.innerWidth - margin) ? anchorX + gap : anchorX - gap - w;
+        top = anchorY - h / 2;
+    }
+    left = Math.max(margin, Math.min(left, window.innerWidth - w - margin));
+    top = Math.max(margin, Math.min(top, window.innerHeight - h - margin));
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+
     btWireDrawSettingsPopover(d);
+    btWireDrawPopoverDrag(pop);
+}
+/** Drag-by-header, clamped to the viewport on every move (not just at drop) so the panel
+ *  can never be dragged fully or partly off-screen. The final position is only persisted
+ *  on mouseup, not on every move, to avoid hammering localStorage mid-drag. */
+function btWireDrawPopoverDrag(pop) {
+    const header = document.getElementById('bt-draw-popover-header');
+    if (!header) return;
+    header.onmousedown = (e) => {
+        if (e.target.closest('#bt-draw-popover-close-x')) return;
+        e.preventDefault();
+        const startX = e.clientX, startY = e.clientY;
+        const startRect = pop.getBoundingClientRect();
+        const w = startRect.width, h = startRect.height, margin = 8;
+        const onMove = (ev) => {
+            const left = Math.max(margin, Math.min(startRect.left + (ev.clientX - startX), window.innerWidth - w - margin));
+            const top = Math.max(margin, Math.min(startRect.top + (ev.clientY - startY), window.innerHeight - h - margin));
+            pop.style.left = left + 'px';
+            pop.style.top = top + 'px';
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            const finalRect = pop.getBoundingClientRect();
+            btSavePopoverPos(finalRect.left, finalRect.top);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    };
+    const closeBtn = document.getElementById('bt-draw-popover-close-x');
+    if (closeBtn) closeBtn.onclick = () => btHideDrawSettingsPopover();
 }
 function btHideDrawSettingsPopover() {
     const pop = document.getElementById('bt-draw-settings-popover');
@@ -964,11 +1111,16 @@ function btDrawSettingsHtml(d) {
             <label>R:R ratio <input type="number" data-field="rr_ratio" value="${s.rr_ratio}" min="0.1" step="0.1"></label>
             <label><input type="checkbox" data-field="rr_locked" ${s.rr_locked ? 'checked' : ''}> Lock ratio</label>`;
     }
-    return `<div class="bt-draw-popover-title">${escapeHtml(d.tool.replace(/_/g, ' '))}</div>
-        ${colorWidthStyle}${extra}
-        <div class="bt-draw-popover-actions">
-            <button type="button" id="bt-draw-delete-btn" class="btn btn-ghost btn-sm">Delete</button>
-            <button type="button" id="bt-draw-close-btn" class="btn btn-primary btn-sm">Done</button>
+    return `<div class="bt-draw-popover-header" id="bt-draw-popover-header">
+            <span class="bt-draw-popover-header-title">${escapeHtml(d.tool.replace(/_/g, ' '))}</span>
+            <button type="button" id="bt-draw-popover-close-x" class="bt-draw-popover-close-x" title="Close">✕</button>
+        </div>
+        <div class="bt-draw-popover-body">
+            ${colorWidthStyle}${extra}
+            <div class="bt-draw-popover-actions">
+                <button type="button" id="bt-draw-delete-btn" class="btn btn-ghost btn-sm">Delete</button>
+                <button type="button" id="bt-draw-close-btn" class="btn btn-primary btn-sm">Done</button>
+            </div>
         </div>`;
 }
 function btWireDrawSettingsPopover(d) {

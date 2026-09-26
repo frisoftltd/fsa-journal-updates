@@ -453,11 +453,22 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-tool-btn.active{background:rgba(41,98,255,0.18);color:#5b8dff;border-color:#2962ff}
 .bt-util-btn.active{background:rgba(41,98,255,0.18);color:#5b8dff}
 #bt-draw-overlay{position:absolute;top:0;left:0;z-index:4;pointer-events:none}
-.bt-draw-popover{position:fixed;z-index:300;background:#181c27;border:1px solid #2a2e39;border-radius:8px;padding:12px;width:230px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.4);color:#d1d4dc;font-size:12px}
-.bt-draw-popover-title{font-family:var(--font-head);font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b93a7;margin-bottom:10px}
-.bt-draw-popover label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:#d1d4dc}
-.bt-draw-popover input[type=number],.bt-draw-popover select{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;width:70px;padding:3px 6px;font-size:12px}
-.bt-draw-popover input[type=color]{width:32px;height:22px;padding:0;border:1px solid #2a2e39;background:none}
+/* v3.21.4 — floating, draggable panel (previously a fixed-position popover that assumed
+   a ~300px height for its own on-screen clamping; broke as soon as the fib settings
+   dialog, v3.21.2, grew well past that). display:flex + flex-direction:column here is
+   what lets the header stay pinned while only the body scrolls -- max-height caps the
+   whole panel to fit any viewport, overflow-y:auto on the body (not the outer element)
+   is what keeps the header visible and draggable even when the settings list itself is
+   taller than the available space. */
+.bt-draw-popover{position:fixed;z-index:300;background:#181c27;border:1px solid #2a2e39;border-radius:8px;width:230px;max-height:80vh;box-shadow:0 8px 24px rgba(0,0,0,0.4);color:#d1d4dc;font-size:12px;display:flex;flex-direction:column;overflow:hidden}
+.bt-draw-popover-header{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid #232733;cursor:move;user-select:none;flex-shrink:0}
+.bt-draw-popover-header-title{font-family:var(--font-head);font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b93a7}
+.bt-draw-popover-close-x{background:transparent;border:none;color:#8b93a7;cursor:pointer;font-size:13px;line-height:1;padding:3px 5px;border-radius:4px}
+.bt-draw-popover-close-x:hover{background:#232733;color:#d1d4dc}
+.bt-draw-popover-body{padding:12px;overflow-y:auto;flex:1 1 auto}
+.bt-draw-popover-body label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:#d1d4dc}
+.bt-draw-popover-body input[type=number],.bt-draw-popover-body select{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;width:70px;padding:3px 6px;font-size:12px}
+.bt-draw-popover-body input[type=color]{width:32px;height:22px;padding:0;border:1px solid #2a2e39;background:none}
 .bt-fib-levels{max-height:140px;overflow-y:auto;border-top:1px solid #232733;padding-top:6px;margin-top:2px}
 .bt-draw-popover-actions{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:1px solid #232733}
 

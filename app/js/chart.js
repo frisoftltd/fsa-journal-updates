@@ -247,7 +247,12 @@ function initTvChart() {
             horzLines: { color: TV_COLORS.grid },
         },
         rightPriceScale: { visible: true, borderColor: TV_COLORS.grid },
-        timeScale: { visible: true, borderColor: TV_COLORS.grid, timeVisible: true, secondsVisible: false },
+        // v3.21.4 — rightOffset reserves empty bars to the right of the last real candle,
+        // TradingView-style, so there's actual plot area to draw a projected fib target
+        // or a planned stop into. Previously unset (defaults to 0), which put the last
+        // candle flush against the right edge — there was no empty space to draw into at
+        // all, on top of the coordinate-conversion bug fixed the same release.
+        timeScale: { visible: true, borderColor: TV_COLORS.grid, timeVisible: true, secondsVisible: false, rightOffset: 24 },
         crosshair: {
             mode: LightweightCharts.CrosshairMode.Normal,
             vertLine: { labelVisible: true },

@@ -135,18 +135,41 @@
            btInitDrawOverlay() and appended into .tv-chart-wrap at runtime, not in this
            markup -- it needs a real <canvas> sized from #tv-chart's own live dimensions,
            which don't exist yet at page-load time. -->
+      <!-- v3.21.1: hand-authored, original line-icon set (24x24 viewBox, 2px round-cap
+           stroke) replacing the emoji/text placeholders -- matches the visual weight of
+           a Lucide/Tabler-style toolbar (consistent sizing, stroke-only glyphs) without
+           tracing either library's or TradingView's own artwork; every path here was
+           drawn from scratch for this ticket. -->
       <div class="bt-draw-toolbar" id="bt-draw-toolbar" title="Drawing tools">
-        <button class="bt-tool-btn" data-tool="" onclick="btSelectTool(null)" title="Cursor">↖</button>
+        <button class="bt-tool-btn" data-tool="" onclick="btSelectTool(null)" title="Cursor">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 8-6 2-2 6z"/></svg>
+        </button>
         <div class="bt-draw-toolbar-sep"></div>
-        <button class="bt-tool-btn" data-tool="position_long" onclick="btSelectTool('position_long')" title="Long Position">📈</button>
-        <button class="bt-tool-btn" data-tool="position_short" onclick="btSelectTool('position_short')" title="Short Position">📉</button>
-        <button class="bt-tool-btn" data-tool="fib_retracement" onclick="btSelectTool('fib_retracement')" title="Fibonacci Retracement">Fib</button>
-        <button class="bt-tool-btn" data-tool="trend_line" onclick="btSelectTool('trend_line')" title="Trend Line">╱</button>
-        <button class="bt-tool-btn" data-tool="horizontal_line" onclick="btSelectTool('horizontal_line')" title="Horizontal Line">—</button>
-        <button class="bt-tool-btn" data-tool="horizontal_ray" onclick="btSelectTool('horizontal_ray')" title="Horizontal Ray">⟶</button>
+        <button class="bt-tool-btn" data-tool="position_long" onclick="btSelectTool('position_long')" title="Long Position">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>
+        </button>
+        <button class="bt-tool-btn" data-tool="position_short" onclick="btSelectTool('position_short')" title="Short Position">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l6 6 4-4 8 8"/><path d="M15 17h6v-6"/></svg>
+        </button>
+        <button class="bt-tool-btn" data-tool="fib_retracement" onclick="btSelectTool('fib_retracement')" title="Fibonacci Retracement">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="4" x2="9" y2="4"/><line x1="3" y1="10" x2="15" y2="10"/><line x1="3" y1="16" x2="21" y2="16"/><line x1="3" y1="4" x2="21" y2="20"/></svg>
+        </button>
+        <button class="bt-tool-btn" data-tool="trend_line" onclick="btSelectTool('trend_line')" title="Trend Line">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="19" r="1.6" fill="currentColor" stroke="none"/><line x1="5" y1="19" x2="19" y2="5"/><circle cx="19" cy="5" r="1.6" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button class="bt-tool-btn" data-tool="horizontal_line" onclick="btSelectTool('horizontal_line')" title="Horizontal Line">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="12" r="1.6" fill="currentColor" stroke="none"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="20" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>
+        </button>
+        <button class="bt-tool-btn" data-tool="horizontal_ray" onclick="btSelectTool('horizontal_ray')" title="Horizontal Ray">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="12" r="1.6" fill="currentColor" stroke="none"/><line x1="4" y1="12" x2="19" y2="12"/><path d="M15 8l4 4-4 4"/></svg>
+        </button>
         <div class="bt-draw-toolbar-sep"></div>
-        <button class="bt-util-btn active" id="bt-magnet-btn" onclick="btToggleMagnet()" title="Magnet — snap to candle open/high/low/close">🧲</button>
-        <button class="bt-util-btn" onclick="btDeleteSelected()" title="Delete selected (Del)">🗑</button>
+        <button class="bt-util-btn active" id="bt-magnet-btn" onclick="btToggleMagnet()" title="Magnet — snap to candle open/high/low/close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v7a7 7 0 0 0 14 0V4"/><line x1="5" y1="4" x2="9" y2="4"/><line x1="15" y1="4" x2="19" y2="4"/><line x1="5" y1="8" x2="9" y2="8"/><line x1="15" y1="8" x2="19" y2="8"/></svg>
+        </button>
+        <button class="bt-util-btn" onclick="btDeleteSelected()" title="Delete selected (Del)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        </button>
       </div>
       <div class="tv-chart-wrap">
         <div class="tv-legend" id="tv-legend"></div>

@@ -59,6 +59,26 @@ const BT_TOOL_DEFAULTS = {
 };
 
 // ── OVERLAY SETUP ──────────────────────────────────────────
+/**
+ * v3.21.1 — REWRITTEN. The overlay is now PURELY a rendering canvas: pointer-events stays
+ * 'none' permanently, and it is never itself an event target. v3.21.0's design toggled
+ * pointer-events dynamically based on a SEPARATE mousemove-driven hover pre-check
+ * (btUpdateOverlayInteractivity(), now removed) -- verified in an actual browser
+ * (Playwright + a real Chromium instance, loading these exact files) to be a genuine
+ * race condition: hovering exactly on a handle could still leave pointer-events at
+ * 'none' at the instant the real mousedown fired, silently dropping the click through to
+ * the chart's own canvas underneath instead of reaching this file's handlers at all --
+ * this is what "dragging is unresponsive, takes many clicks and drags" actually was.
+ *
+ * Fixed architecture: listen on .tv-chart-wrap (an ancestor of both the overlay and the
+ * chart's own inner canvas) with {capture: true}, so this file sees every mouse event
+ * BEFORE Lightweight Charts' own internal listeners do (capture phase runs top-down,
+ * before the bubble phase reaches whatever the chart itself is listening on). Every
+ * handler decides synchronously, from the SAME event, whether it's relevant: if a tool
+ * is active or an existing drawing is hit, call e.stopPropagation() so the chart's own
+ * pan/zoom/crosshair handling never sees it; otherwise do nothing and let the event
+ * continue completely normally. No separate hover state, no toggle, no race window.
+ */
 function btInitDrawOverlay() {
     const wrap = document.querySelector('.tv-chart-wrap');
     if (!wrap || btDrawOverlay) return;
@@ -67,17 +87,12 @@ function btInitDrawOverlay() {
     wrap.appendChild(btDrawOverlay);
     btDrawCtx = btDrawOverlay.getContext('2d');
 
-    btDrawOverlay.addEventListener('mousedown', btOnDrawMouseDown);
-    btDrawOverlay.addEventListener('mousemove', btOnDrawMouseMove);
-    btDrawOverlay.addEventListener('mouseup', btOnDrawMouseUp);
-    btDrawOverlay.addEventListener('dblclick', btOnDrawDblClick);
-    btDrawOverlay.addEventListener('contextmenu', btOnDrawContextMenu);
-    // mousemove on the WRAPPER (not the overlay) still fires regardless of the overlay's
-    // own pointer-events state, since pointer-events:none only blocks events targeted AT
-    // the overlay itself, not bubbling past it from an ancestor listener -- this is what
-    // lets hover-based pointer-events toggling (btUpdateOverlayInteractivity()) work
-    // without the overlay permanently blocking the chart's own native pan/zoom/crosshair.
-    wrap.addEventListener('mousemove', btUpdateOverlayInteractivity);
+    const opts = { capture: true };
+    wrap.addEventListener('mousedown', btOnDrawMouseDown, opts);
+    wrap.addEventListener('mousemove', btOnDrawMouseMove, opts);
+    wrap.addEventListener('mouseup', btOnDrawMouseUp, opts);
+    wrap.addEventListener('dblclick', btOnDrawDblClick, opts);
+    wrap.addEventListener('contextmenu', btOnDrawContextMenu, opts);
     document.addEventListener('keydown', btOnDrawKeyDown);
 
     if (tvChart) {
@@ -114,23 +129,9 @@ function btScheduleRedraw() {
     btDrawRaf = requestAnimationFrame(() => { btDrawRaf = null; btRenderDrawings(); });
 }
 
-/** Default state (nothing active, nothing selected): the overlay is transparent to the
- *  mouse so the chart's own native pan/zoom/crosshair work exactly as before this
- *  feature existed. It only captures the mouse when a tool is actively placing
- *  something, or when hovering within hit-test range of an existing drawing's line/
- *  handle -- otherwise every drag-to-pan gesture on the chart would be swallowed by an
- *  always-on-top overlay with nothing on it to interact with. */
-function btUpdateOverlayInteractivity(e) {
-    if (!btDrawOverlay) return;
-    if (btActiveTool || btDrawInProgress || btDragState) {
-        btDrawOverlay.style.pointerEvents = 'auto';
-        return;
-    }
-    const rect = btDrawOverlay.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const hit = btHitTest(mx, my);
-    btDrawOverlay.style.pointerEvents = hit ? 'auto' : 'none';
-}
+// v3.21.1: btUpdateOverlayInteractivity() removed -- see btInitDrawOverlay()'s own
+// docblock for why the hover-based pointer-events toggle it implemented was a genuine,
+// verified race condition, replaced by capture-phase listeners deciding synchronously.
 
 // ── COORDINATE HELPERS ─────────────────────────────────────
 function btTimeToX(time) {
@@ -152,10 +153,30 @@ function btYToPrice(y) {
     return tvCandleSeries.coordinateToPrice(y);
 }
 
+// Pixel-space cutoff for "close enough to a wick to snap to it" -- see btSnapPrice()'s
+// own doc comment for why this has to be a pixel distance, not a price distance.
+const BT_MAGNET_SNAP_PX = 10;
+
 /** Snap a raw price to the nearest OHLC value of the candle at/near the given display-
  *  domain time — "the user anchors wick to wick." Falls back to the raw price if no
- *  candle is close enough (e.g. clicking in empty space past the last bar). */
-function btSnapPrice(time, rawPrice) {
+ *  candle is close enough in time (e.g. clicking in empty space past the last bar), OR
+ *  if a candle was found but the cursor's own y position isn't actually near any of its
+ *  four wick prices on screen.
+ *
+ *  That second check is load-bearing, not defensive. Time-snapping only depends on x, so
+ *  every y position along one purely-vertical drag (the natural "drag to set risk"
+ *  gesture) resolves to the SAME candle. Before this fix, price snapping had no distance
+ *  cutoff of its own -- once a candle was picked, the raw price ALWAYS snapped to
+ *  whichever of its 4 OHLC values was nearest, no matter how far away the cursor actually
+ *  was. That collapses a whole vertical drag onto at most 4 possible price outcomes, and
+ *  verified via Playwright: two different drag endpoints in the same bar's column, both
+ *  priced well outside that candle's real range, both silently snapped to the exact same
+ *  wick value -- indistinguishable from the entry===TP/R:R=0 corruption this ticket was
+ *  filed over. The cutoff is in pixels, not price, because a price-unit tolerance would
+ *  be wrong by orders of magnitude across this app's own price range (0.0044 to 71,968,
+ *  per CLAUDE.md's v3.14.5 note) -- a fixed pixel radius means "visually near the wick,"
+ *  which is what magnet snapping is supposed to mean regardless of the instrument. */
+function btSnapPrice(time, rawPrice, y) {
     if (!btMagnetEnabled || !chartState.candles.length) return rawPrice;
     let nearest = null, nearestDist = Infinity;
     for (const c of chartState.candles) {
@@ -168,11 +189,14 @@ function btSnapPrice(time, rawPrice) {
     const stepSec = (backtestStepMsFor(chartState.timeframe) || 3600000) / 1000;
     if (!nearest || nearestDist > stepSec) return rawPrice;
     const candidates = [nearest.open, nearest.high, nearest.low, nearest.close];
-    let best = candidates[0], bestDist = Math.abs(candidates[0] - rawPrice);
+    let best = null, bestPxDist = Infinity;
     for (const v of candidates) {
-        const d = Math.abs(v - rawPrice);
-        if (d < bestDist) { bestDist = d; best = v; }
+        const py = btPriceToY(v);
+        if (py === null) continue;
+        const d = Math.abs(py - y);
+        if (d < bestPxDist) { bestPxDist = d; best = v; }
     }
+    if (best === null || bestPxDist > BT_MAGNET_SNAP_PX) return rawPrice;
     return best;
 }
 function btSnapTimeToCandle(rawTime) {
@@ -259,8 +283,16 @@ function btPixelToPoint(x, y) {
     let price = btYToPrice(y);
     if (time === null || price === null || time === undefined || price === undefined) return null;
     time = btSnapTimeToCandle(time);
-    price = btSnapPrice(time, price);
+    price = btSnapPrice(time, price, y);
     return { time, price };
+}
+
+/** Only ever true while this file is actually claiming the gesture (a tool is active, a
+ *  drawing is being dragged, or one was just hit) -- checked by every handler before
+ *  calling e.stopPropagation(), so a click on genuinely empty chart space is always left
+ *  completely alone for the chart's own native pan/zoom/crosshair to handle. */
+function btIsCapturingInput() {
+    return !!(btActiveTool || btDrawInProgress || btDragState);
 }
 
 function btOnDrawMouseDown(e) {
@@ -275,6 +307,7 @@ function btOnDrawMouseDown(e) {
         if (sel && sel._placeOrderBtnRect) {
             const r = sel._placeOrderBtnRect;
             if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+                e.stopPropagation();
                 btPlaceOrderFromDrawing(sel);
                 return;
             }
@@ -282,6 +315,7 @@ function btOnDrawMouseDown(e) {
     }
 
     if (btActiveTool) {
+        e.stopPropagation(); // a tool is active -- every click while placing belongs to it, never to chart panning
         const pt = btPixelToPoint(x, y);
         if (!pt) return;
 
@@ -307,9 +341,11 @@ function btOnDrawMouseDown(e) {
         return;
     }
 
-    // Cursor mode -- select/drag an existing drawing.
+    // Cursor mode -- select/drag an existing drawing. Hit-testing runs on THIS SAME
+    // mousedown event, synchronously -- no separate hover pre-check, no race window.
     const hit = btHitTest(x, y);
     if (hit) {
+        e.stopPropagation(); // claiming this drag -- the chart must not also start panning from the same mousedown
         const startPoint = btPixelToPoint(x, y);
         btSelectedDrawingId = hit.drawing.id;
         btDragState = {
@@ -318,6 +354,8 @@ function btOnDrawMouseDown(e) {
             startSettings: JSON.parse(JSON.stringify(hit.drawing.settings)),
         };
     } else {
+        // Nothing hit -- deliberately do NOT stopPropagation here. This click is left
+        // completely alone so the chart's own pan-drag starts normally underneath.
         btSelectedDrawingId = null;
         btHideDrawSettingsPopover();
     }
@@ -325,6 +363,8 @@ function btOnDrawMouseDown(e) {
 }
 
 function btOnDrawMouseMove(e) {
+    if (!btDrawInProgress && !btDragState) return; // nothing of ours in progress -- let the chart's own crosshair/pan handle this move untouched
+    e.stopPropagation();
     const { x, y } = btMousePos(e);
     if (btDrawInProgress) {
         const pt = btPixelToPoint(x, y);
@@ -340,6 +380,8 @@ function btOnDrawMouseMove(e) {
 }
 
 function btOnDrawMouseUp(e) {
+    if (!btDrawInProgress && !btDragState) return;
+    e.stopPropagation();
     if (btDrawInProgress && btDrawInProgress.dragging) {
         const { x, y } = btMousePos(e);
         const pt = btPixelToPoint(x, y) || btDrawInProgress.previewPoint;
@@ -366,13 +408,23 @@ function btOnDrawMouseUp(e) {
 function btOnDrawDblClick(e) {
     const { x, y } = btMousePos(e);
     const hit = btHitTest(x, y);
-    if (hit) { btSelectedDrawingId = hit.drawing.id; btShowDrawSettingsPopover(hit.drawing); btScheduleRedraw(); }
+    if (hit) {
+        e.stopPropagation(); // don't also let chart.js's own dblclick-to-fitContent() fire
+        btSelectedDrawingId = hit.drawing.id;
+        btShowDrawSettingsPopover(hit.drawing);
+        btScheduleRedraw();
+    }
 }
 function btOnDrawContextMenu(e) {
-    e.preventDefault();
     const { x, y } = btMousePos(e);
     const hit = btHitTest(x, y);
-    if (hit) { btSelectedDrawingId = hit.drawing.id; btShowDrawSettingsPopover(hit.drawing, e.clientX, e.clientY); btScheduleRedraw(); }
+    if (hit) {
+        e.preventDefault();
+        e.stopPropagation();
+        btSelectedDrawingId = hit.drawing.id;
+        btShowDrawSettingsPopover(hit.drawing, e.clientX, e.clientY);
+        btScheduleRedraw();
+    }
 }
 function btOnDrawKeyDown(e) {
     if (!btActiveSessionId) return;
@@ -439,12 +491,25 @@ function btComputeTpFromRatio(tool, entry, stop, ratio) {
     return tool === 'position_long' ? entry + dist * ratio : entry - dist * ratio;
 }
 
+// v3.21.1 — a real trader drags a position tool mostly VERTICALLY (the whole point is
+// setting price levels; the horizontal span is incidental) -- verified in an actual
+// browser that this collapses points[0].time and points[1].time to the same value,
+// which gives the drawn box (and therefore its own hit-test region: left===right, zero
+// width) NO area at all to ever be clicked again. This is what "many clicks and drags"
+// actually was, and is the same underlying defect that made a follow-up drag attempt
+// land on a near-zero-size box, producing the reported entry===take_profit/R:R=0 case.
+// The box's horizontal span is now always this fixed number of bars from the entry
+// point, completely independent of how far sideways the drag happened to go.
+const BT_POSITION_TOOL_SPAN_BARS = 20;
+
 async function btFinalizeNewDrawing(tool, points) {
     const settings = JSON.parse(JSON.stringify(BT_TOOL_DEFAULTS[tool] || {}));
     if (tool === 'position_long' || tool === 'position_short') {
         settings.entry = points[0].price;
         settings.stop_loss = points[1].price;
         settings.take_profit = btComputeTpFromRatio(tool, settings.entry, settings.stop_loss, settings.rr_ratio);
+        const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
+        points = [{ time: points[0].time }, { time: points[0].time + spanMs / 1000 }];
     }
     const drawing = await btSaveNewDrawing(tool, points, settings);
     btActiveTool = null;
@@ -555,11 +620,18 @@ function btRenderDrawings() {
     for (const d of btDrawings) btDrawOne(ctx, d, d.id === btSelectedDrawingId, false);
 
     if (btDrawInProgress) {
-        const preview = { tool: btDrawInProgress.tool, points: [btDrawInProgress.points[0], btDrawInProgress.previewPoint], settings: JSON.parse(JSON.stringify(BT_TOOL_DEFAULTS[btDrawInProgress.tool] || {})) };
-        if (preview.tool === 'position_long' || preview.tool === 'position_short') {
-            preview.settings.entry = preview.points[0].price;
-            preview.settings.stop_loss = preview.points[1].price;
+        const isPosition = btDrawInProgress.tool === 'position_long' || btDrawInProgress.tool === 'position_short';
+        const previewPoints = [btDrawInProgress.points[0], btDrawInProgress.previewPoint];
+        const preview = { tool: btDrawInProgress.tool, points: previewPoints, settings: JSON.parse(JSON.stringify(BT_TOOL_DEFAULTS[btDrawInProgress.tool] || {})) };
+        if (isPosition) {
+            // Same fixed span used at finalize time (btFinalizeNewDrawing) -- shown live
+            // while dragging so the preview never misleadingly renders a near-zero-width
+            // box that the saved drawing won't actually have.
+            preview.settings.entry = previewPoints[0].price;
+            preview.settings.stop_loss = previewPoints[1].price;
             preview.settings.take_profit = btComputeTpFromRatio(preview.tool, preview.settings.entry, preview.settings.stop_loss, preview.settings.rr_ratio);
+            const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
+            preview.points = [{ time: previewPoints[0].time }, { time: previewPoints[0].time + spanMs / 1000 }];
         }
         btDrawOne(ctx, preview, false, true);
     }
@@ -641,7 +713,27 @@ function btDrawFib(ctx, d, selected) {
         ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
         if (s.show_price !== false) {
             ctx.fillStyle = level.color; ctx.font = '10px monospace';
-            ctx.fillText(`${level.ratio} — ${fmtPrice5(price)}`, right + 4, y + 3);
+            const label = `${level.ratio} — ${fmtPrice5(price)}`;
+            // v3.21.1: "Fib shows no level labels" traced to this line, not to fillText
+            // never being called (verified via Playwright: it fires for every level, on
+            // every render, with the right text). extend_right defaults on, which makes
+            // `right` equal to the overlay canvas's own full width -- so the old
+            // `right + 4` anchor placed every label 4px PAST the canvas's right edge,
+            // entirely outside its clip region and therefore invisible regardless of
+            // color/font. When extended, the label is now right-aligned (per the ticket,
+            // "right-aligned like TradingView") just inside the canvas's own edge, since
+            // the line already reaches that edge. When not extended, the line's own end
+            // is a real interior point, so the label still sits just to its right as
+            // before -- but clamped to the same inside-the-canvas margin so a fib drawn
+            // near the right edge can't push its own label off-screen either.
+            const margin = 4;
+            if (s.extend_right) {
+                ctx.textAlign = 'right';
+                ctx.fillText(label, btDrawOverlay.width - margin, y + 3);
+            } else {
+                ctx.textAlign = 'left';
+                ctx.fillText(label, Math.min(right + margin, btDrawOverlay.width - margin), y + 3);
+            }
         }
     });
     if (selected) { btDrawHandle(ctx, p1.x, p1.y, s.color); btDrawHandle(ctx, p2.x, p2.y, s.color); }

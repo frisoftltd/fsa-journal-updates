@@ -436,18 +436,19 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-side-panel input::placeholder{color:#5a6272}
 .bt-side-panel input:focus,.bt-side-panel select:focus{border-color:#2962ff}
 
-/* ── DRAWING TOOLS (v3.21.0) ──
+/* ── DRAWING TOOLS (v3.21.0, interaction model corrected in v3.21.1) ──
    .bt-draw-toolbar is a plain flex column, laid out first (leftmost) in .bt-window-body's
    own flex row, same fixed-width-column pattern .bt-side-panel already uses on the
    opposite side. #bt-draw-overlay itself is created at runtime (js/backtest-drawings.js)
    and absolutely positioned to exactly cover #tv-chart, sitting above the chart's own
-   canvas but below the toolbar/popover -- pointer-events starts at "none" so the chart's
-   native pan/zoom/crosshair work by default, and is only switched to "auto" while a tool
-   is active or the cursor is within hit-test range of an existing drawing (see
-   btUpdateOverlayInteractivity() for exactly when). */
+   canvas but below the toolbar/popover. pointer-events is permanently "none" (v3.21.1 --
+   the earlier hover-driven "auto" toggle was a real, verified race condition, removed in
+   favour of capture-phase listeners on .tv-chart-wrap that decide per-event whether to
+   claim the gesture; see btInitDrawOverlay()'s own docblock in that file). */
 .bt-draw-toolbar{width:40px;flex-shrink:0;background:#131722;border-right:1px solid #1e222d;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px}
 .bt-draw-toolbar-sep{width:24px;height:1px;background:#232733;margin:4px 0}
-.bt-tool-btn,.bt-util-btn{width:30px;height:30px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:6px;color:#8b93a7;font-size:14px;cursor:pointer;font-family:var(--font-body);padding:0}
+.bt-tool-btn,.bt-util-btn{width:30px;height:30px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:6px;color:#8b93a7;cursor:pointer;font-family:var(--font-body);padding:0}
+.bt-tool-btn svg,.bt-util-btn svg{width:18px;height:18px;flex-shrink:0;pointer-events:none}
 .bt-tool-btn:hover,.bt-util-btn:hover{background:#1c2030;color:#d1d4dc}
 .bt-tool-btn.active{background:rgba(41,98,255,0.18);color:#5b8dff;border-color:#2962ff}
 .bt-util-btn.active{background:rgba(41,98,255,0.18);color:#5b8dff}

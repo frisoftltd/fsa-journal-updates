@@ -5,6 +5,20 @@ require_once 'includes/journal_taxonomy.php';
 requireLogin();
 $u = currentUser();
 
+// v3.21.3 — the ?v= query-busting below (v3.20.9) only works if the browser actually
+// re-fetches THIS document to see the new query string in the first place. Without an
+// explicit no-cache header, the HTML response itself (this page) is exactly as cacheable
+// as any other GET, so a browser or intermediate proxy holding a stale copy of index.php
+// would keep serving old <script src="...?v=OLD"> tags indefinitely, never even
+// requesting the new version — silently defeating the whole mechanism below. This is
+// suspected to be the actual reason cache-busting the *assets* alone (v3.20.9) still
+// wasn't enough to stop a stale-cache report in this series (v3.21.2's replay-speed
+// dropdown): confirmed correct in the current source and in a real browser render at
+// the time, so if it still looked broken live, the outer page itself was the more likely
+// stale layer, not the asset it references.
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+
 // v3.20.9 — cache-busting for local JS/CSS, tied to the deployed app version. Without
 // this, a browser (or an intermediate proxy/CDN) can keep serving a stale cached copy of
 // a JS/CSS file after Update Now replaces it on the server -- exactly the kind of stale-
@@ -12,7 +26,9 @@ $u = currentUser();
 // release series (see CLAUDE.md v3.20.9). version.json is written into this same
 // directory by updater.php's own apply step (LOCAL_VERSION_FILE = __DIR__.'/version.json'
 // in updater.php) -- read defensively since it won't exist in a fresh checkout that's
-// never been through an Update Now.
+// never been through an Update Now. v3.21.3 re-verified this covers every file in js/
+// (all 18, cross-checked against the directory listing) and both local CSS files —
+// nothing was actually missing from the list itself.
 $__assetVer = 'dev';
 $__versionFile = __DIR__ . '/version.json';
 if (is_file($__versionFile)) {

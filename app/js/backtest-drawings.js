@@ -44,14 +44,39 @@ let btDrawRaf = null;             // requestAnimationFrame handle, for throttled
 const BT_TOOL_DEFAULTS = {
     position_long:   { color: '#26a69a', rr_ratio: 3, rr_locked: true },
     position_short:  { color: '#ef5350', rr_ratio: 3, rr_locked: true },
-    fib_retracement: { color: '#f5a623', width: 1, style: 'solid', extend_right: true, reverse: false, show_price: true,
+    // v3.21.2: rebuilt to match the TradingView reference the ticket compared against.
+    // `extend` replaces the old `extend_right` boolean (which defaulted true and drew
+    // every level edge-to-edge across the whole canvas by default -- ticket item 2);
+    // 'none' is now the default, matching "between its anchors, not stretched across the
+    // whole chart." `show_trend_line` is the diagonal connector between the two raw
+    // anchors, independent of the horizontal level lines and their own width/style.
+    // `levels` includes TradingView's full standard ratio set so every one is available
+    // from the settings dialog, but only the six the ticket named are enabled by default.
+    fib_retracement: {
+        show_trend_line: true, trend_color: '#787b86', trend_style: 'solid',
+        width: 1, style: 'solid',
+        extend: 'none', // 'none' | 'right' | 'both'
+        reverse: false,
+        show_prices: true, show_levels: true,
+        levels_format: 'value', // 'value' | 'percent'
+        label_h: 'right', label_v: 'middle', // 'left'/'right'; 'top'/'middle'/'bottom'
+        font_size: 10,
+        background: false, background_opacity: 0.1,
         levels: [
-            { ratio: 0,     enabled: true, color: '#787b86' },
-            { ratio: 0.382, enabled: true, color: '#f23645' },
-            { ratio: 0.5,   enabled: true, color: '#f5a623' },
-            { ratio: 0.618, enabled: true, color: '#4caf50' },
-            { ratio: 0.786, enabled: true, color: '#089981' },
-            { ratio: 1,     enabled: true, color: '#787b86' },
+            { ratio: 0,     enabled: true,  color: '#787b86' },
+            { ratio: 0.236, enabled: false, color: '#81c784' },
+            { ratio: 0.382, enabled: true,  color: '#f23645' },
+            { ratio: 0.5,   enabled: true,  color: '#f5a623' },
+            { ratio: 0.618, enabled: true,  color: '#4caf50' },
+            { ratio: 0.65,  enabled: false, color: '#26a69a' },
+            { ratio: 0.786, enabled: true,  color: '#089981' },
+            { ratio: 1,     enabled: true,  color: '#787b86' },
+            { ratio: 1.272, enabled: false, color: '#7e57c2' },
+            { ratio: 1.414, enabled: false, color: '#5c6bc0' },
+            { ratio: 1.618, enabled: false, color: '#42a5f5' },
+            { ratio: 2.618, enabled: false, color: '#29b6f6' },
+            { ratio: 3.618, enabled: false, color: '#26c6da' },
+            { ratio: 4.236, enabled: false, color: '#8d6e63' },
         ] },
     trend_line:      { color: '#2962ff', width: 2, style: 'solid', extend_left: false, extend_right: false, show_price_label: true, show_angle_label: false },
     horizontal_line: { color: '#2962ff', width: 1, style: 'solid' },
@@ -386,10 +411,17 @@ function btOnDrawMouseUp(e) {
         const { x, y } = btMousePos(e);
         const pt = btPixelToPoint(x, y) || btDrawInProgress.previewPoint;
         const start = btDrawInProgress.points[0];
-        // A mousedown+mouseup with no real drag (a plain accidental click) shouldn't
-        // create a zero-size fib/position tool -- cancel instead of saving a degenerate
-        // drawing nobody meant to place.
-        if (start.time === pt.time && start.price === pt.price) {
+        // A mousedown+mouseup with (near-)no real drag -- a plain accidental click, or a
+        // shaky retry on top of a drawing that already exists -- shouldn't create a
+        // stacked, visually-indistinguishable duplicate. v3.21.2: widened from an exact
+        // time+price equality check to a real on-screen pixel-distance threshold, since
+        // an exact match almost never happens with a real mouse (magnet snapping aside)
+        // -- a near-zero but non-exact drag was passing this guard and saving a
+        // degenerate drawing anyway, which is the most likely source of "multiple fib
+        // objects appear stacked" reported against v3.21.1.
+        const startPx = btPointToPixel(start), endPx = btPointToPixel(pt);
+        const pxDist = (startPx && endPx) ? Math.hypot(endPx.x - startPx.x, endPx.y - startPx.y) : Infinity;
+        if (pxDist < BT_HANDLE_RADIUS) {
             btDrawInProgress = null;
             btScheduleRedraw();
             return;
@@ -696,47 +728,100 @@ function btDrawHLine(ctx, d, selected, isRay) {
     btDrawPriceLabel(ctx, btDrawOverlay.width - 66, p.y, d.points[0].price, s.color);
     if (selected) btDrawHandle(ctx, isRay ? p.x : btDrawOverlay.width / 2, p.y, s.color);
 }
+/** Hex ("#rrggbb") -> "rgba(r,g,b,a)". Fib background shading is the only caller —
+ *  every other fill/stroke color in this file is used opaque. */
+function btHexToRgba(hex, alpha) {
+    const h = (hex || '#787b86').replace('#', '');
+    const r = parseInt(h.substring(0, 2), 16) || 0;
+    const g = parseInt(h.substring(2, 4), 16) || 0;
+    const b = parseInt(h.substring(4, 6), 16) || 0;
+    return `rgba(${r},${g},${b},${alpha})`;
+}
+
+/** v3.21.2 rewrite. Three defects the ticket reported were all traced to this one
+ *  function (or its settings) and are called out inline below:
+ *   1. Labels jammed against the price axis -- v3.21.1's own fix anchored them at the
+ *      overlay CANVAS's edge, which is wider than the actual chart plot area (Lightweight
+ *      Charts reserves real pixel width for the right price scale). Now clamped to
+ *      tvChart.priceScale('right').width() before the canvas edge, so a label can never
+ *      overlap the axis.
+ *   2. Drawn edge-to-edge instead of between anchors -- `extend_right` defaulted true.
+ *      Replaced with `extend` ('none'/'right'/'both'), defaulting to 'none'.
+ *   3. Settings dialog rebuilt separately (btDrawSettingsHtml) to match the ticket's
+ *      TradingView-modelled spec; this function renders every one of those new fields
+ *      (trend line, per-level colour, levels format, label position, font size,
+ *      background shading). */
 function btDrawFib(ctx, d, selected) {
     const p1 = btPointToPixel(d.points[0]), p2 = btPointToPixel(d.points[1]);
     if (!p1 || !p2) return;
     const s = d.settings;
     const price1 = d.points[0].price, price2 = d.points[1].price;
-    const left = Math.min(p1.x, p2.x);
-    const right = s.extend_right ? btDrawOverlay.width : Math.max(p1.x, p2.x);
-    (s.levels || []).forEach(level => {
-        if (!level.enabled) return;
+    const anchorLeft = Math.min(p1.x, p2.x), anchorRight = Math.max(p1.x, p2.x);
+    const extendRight = s.extend === 'right' || s.extend === 'both';
+    const extendLeft = s.extend === 'both';
+    const lineLeft = extendLeft ? 0 : anchorLeft;
+    const lineRight = extendRight ? btDrawOverlay.width : anchorRight;
+
+    // The real plot-area boundary -- price scale panel width is real pixels the overlay
+    // canvas's own bounding box includes but the chart's plot area does not draw into.
+    const priceScaleW = (typeof tvChart !== 'undefined' && tvChart) ? (tvChart.priceScale('right').width() || 0) : 0;
+    const plotRight = Math.max(anchorLeft, btDrawOverlay.width - priceScaleW);
+
+    if (s.show_trend_line) {
+        ctx.strokeStyle = s.trend_color || '#787b86'; ctx.lineWidth = 1;
+        ctx.setLineDash(btLineDash(s.trend_style || 'solid'));
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    const levelY = level => {
         const ratio = s.reverse ? (1 - level.ratio) : level.ratio;
         const price = price1 + (price2 - price1) * ratio;
-        const y = btPriceToY(price);
+        return { price, y: btPriceToY(price) };
+    };
+
+    if (s.background) {
+        const enabled = (s.levels || []).filter(l => l.enabled).slice().sort((a, b) => a.ratio - b.ratio);
+        for (let i = 0; i < enabled.length - 1; i++) {
+            const a = levelY(enabled[i]), b = levelY(enabled[i + 1]);
+            if (a.y === null || b.y === null) continue;
+            ctx.fillStyle = btHexToRgba(enabled[i].color, s.background_opacity ?? 0.1);
+            ctx.fillRect(lineLeft, Math.min(a.y, b.y), lineRight - lineLeft, Math.abs(b.y - a.y));
+        }
+    }
+
+    (s.levels || []).forEach(level => {
+        if (!level.enabled) return;
+        const { price, y } = levelY(level);
         if (y === null) return;
-        ctx.strokeStyle = level.color; ctx.lineWidth = 1; ctx.setLineDash([]);
-        ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-        if (s.show_price !== false) {
-            ctx.fillStyle = level.color; ctx.font = '10px monospace';
-            const label = `${level.ratio} — ${fmtPrice5(price)}`;
-            // v3.21.1: "Fib shows no level labels" traced to this line, not to fillText
-            // never being called (verified via Playwright: it fires for every level, on
-            // every render, with the right text). extend_right defaults on, which makes
-            // `right` equal to the overlay canvas's own full width -- so the old
-            // `right + 4` anchor placed every label 4px PAST the canvas's right edge,
-            // entirely outside its clip region and therefore invisible regardless of
-            // color/font. When extended, the label is now right-aligned (per the ticket,
-            // "right-aligned like TradingView") just inside the canvas's own edge, since
-            // the line already reaches that edge. When not extended, the line's own end
-            // is a real interior point, so the label still sits just to its right as
-            // before -- but clamped to the same inside-the-canvas margin so a fib drawn
-            // near the right edge can't push its own label off-screen either.
+
+        if (s.show_levels !== false) {
+            ctx.strokeStyle = level.color; ctx.lineWidth = s.width || 1; ctx.setLineDash(btLineDash(s.style));
+            ctx.beginPath(); ctx.moveTo(lineLeft, y); ctx.lineTo(lineRight, y); ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        if (s.show_prices !== false) {
+            const ratioText = s.levels_format === 'percent' ? `${(level.ratio * 100).toFixed(1)}%` : `${level.ratio}`;
+            const label = s.show_levels !== false ? `${ratioText} — ${fmtPrice5(price)}` : fmtPrice5(price);
+            ctx.fillStyle = level.color;
+            ctx.font = `${s.font_size || 10}px monospace`;
             const margin = 4;
-            if (s.extend_right) {
-                ctx.textAlign = 'right';
-                ctx.fillText(label, btDrawOverlay.width - margin, y + 3);
-            } else {
+            const vOffset = s.label_v === 'top' ? -6 : s.label_v === 'bottom' ? 12 : 3;
+            if (s.label_h === 'left') {
                 ctx.textAlign = 'left';
-                ctx.fillText(label, Math.min(right + margin, btDrawOverlay.width - margin), y + 3);
+                ctx.fillText(label, Math.max(lineLeft + margin, 2), y + vOffset);
+            } else {
+                // Anchored at the line's own right end (its actual anchor, or the canvas
+                // edge only when extend is on) -- but never past the price scale panel,
+                // and never left of the line's own start either.
+                ctx.textAlign = 'right';
+                const x = Math.min(lineRight - margin, plotRight - margin);
+                ctx.fillText(label, Math.max(x, lineLeft + margin), y + vOffset);
             }
         }
     });
-    if (selected) { btDrawHandle(ctx, p1.x, p1.y, s.color); btDrawHandle(ctx, p2.x, p2.y, s.color); }
+    if (selected) { btDrawHandle(ctx, p1.x, p1.y, s.trend_color || '#787b86'); btDrawHandle(ctx, p2.x, p2.y, s.trend_color || '#787b86'); }
 }
 function btDrawPosition(ctx, d, selected) {
     const s = d.settings;
@@ -812,17 +897,20 @@ function btHideDrawSettingsPopover() {
     const pop = document.getElementById('bt-draw-settings-popover');
     if (pop) pop.style.display = 'none';
 }
+function btStyleSelect(field, current) {
+    return `<select data-field="${field}">
+        <option value="solid" ${current === 'solid' ? 'selected' : ''}>Solid</option>
+        <option value="dashed" ${current === 'dashed' ? 'selected' : ''}>Dashed</option>
+        <option value="dotted" ${current === 'dotted' ? 'selected' : ''}>Dotted</option>
+    </select>`;
+}
 function btDrawSettingsHtml(d) {
     const s = d.settings;
     const isLine = d.tool === 'trend_line' || d.tool === 'horizontal_line' || d.tool === 'horizontal_ray';
-    const colorWidthStyle = (d.tool !== 'position_long' && d.tool !== 'position_short') ? `
+    const colorWidthStyle = (d.tool !== 'position_long' && d.tool !== 'position_short' && d.tool !== 'fib_retracement') ? `
         <label>Colour <input type="color" data-field="color" value="${s.color || '#2962ff'}"></label>
         ${isLine ? `<label>Width <input type="number" data-field="width" value="${s.width || 1}" min="1" max="6"></label>
-        <label>Style <select data-field="style">
-            <option value="solid" ${s.style === 'solid' ? 'selected' : ''}>Solid</option>
-            <option value="dashed" ${s.style === 'dashed' ? 'selected' : ''}>Dashed</option>
-            <option value="dotted" ${s.style === 'dotted' ? 'selected' : ''}>Dotted</option>
-        </select></label>` : ''}` : '';
+        <label>Style ${btStyleSelect('style', s.style)}</label>` : ''}` : '';
 
     let extra = '';
     if (d.tool === 'trend_line') {
@@ -832,10 +920,42 @@ function btDrawSettingsHtml(d) {
             <label><input type="checkbox" data-field="show_price_label" ${s.show_price_label ? 'checked' : ''}> Price label</label>
             <label><input type="checkbox" data-field="show_angle_label" ${s.show_angle_label ? 'checked' : ''}> Angle label</label>`;
     } else if (d.tool === 'fib_retracement') {
+        // v3.21.2 — modelled directly on the TradingView reference the ticket compared
+        // against: trend line (its own colour/style, independent of the level lines),
+        // levels line width/style, an Extend mode (replacing the old extend_right
+        // boolean), Prices/Levels/format/label-position/font-size toggles, background
+        // shading with its own opacity, Reverse, then the full per-level checkbox+colour
+        // list (only the ticket's named six checked by default; the rest available).
         extra = `
-            <label><input type="checkbox" data-field="extend_right" ${s.extend_right ? 'checked' : ''}> Extend right</label>
+            <label><input type="checkbox" data-field="show_trend_line" ${s.show_trend_line ? 'checked' : ''}> Trend line</label>
+            <label>Trend colour <input type="color" data-field="trend_color" value="${s.trend_color || '#787b86'}"></label>
+            <label>Trend style ${btStyleSelect('trend_style', s.trend_style || 'solid')}</label>
+            <label>Levels width <input type="number" data-field="width" value="${s.width || 1}" min="1" max="6"></label>
+            <label>Levels style ${btStyleSelect('style', s.style || 'solid')}</label>
+            <label>Extend <select data-field="extend">
+                <option value="none" ${(!s.extend || s.extend === 'none') ? 'selected' : ''}>Don't extend</option>
+                <option value="right" ${s.extend === 'right' ? 'selected' : ''}>Extend right</option>
+                <option value="both" ${s.extend === 'both' ? 'selected' : ''}>Extend both</option>
+            </select></label>
+            <label><input type="checkbox" data-field="show_prices" ${s.show_prices !== false ? 'checked' : ''}> Prices</label>
+            <label><input type="checkbox" data-field="show_levels" ${s.show_levels !== false ? 'checked' : ''}> Levels</label>
+            <label>Levels format <select data-field="levels_format">
+                <option value="value" ${s.levels_format !== 'percent' ? 'selected' : ''}>Values</option>
+                <option value="percent" ${s.levels_format === 'percent' ? 'selected' : ''}>Percent</option>
+            </select></label>
+            <label>Label side <select data-field="label_h">
+                <option value="right" ${s.label_h !== 'left' ? 'selected' : ''}>Right</option>
+                <option value="left" ${s.label_h === 'left' ? 'selected' : ''}>Left</option>
+            </select></label>
+            <label>Label position <select data-field="label_v">
+                <option value="top" ${s.label_v === 'top' ? 'selected' : ''}>Top</option>
+                <option value="middle" ${(!s.label_v || s.label_v === 'middle') ? 'selected' : ''}>Middle</option>
+                <option value="bottom" ${s.label_v === 'bottom' ? 'selected' : ''}>Bottom</option>
+            </select></label>
+            <label>Font size <input type="number" data-field="font_size" value="${s.font_size || 10}" min="8" max="20"></label>
+            <label><input type="checkbox" data-field="background" ${s.background ? 'checked' : ''}> Background</label>
+            <label>Opacity <input type="range" data-field="background_opacity" value="${s.background_opacity ?? 0.1}" min="0" max="1" step="0.05"></label>
             <label><input type="checkbox" data-field="reverse" ${s.reverse ? 'checked' : ''}> Reverse</label>
-            <label><input type="checkbox" data-field="show_price" ${s.show_price !== false ? 'checked' : ''}> Show price</label>
             <div class="bt-fib-levels">${(s.levels || []).map((l, i) => `
                 <label><input type="checkbox" data-level="${i}" data-field="enabled" ${l.enabled ? 'checked' : ''}> ${l.ratio}
                 <input type="color" data-level="${i}" data-field="color" value="${l.color}"></label>`).join('')}</div>`;
@@ -854,8 +974,13 @@ function btDrawSettingsHtml(d) {
 function btWireDrawSettingsPopover(d) {
     const pop = document.getElementById('bt-draw-settings-popover');
     pop.querySelectorAll('[data-field]').forEach(input => {
-        input.addEventListener('change', () => {
-            const value = input.type === 'checkbox' ? input.checked : (input.type === 'number' ? parseFloat(input.value) : input.value);
+        // 'input' fires continuously while dragging a range/color control -- "Changes
+        // apply live" (the ticket's own settings-dialog requirement) needs that, not just
+        // the 'change' event a <select>/checkbox/number field already fires on commit.
+        // Both listeners share one handler; re-applying the same value on the trailing
+        // 'change' is harmless.
+        const handler = () => {
+            const value = input.type === 'checkbox' ? input.checked : ((input.type === 'number' || input.type === 'range') ? parseFloat(input.value) : input.value);
             if (input.dataset.level !== undefined) {
                 d.settings.levels[+input.dataset.level][input.dataset.field] = value;
             } else {
@@ -866,7 +991,9 @@ function btWireDrawSettingsPopover(d) {
             }
             btUpdateDrawing(d.id, { points: d.points, settings: d.settings });
             btScheduleRedraw();
-        });
+        };
+        input.addEventListener('input', handler);
+        input.addEventListener('change', handler);
     });
     document.getElementById('bt-draw-delete-btn').onclick = () => btDeleteDrawing(d.id);
     document.getElementById('bt-draw-close-btn').onclick = () => btHideDrawSettingsPopover();

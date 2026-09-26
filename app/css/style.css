@@ -453,7 +453,7 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-tool-btn.active{background:rgba(41,98,255,0.18);color:#5b8dff;border-color:#2962ff}
 .bt-util-btn.active{background:rgba(41,98,255,0.18);color:#5b8dff}
 #bt-draw-overlay{position:absolute;top:0;left:0;z-index:4;pointer-events:none}
-.bt-draw-popover{position:fixed;z-index:300;background:#181c27;border:1px solid #2a2e39;border-radius:8px;padding:12px;width:230px;box-shadow:0 8px 24px rgba(0,0,0,0.4);color:#d1d4dc;font-size:12px}
+.bt-draw-popover{position:fixed;z-index:300;background:#181c27;border:1px solid #2a2e39;border-radius:8px;padding:12px;width:230px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 24px rgba(0,0,0,0.4);color:#d1d4dc;font-size:12px}
 .bt-draw-popover-title{font-family:var(--font-head);font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#8b93a7;margin-bottom:10px}
 .bt-draw-popover label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;color:#d1d4dc}
 .bt-draw-popover input[type=number],.bt-draw-popover select{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;width:70px;padding:3px 6px;font-size:12px}

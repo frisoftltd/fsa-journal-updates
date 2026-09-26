@@ -20,7 +20,13 @@
  *   position_long / position_short — points=[{time},{time}] (the drawn horizontal span);
  *     settings={entry, stop_loss, take_profit, rr_locked, rr_ratio, color}
  *   fib_retracement — points=[{time,price},{time,price}] (the two swing anchors);
- *     settings={levels:[{ratio,enabled,color},...], extend_right, reverse, show_price, color, width}
+ *     settings={levels:[{ratio,enabled,color},...], show_trend_line, trend_color,
+ *       trend_style, width, style, extend ('none'/'right'/'both'), reverse, show_prices,
+ *       show_levels, levels_format ('value'/'percent'), label_h ('left'/'right'),
+ *       label_v ('top'/'middle'/'bottom'), font_size, background, background_opacity}
+ *       (v3.21.2 — replaces the v3.21.0 shape's extend_right/show_price/color fields;
+ *       this controller never validates tool-specific shape either way, so no migration
+ *       was needed for the rename)
  *   trend_line — points=[{time,price},{time,price}];
  *     settings={color, width, style, extend_left, extend_right, show_price_label, show_angle_label}
  *   horizontal_line / horizontal_ray — points=[{time,price}] (one anchor — a ray starts

@@ -206,6 +206,23 @@ function failureBalance(array $challenge): float {
 }
 
 /**
+ * v3.21.8 — "today" in the trader's own timezone (Africa/Kigali, CAT, UTC+2, no DST),
+ * not the server's default PHP timezone. This app has no `date_default_timezone_set()`
+ * call anywhere, and `users.timezone` was never migrated (see ReportCardController's own
+ * docblock, v3.18.0) — so a bare `date('Y-m-d')` resolves in whatever the host happens to
+ * be configured to, which is not guaranteed to be Kigali. `ReportCardController::today()`
+ * already solved exactly this for itself with a fixed `Africa/Kigali` constant; extracted
+ * here so every other "what day is it for this trader" computation (the risk ladder's
+ * start-of-day balance, today's trade-limit counts) uses the same day boundary instead of
+ * silently drifting from it by however many hours the server's own timezone is off from
+ * Kigali. `ReportCardController::today()` now delegates here — one implementation, not
+ * two copies of the same DateTime/timezone construction to keep in sync by hand.
+ */
+function appTodayKigali(): string {
+    return (new DateTime('now', new DateTimeZone('Africa/Kigali')))->format('Y-m-d');
+}
+
+/**
  * v3.17.0 (Auto Risk Calculator) — [Monday, Sunday] of the week containing $date
  * (Y-m-d), inclusive on both ends. PHP's 'N' format (ISO-8601 day-of-week, 1=Monday,
  * 7=Sunday) makes this a plain offset rather than a special-cased "what if today is
@@ -242,7 +259,7 @@ function tradeLimitStatus(PDO $db, int $challengeId): array {
     $ls->execute([$challengeId]);
     $limits = $ls->fetch() ?: ['max_trades_day' => null, 'max_trades_week' => null, 'max_losses_day' => null, 'daily_loss_usd' => null];
 
-    $today = date('Y-m-d');
+    $today = appTodayKigali();
     [$monday, $sunday] = weekBounds($today);
 
     $td = $db->prepare("SELECT COUNT(*) FROM trades WHERE challenge_id=? AND trade_date=?");

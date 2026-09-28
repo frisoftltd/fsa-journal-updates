@@ -63,7 +63,7 @@ class CalculatorController {
         $cs->execute([$challengeId, uid()]);
         if (!$cs->fetch()) jsonError('Challenge not found.');
 
-        $tradeDate = trim((string)($d['trade_date'] ?? '')) ?: date('Y-m-d');
+        $tradeDate = trim((string)($d['trade_date'] ?? '')) ?: appTodayKigali();
         $entry  = (isset($d['entry'])  && $d['entry']  !== '') ? (float)$d['entry']  : null;
         $stop   = (isset($d['stop'])   && $d['stop']   !== '') ? (float)$d['stop']   : null;
         $target = (isset($d['target']) && $d['target'] !== '') ? (float)$d['target'] : null;
@@ -159,7 +159,7 @@ class CalculatorController {
         // challengeBalance(), just without the date filter) updated correctly. The tier
         // lookup keeps the start-of-day basis; every dollar amount now uses the live,
         // current balance instead.
-        $today = date('Y-m-d');
+        $today = appTodayKigali();
         $balanceAtDayStart = balanceAtDayStart($db, $challengeId, $today);
         $riskPct = ladderTierForBalance($db, $challengeId, $balanceAtDayStart);
         $currentBalance = challengeBalance($db, $challengeId);
@@ -229,7 +229,7 @@ class CalculatorController {
         // ladderTierForBalance(). available_margin and the "Balance" the trader sees are
         // now the live current balance instead — see that method's own docblock and
         // CLAUDE.md for the full incident.
-        $today = date('Y-m-d');
+        $today = appTodayKigali();
         $balanceToday = balanceAtDayStart($db, $challengeId, $today);
         $currentBalance = challengeBalance($db, $challengeId);
 

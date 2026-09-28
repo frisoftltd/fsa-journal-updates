@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.7 (this field was stale at v3.20.3 for the entire v3.20.x–v3.21.6 backtesting/drawing-tools series — see the documentation-gap note above §3A) |
+| Current Version | v3.21.8 (this field was stale at v3.20.3 for the entire v3.20.x–v3.21.6 backtesting/drawing-tools series — see the documentation-gap note above §3A) |
 
 ### Tech Stack
 
@@ -3196,6 +3196,34 @@ not match the trader's real day boundary (Kigali, UTC+2, no DST) — `ReportCard
 already solved exactly this for itself with a fixed `Africa/Kigali` constant (see v3.18.0
 above) but nothing else in the app reuses it.
 
+### v3.21.8: One Shared "Today," Instead of Every Caller Guessing the Server's Timezone
+
+Closes the gap flagged at the end of v3.21.7 above. `tradeLimitStatus()`
+(`includes/helpers.php`) and three call sites in `CalculatorController.php`
+(`autoRiskPreview()`, `getRiskStatus()`, and `sizePreview()`'s `trade_date` fallback) all
+computed "today" via a bare `date('Y-m-d')` — the server's default PHP timezone, never
+explicitly set anywhere in this app, and not guaranteed to match the trader's real day
+boundary (Africa/Kigali, UTC+2, no DST). `ReportCardController::today()` had already
+solved exactly this for its own module with a fixed `Africa/Kigali` constant (v3.18.0)
+— nothing else in the app reused it, so the risk ladder's start-of-day balance and the
+trade-limit counts could roll to a new "today" at the wrong instant relative to the
+trader's own clock.
+
+**Fix:** `helpers.php::appTodayKigali()` — the identical `DateTime`/timezone construction
+`ReportCardController::today()` already used, extracted to one place.
+`ReportCardController::today()` now delegates to it (verified by hand: byte-identical
+output before and after — this is a pure refactor, that module's own behavior is
+unchanged, per instruction). All four call sites named above now use the shared helper.
+
+**Verified this has real effect, not just a refactor:** simulated `2026-09-27 23:30 UTC`
+(`= 2026-09-28 01:30` in Kigali, already the next calendar day there) — a bare
+`date('Y-m-d')` under a UTC server default returns `2026-09-27` at that instant, while
+`appTodayKigali()` correctly returns `2026-09-28`. That's the exact failure mode this
+closes: a trade closed just after midnight Kigali time landing on the wrong side of
+"today" for the ladder basis and the trade-limit counts. Did not confirm what the live
+server's actual default PHP timezone is (no VPS access from this environment) — this fix
+makes the app's own "today" correct regardless of what that turns out to be.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4296,7 +4324,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.7
+Current Version: v3.21.8
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

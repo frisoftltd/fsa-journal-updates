@@ -47,8 +47,13 @@ class ReportCardController {
     // CARD
     // ══════════════════════════════════════════════════════════════════
 
+    /** v3.21.8 — delegates to helpers.php::appTodayKigali(), extracted from this exact
+     *  method so the risk-ladder/trade-limits "what day is it for this trader" logic
+     *  could reuse it instead of drifting from it via the server's own default PHP
+     *  timezone. Output unchanged: REPORT_CARD_TZ and appTodayKigali() both name
+     *  'Africa/Kigali', so this still returns exactly what it always has. */
     private function today(): string {
-        return (new DateTime('now', new DateTimeZone(self::REPORT_CARD_TZ)))->format('Y-m-d');
+        return appTodayKigali();
     }
 
     /** The challenge a card is scoped to: the currently active one, or 0 ("no account selected") if none. */

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.20.3 |
+| Current Version | v3.21.7 (this field was stale at v3.20.3 for the entire v3.20.x–v3.21.6 backtesting/drawing-tools series — see the documentation-gap note above §3A) |
 
 ### Tech Stack
 
@@ -3137,6 +3137,65 @@ manual `pnl` override, never the two conflated into one column.
   chart ships; breaking findings down by type/severity over time is a reasonable
   follow-up once there's enough real review history to make such a chart meaningful.
 
+**Documentation gap, flagged rather than silently left implicit:** the backtesting
+pipeline/replay engine (v3.19.0–v3.20.11) and the backtest drawing-tools series
+(v3.21.0–v3.21.6) shipped between this section and the next without their own CLAUDE.md
+write-ups — this file's version-history narrative jumps from v3.18.0 straight to v3.21.7
+below. The `§1` Backtesting subsections above (Pipeline, Replay Engine) do describe the
+*current* state of that work, just not release-by-release the way every other feature in
+this file is documented. Not backfilled here since it's out of scope for this ticket —
+noted so a future session doesn't assume the jump means nothing shipped in between.
+
+### v3.21.7: Risk Calculator Silently Excluded Today's Own Closed Trades
+
+**Symptom:** after closing a trade, the Auto Risk Calculator's balance and every dollar
+figure derived from it didn't move, while the sidebar balance updated correctly for the
+same challenge. Reported with exact figures (challenge "Bitfunded Altcoin"): sidebar
+$9,364.71, calculator "Balance (today, auto)" $9,418.04 — and $9,418.04 minus that day's
+real −$53.34 net P&L lands on $9,364.70/71, meaning the calculator wasn't reading a
+different (stale/cached) number, it was reading the *same* underlying data through a
+`WHERE` clause that excludes today.
+
+**Root cause.** `CalculatorController::autoRiskPreview()`/`::getRiskStatus()`
+(`includes/controllers/CalculatorController.php`) computed their displayed balance via
+`balanceAtDayStart($db, $challengeId, date('Y-m-d'))` → `helpers.php::challengeBalance()`
+with `trade_date < $today` — a real, deliberate function, added in v3.16.0 specifically so
+the **risk ladder's own tier** can't flip mid-session just because an earlier trade closed
+first the same day (see that section above). The bug: this same start-of-day figure was
+*also* reused as the trader-facing "Balance (today, auto)" label and as the basis for
+`risk_usd`/`position_usd`/`margin_usd`/`available_margin`/`room_usd`/`stops_to_fail` — none
+of which have any reason to lag behind today's own trades. The sidebar was never wrong;
+it's fed by the same `challengeBalance()` via `enrichChallenge()` (`helpers.php:145`) with
+no date filter at all, i.e. the true live balance.
+
+**Fix — split, not removed.** `balanceAtDayStart()` now feeds *only* `ladderTierForBalance()`
+and the ladder tiers' own `is_current` flag — exactly its original, correct purpose,
+unchanged. A second value, `challengeBalance($db, $challengeId)` (live, no date arg — the
+same call `enrichChallenge()` makes), now backs every dollar figure and the displayed
+balance. Both `autoRiskPreview()` and `getRiskStatus()` return `balance` (live) alongside
+`balance_at_day_start` (tier basis only) so the frontend can show both without conflating
+them. `pages/calculator.php`/`js/calculator.js` relabel the primary figure "Balance
+(current)" with a small "Start of day (tier basis)" line underneath, so the ladder's own
+stability mechanism (the reason a second, deliberately-lagging number exists at all) stays
+visible instead of silently disappearing into one ambiguous label.
+
+**Verified by hand**, not against a live database (unreachable from the environment this
+fix was built in): with the reported $9,418.04 start-of-day balance and −$53.34 today, the
+live balance re-derives to $9,364.70–71 — the one-cent spread is a rounding residual from
+re-adding two already-*displayed*, independently-rounded figures, the same class of gap
+already documented for this account's own numbers (see v3.13.2's "−120.07 vs −120.08"
+above) — the live controller always derives both values fresh from the same unrounded
+`SUM(net_pnl)`, so this residual doesn't occur in the running app. `risk_usd` at the 0.5%
+tier now computes as 0.5% of $9,364.71 ($46.82) instead of 0.5% of the stale $9,418.04
+($47.09).
+
+**Investigated, not carried into this fix (separate ticket, v3.21.8):** `date('Y-m-d')` in
+this same code path (and in `tradeLimitStatus()`) resolves in the server's own default PHP
+timezone, which has no explicit `date_default_timezone_set()` anywhere in this app and may
+not match the trader's real day boundary (Kigali, UTC+2, no DST) — `ReportCardController`
+already solved exactly this for itself with a fixed `Africa/Kigali` constant (see v3.18.0
+above) but nothing else in the app reuses it.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4237,7 +4296,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.20.3
+Current Version: v3.21.7
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

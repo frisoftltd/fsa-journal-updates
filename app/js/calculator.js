@@ -184,7 +184,13 @@ async function runCalcUpdate(){
     renderCalcStatus(status);
     renderLadderTiers(status.ladder_tiers);
     renderOpenPositions(status.open_positions);
-    document.getElementById('calc-balance-display').textContent = '$' + status.balance_at_day_start.toFixed(2);
+    // v3.22.0 — status.balance is now the live current balance (challengeBalance() with
+    // no date filter, same figure the sidebar shows); status.balance_at_day_start is kept
+    // only as the ladder's own tier basis, shown as a small secondary line so it's never
+    // mistaken for the trader's actual balance. See CalculatorController::getRiskStatus()
+    // for why these have to be two different numbers.
+    document.getElementById('calc-balance-display').textContent = '$' + status.balance.toFixed(2);
+    document.getElementById('calc-balance-day-start-display').textContent = 'Start of day (tier basis): $' + status.balance_at_day_start.toFixed(2);
     document.getElementById('calc-margin-in-use-display').textContent = '$' + status.margin_in_use.toFixed(2);
     document.getElementById('calc-available-margin-display').textContent = '$' + status.available_margin.toFixed(2);
     const currentTier = (status.ladder_tiers || []).find(t => t.is_current);

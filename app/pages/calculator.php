@@ -40,8 +40,14 @@
              outputs card. -->
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
           <div>
-            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Balance (today, auto)</div>
+            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Balance (current)</div>
             <div id="calc-balance-display" style="font-family:var(--font-head);font-size:16px">—</div>
+            <!-- v3.22.0 — the ladder's own tier is deliberately locked to the start-of-day
+                 balance for the whole session (so an earlier trade closing today can't
+                 flip which tier the NEXT one is measured against); shown small here so
+                 that's visible without it being mistaken for the trader's actual balance,
+                 which is the figure above. -->
+            <div id="calc-balance-day-start-display" style="font-size:10px;color:var(--text3);margin-top:2px">Start of day (tier basis): —</div>
           </div>
           <div>
             <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Risk % (ladder, auto)</div>

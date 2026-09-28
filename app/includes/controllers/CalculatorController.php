@@ -149,11 +149,22 @@ class CalculatorController {
 
         $entry = (isset($d['entry']) && $d['entry'] !== '') ? (float)$d['entry'] : null;
 
+        // v3.22.0 — split basis, see CLAUDE.md for the full incident this corrects.
+        // balanceAtDayStart() exists ONLY to pick a stable risk-ladder TIER for the whole
+        // session (v3.16.0's own reason: a trade closing earlier the same day shouldn't
+        // flip which tier the NEXT trade is measured against). It was also being reused,
+        // wrongly, as the basis for every dollar figure below and the "Balance" the
+        // trader actually sees — which meant a trade that closed today never moved the
+        // calculator's own numbers, even though the sidebar (fed by the same
+        // challengeBalance(), just without the date filter) updated correctly. The tier
+        // lookup keeps the start-of-day basis; every dollar amount now uses the live,
+        // current balance instead.
         $today = date('Y-m-d');
-        $balance = balanceAtDayStart($db, $challengeId, $today);
-        $riskPct = ladderTierForBalance($db, $challengeId, $balance);
+        $balanceAtDayStart = balanceAtDayStart($db, $challengeId, $today);
+        $riskPct = ladderTierForBalance($db, $challengeId, $balanceAtDayStart);
+        $currentBalance = challengeBalance($db, $challengeId);
 
-        $riskUsd = $riskPct !== null ? round($balance * $riskPct / 100, 2) : null;
+        $riskUsd = $riskPct !== null ? round($currentBalance * $riskPct / 100, 2) : null;
         $positionUsd = $riskUsd !== null ? round($riskUsd / ($stopPct / 100), 2) : null;
         $marginUsd = ($positionUsd !== null && $leverage) ? round($positionUsd / $leverage, 2) : null;
         $quantity = ($positionUsd !== null && $entry) ? round($positionUsd / $entry, 6) : null;
@@ -161,16 +172,17 @@ class CalculatorController {
         $mi = $db->prepare("SELECT COALESCE(SUM(planned_margin),0) FROM trades WHERE challenge_id=? AND result='Open'");
         $mi->execute([$challengeId]);
         $marginInUse = round((float)$mi->fetchColumn(), 2);
-        $availableMargin = round($balance - $marginInUse, 2);
+        $availableMargin = round($currentBalance - $marginInUse, 2);
         $marginOk = $marginUsd !== null ? ($marginUsd <= $availableMargin) : null;
 
         $failureBal = failureBalance($challenge);
-        $roomUsd = round($balance - $failureBal, 2);
+        $roomUsd = round($currentBalance - $failureBal, 2);
         $stopsToFail = ($riskUsd !== null && $riskUsd > 0) ? round($roomUsd / $riskUsd, 2) : null;
 
         jsonResponse([
             'challenge_id' => $challengeId,
-            'balance' => $balance,
+            'balance' => $currentBalance,
+            'balance_at_day_start' => $balanceAtDayStart,
             'risk_pct' => $riskPct,
             'stop_pct' => $stopPct,
             'leverage' => $leverage,
@@ -212,8 +224,14 @@ class CalculatorController {
             $challengeId = (int)$ch['id'];
         }
 
+        // v3.22.0 — same split as autoRiskPreview(): balanceToday (start-of-day) stays the
+        // ladder tier's own basis (is_current below), matching every other consumer of
+        // ladderTierForBalance(). available_margin and the "Balance" the trader sees are
+        // now the live current balance instead — see that method's own docblock and
+        // CLAUDE.md for the full incident.
         $today = date('Y-m-d');
         $balanceToday = balanceAtDayStart($db, $challengeId, $today);
+        $currentBalance = challengeBalance($db, $challengeId);
 
         // v3.17.0 — same tiers ladderTierForBalance() reads, exposed here so the
         // calculator page's Risk Rules panel can render them (replacing the three
@@ -249,12 +267,13 @@ class CalculatorController {
             ];
         }, $op->fetchAll());
         $marginInUse = round(array_sum(array_column($openPositions, 'planned_margin')), 2);
-        $availableMargin = round($balanceToday - $marginInUse, 2);
+        $availableMargin = round($currentBalance - $marginInUse, 2);
 
         $status = tradeLimitStatus($db, $challengeId);
 
         jsonResponse(array_merge($status, [
             'challenge_id' => $challengeId,
+            'balance' => $currentBalance,
             'balance_at_day_start' => $balanceToday,
             'ladder_tiers' => $tiers,
             'open_positions' => $openPositions,

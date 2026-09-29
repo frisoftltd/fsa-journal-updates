@@ -134,7 +134,18 @@ if ($mode === 'baseline' && !$blocked) {
             }
             foreach ($statements as $i => $statement) {
                 try {
-                    $db->exec($statement);
+                    // query(), not exec() -- exec() returns only an int/false, so a
+                    // statement that unexpectedly returns a resultset (the guarded-ALTER
+                    // pattern's own no-op fallback, "EXECUTE stmt" where the dynamically
+                    // prepared SQL is the literal 'SELECT 1', taken whenever a column
+                    // already exists on retry) has no handle to closeCursor() on and
+                    // leaves the connection with an unread result -- the second, separate
+                    // source of the SQLSTATE[HY000] 2014 crash documented in CLAUDE.md's
+                    // v3.21.11 section. query() always returns a real PDOStatement,
+                    // closed immediately below, regardless of whether this particular
+                    // statement happens to return rows.
+                    $s = $db->query($statement);
+                    $s->closeCursor();
                 } catch (PDOException $e) {
                     $failedStatement = ['index' => $i + 1, 'sql' => $statement];
                     $errorMessage = $e->getMessage();

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.10 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.21.11 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3363,6 +3363,68 @@ checking both directly on the server:**
 turn, per instruction — the four migrations still pending on live should now apply cleanly
 the next time `mode=run` is triggered, but that action itself is still Acrob's to take.
 
+### v3.21.11: A Second, Independent Unbuffered-Cursor Leak — the Guarded-ALTER Pattern's Own No-Op Branch
+
+**v3.21.10 wasn't sufficient.** After deploying it, `mode=status` loaded cleanly, but
+`mode=run` against the same four pending backtest migrations hit the identical
+`SQLSTATE[HY000]` 2014 error again — same call (`recordMigration()`'s `execute()`), just
+shifted a few lines by the earlier fix. This meant a second, separate leak existed
+somewhere between the now-closed `schema_migrations` cursor and `recordMigration()` itself
+— per Acrob's own instruction, this was traced as a full audit of every DB call on that
+path this time, not another single-line guess.
+
+**Every call in the `mode=run` path was checked against whether it can return a
+resultset:** `CREATE TABLE`/`ALTER TABLE` (DDL, no resultset), `SET @x = (SELECT ...)`
+(evaluated server-side, MySQL sends an OK packet, never a resultset, regardless of what
+the subquery selects), `PREPARE`/`DEALLOCATE PREPARE` (OK packet), `UPDATE` (affected-row
+count only), `recordMigration()`'s own `INSERT ... ON DUPLICATE KEY UPDATE` (DML, no
+resultset). All safe. **One shape wasn't: `EXECUTE stmt`.** Every guarded-ALTER migration
+in this project (the `information_schema`-check + `PREPARE`/`EXECUTE` pattern, standing
+convention since v3.20.3) writes its no-op fallback as a literal `'SELECT 1'`:
+```sql
+SET @add_col_sql = IF(@col_exists = 0, 'ALTER TABLE ... ADD COLUMN ...', 'SELECT 1');
+PREPARE add_col_stmt FROM @add_col_sql;
+EXECUTE add_col_stmt;
+```
+When the guard finds the column **already exists** — true on any retry of a migration
+that partially applied before an earlier crash, which is exactly the state all four
+pending files were in — `EXECUTE add_col_stmt` runs a genuine `SELECT 1` and the server
+returns a real one-row resultset. The per-statement loop ran every statement through
+`$db->exec($statement)` (`migrate.php`'s old line 137), and `PDO::exec()` returns only an
+`int|false` — there is no statement handle to call `closeCursor()` on, so a statement that
+unexpectedly returns rows has no way to be drained through that call. The result: an
+unread resultset left on the connection, surfaced only at the next operation that requires
+the connection idle — `recordMigration()`, again, for a completely different reason than
+v3.21.10's fix addressed.
+
+**Fix:** the per-statement loop now runs `$s = $db->query($statement); $s->
+closeCursor();` instead of `$db->exec($statement)`. `query()` always returns a real
+`PDOStatement` regardless of whether the statement it ran happens to return rows, so
+`closeCursor()` immediately after it is unconditionally safe and guards every statement
+shape in this loop — DDL, `SET`, `PREPARE`, `EXECUTE` (no-op or real), `DEALLOCATE`,
+`UPDATE` — uniformly, including any future statement shape a migration might use, without
+needing to special-case "is this the one that might return rows."
+
+**Not verified against the live MySQL 8.4 instance from this environment** (no DB access
+here) — the diagnosis is inferred from PDO/MySQL protocol semantics (an `EXECUTE` of a
+`SELECT`-shaped prepared statement is the only call in the entire path capable of
+returning a resultset) plus the fact that it exactly explains why the crash recurred at
+the same call site after the first, different leak was already closed. Flagged plainly
+rather than overstated, consistent with this file's own standing practice for anything
+this environment can't directly confirm.
+
+**`PDO::MYSQL_ATTR_USE_BUFFERED_QUERY => true` is being set directly in `includes/
+config.php` on the server, as the primary fix** — a connection-level setting that makes
+this entire class of bug (an unread/unclosed result blocking the next native prepared
+statement) structurally impossible for every query in the app, not just these two call
+sites. This release's `migrate.php` change is defense in depth, not a substitute: it
+closes the two specific leaks found across v3.21.10/v3.21.11 even if buffered mode is ever
+off for any reason, but a third, undiscovered leak elsewhere in the app would still need
+the connection-level fix to be safe. The two open items from v3.21.10 (confirming
+`MYSQL_ATTR_USE_BUFFERED_QUERY` and `ATTR_PERSISTENT` in `config.php`) are being resolved
+by this same server-side change — once confirmed, update those two bullets in the v3.21.10
+section above rather than leaving them as open questions indefinitely.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4463,7 +4525,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.10
+Current Version: v3.21.11
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

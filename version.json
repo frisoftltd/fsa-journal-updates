@@ -1,16 +1,34 @@
 {
-    "current_version": "3.21.8",
-    "release_date": "2026-09-28",
+    "current_version": "3.21.9",
+    "release_date": "2026-09-29",
     "changelog": [
-        "Timezone: tradeLimitStatus() and CalculatorController's three 'what day is it' call sites (autoRiskPreview(), getRiskStatus(), sizePreview()'s trade_date fallback) all used bare date('Y-m-d') -- the server's own default PHP timezone, which this app never sets explicitly (no date_default_timezone_set() anywhere), not necessarily the trader's real day boundary (Africa/Kigali, UTC+2, no DST). ReportCardController already solved exactly this for itself with a fixed Africa/Kigali constant (v3.18.0) but nothing else in the app reused it.",
-        "Added helpers.php::appTodayKigali() -- the same DateTime/timezone construction ReportCardController::today() already used, extracted so every 'today' computation shares one implementation instead of drifting independently. ReportCardController::today() now delegates to it; verified by hand that this is a pure refactor (identical output, same timezone name, same format) -- ReportCardController's own behavior is unchanged. tradeLimitStatus() and all three CalculatorController call sites now use the shared helper.",
-        "Verified the fix has real effect, not just a refactor: simulated 2026-09-27 23:30 UTC (= 2026-09-28 01:30 in Kigali, already past midnight there) -- a bare date('Y-m-d') under a UTC server default would say '2026-09-27' while the trader's own calendar day is already '2026-09-28'. This is exactly the boundary case flagged in the original diagnostic (a trade closed just after midnight Kigali time landing on the wrong side of 'today' for the risk ladder's start-of-day balance and the trade-limit counts)."
+        "CUMULATIVE MANIFEST — deliberate, not a mistake. Found while investigating why production showed the v3.21.8 Calculator fix only partially applied (available margin correct, balance label/value stale): updater.php's apply step does not replay version history — it fetches whichever version.json is current at GitHub HEAD and downloads only the files listed in THAT single manifest's own files array, then jumps local_version straight to it. Every release in this project has followed the 'only list files that changed in this specific release' convention (v3.21.7's own files array, for example, listed pages/calculator.php and js/calculator.js — but v3.21.8's did not, since nothing in those two files changed in v3.21.8 specifically). A server whose own Update Now click lands on a later manifest without ever having separately applied an intermediate one silently never receives that intermediate release's files — permanently, since no later manifest repeats them unless they happen to change again.",
+        "Audited every version manifest from v3.20.3 (the last version this project's own CLAUDE.md had actually recorded as 'current' before its own version-tracking went stale — see that file's v3.21.7 note) through v3.21.8 (this release's immediate predecessor). Cross-checked the resulting union against a direct `git diff --stat` between the same two points as an independent integrity check, not just trusting the manifests' own bookkeeping: the two lists matched exactly, 20 files, no gaps and no extras. Per file, which release first introduced it: css/style.css (v3.20.10), includes/backtest_engine.php (v3.20.10), includes/controllers/BacktestController.php (v3.20.6), includes/controllers/BacktestDrawingController.php (v3.21.0), includes/controllers/CalculatorController.php (v3.21.7), includes/controllers/ReportCardController.php (v3.21.8), includes/helpers.php (v3.21.8), includes/router.php (v3.20.6), index.php (v3.20.9), js/app.js (v3.20.11), js/backtest-drawings.js (v3.21.0), js/backtest.js (v3.20.5), js/calculator.js (v3.21.7), js/chart.js (v3.21.4), js/saved-backtests.js (v3.20.5), migrations/2026_09_26_0001_add_backtest_rewind_support.sql (v3.20.10), migrations/2026_09_26_0002_add_backtest_cursor_step_tf.sql (v3.20.11), migrations/2026_09_26_0003_create_backtest_drawings.sql (v3.21.0), pages/backtest.php (v3.20.6), pages/calculator.php (v3.21.7).",
+        "This release's own files array below is that full 20-file union, not a diff of what changed since v3.21.8 — deliberately, so the next Update Now click (regardless of which version the live server is actually sitting on right now, which wasn't confirmed before this release shipped — see CLAUDE.md) re-downloads everything in the audited range in one pass. Re-downloading a file whose content is already current on the server is a harmless no-op overwrite; the risk this release is guarding against is the opposite one. The three migration files are included so they land on disk for migrate.php to pick up — per standing instruction, migrate.php itself was NOT run as part of this turn, and none of these files were deployed by this session either.",
+        "No code changed in this release beyond version.json/CLAUDE.md themselves — every file in the union already carries its correct, current content from the releases that introduced it. This is a deploy-manifest correction, not a functional patch."
     ],
-    "release_notes": "No schema changes in this release -- nothing to migrate. Per instruction, nothing was deployed as part of this turn.",
+    "release_notes": "MANUAL DB STEP STILL REQUIRED, not run by this release: three tracked migrations are included in this manifest so they reach disk (2026_09_26_0001_add_backtest_rewind_support.sql, 2026_09_26_0002_add_backtest_cursor_step_tf.sql, 2026_09_26_0003_create_backtest_drawings.sql) -- after Update Now, run migrate.php?mode=status then mode=run if they haven't already been applied. Per instruction, nothing was deployed and migrate.php was not run as part of this turn.",
     "files": [
-        {"path": "includes/helpers.php", "critical": false},
+        {"path": "css/style.css", "critical": false},
+        {"path": "includes/backtest_engine.php", "critical": false},
+        {"path": "includes/controllers/BacktestController.php", "critical": false},
+        {"path": "includes/controllers/BacktestDrawingController.php", "critical": false},
         {"path": "includes/controllers/CalculatorController.php", "critical": false},
-        {"path": "includes/controllers/ReportCardController.php", "critical": false}
+        {"path": "includes/controllers/ReportCardController.php", "critical": false},
+        {"path": "includes/helpers.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "index.php", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "js/backtest-drawings.js", "critical": false},
+        {"path": "js/backtest.js", "critical": false},
+        {"path": "js/calculator.js", "critical": false},
+        {"path": "js/chart.js", "critical": false},
+        {"path": "js/saved-backtests.js", "critical": false},
+        {"path": "migrations/2026_09_26_0001_add_backtest_rewind_support.sql", "critical": false},
+        {"path": "migrations/2026_09_26_0002_add_backtest_cursor_step_tf.sql", "critical": false},
+        {"path": "migrations/2026_09_26_0003_create_backtest_drawings.sql", "critical": false},
+        {"path": "pages/backtest.php", "critical": false},
+        {"path": "pages/calculator.php", "critical": false}
     ],
     "db_migrations": []
 }

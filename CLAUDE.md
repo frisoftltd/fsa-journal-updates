@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.8 (this field was stale at v3.20.3 for the entire v3.20.x–v3.21.6 backtesting/drawing-tools series — see the documentation-gap note above §3A) |
+| Current Version | v3.21.9 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3224,6 +3224,61 @@ closes: a trade closed just after midnight Kigali time landing on the wrong side
 server's actual default PHP timezone is (no VPS access from this environment) — this fix
 makes the app's own "today" correct regardless of what that turns out to be.
 
+### v3.21.9: `updater.php` Doesn't Replay History — a Cumulative Manifest, and Why One Was Needed
+
+**Symptom:** after v3.21.7/v3.21.8 reportedly reached production, the Calculator showed a
+split result — available margin read the correct live balance, but the "Balance" field
+still showed the old value under the old "Balance (today, auto)" label. The repo was
+confirmed correct for both `pages/calculator.php` and `js/calculator.js` (the label and
+the JS field both read exactly as v3.21.7 shipped them), and cache-busting was confirmed
+working (`calculator` is in `index.php`'s versioned `$__jsModule` list) — so the gap
+wasn't in the source or the browser cache. It was in how the update actually got applied.
+
+**Root cause: `updater.php`'s `apply` action does not replay version history.** It fetches
+whichever `version.json` is current at GitHub HEAD and downloads only the files listed in
+*that one manifest's own* `files` array (`foreach ($remote['files'] as $file)`), then jumps
+`local_version` straight to the remote's. There is no per-version replay. Every release in
+this project has followed the "only list files that changed in this specific release"
+convention (stated in this file's own §18 template) — correct in isolation, but only safe
+if Update Now is clicked once per release, in order, never skipped. v3.21.7's manifest
+listed `pages/calculator.php`/`js/calculator.js`; v3.21.8's did not, because neither file
+changed in v3.21.8 itself. A server whose Update Now click landed on v3.21.8 without a
+separate, earlier click having already applied v3.21.7 would download
+`CalculatorController.php` (listed in *both* manifests) but never the other two — exactly
+the split symptom observed. This is a real, structural gap, not specific to the
+Calculator: **any file that changed only in a now-superseded, skipped release, and was
+never repeated in a later one, is silently never deployed no matter how many later updates
+run.**
+
+**Audit performed before shipping this release.** The live server's own `local_version`
+(visible on `updater.php`'s own page) was not confirmed at the time this was scoped — a
+real gap in the diagnostic, flagged rather than guessed past. In its absence, `v3.20.3`
+was used as the conservative floor: the last version this file's own "Current Version"
+header had actually recorded before it went stale for the entire v3.20.5–v3.21.6 series
+(corrected in v3.21.7, above). Every manifest from `v3.20.5` through `v3.21.8` was read
+directly from git (`git show <tag>:version.json`), and their `files` arrays unioned,
+tracking which release first introduced each path. That union was independently
+cross-checked against a plain `git diff --stat v3.20.3 HEAD` — if a file had ever been
+touched but its manifest entry omitted by mistake, this would have caught it as a
+mismatch. **The two lists matched exactly: 20 files, no gaps, no extras** — every
+manifest's own bookkeeping was correct in isolation; the only defect was that no single
+Update Now click had ever combined them.
+
+**This release's `files` array is that full 20-file union, deliberately, not a diff of
+what changed since v3.21.8.** Re-downloading a file whose content is already current on
+the server is a harmless no-op; the risk being guarded against is the opposite one — an
+intermediate release's file never landing at all. If the live server's true
+`local_version` turns out to be later than `v3.20.3` (i.e. some of this range was, in
+fact, already correctly applied), this manifest simply re-confirms those files rather than
+skipping anything that still needed it — safe either way, given the uncertainty about
+where the server actually was.
+
+**Not done here:** `updater.php` itself was not touched (explicit instruction — see the
+separate proposal for making it robust against skipped releases, drafted the same session
+but not code, pending its own decision). This release also does not confirm what the
+live server's `local_version` actually is post-deploy; that still needs a real `Check
+Update` click against `updater.php` to close the loop.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4324,7 +4379,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.8
+Current Version: v3.21.9
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

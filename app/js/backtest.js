@@ -295,6 +295,11 @@ async function openBacktestSession(id) {
     if (typeof resizeTvChart === 'function') resizeTvChart();
     // v3.21.0 — drawings are scoped per session; load them once the session itself is
     // confirmed to exist (refreshBtSession() already returned true above).
+    // v3.21.12 — this user's saved per-tool drawing defaults are user-scoped, not
+    // session-scoped, but are (re)loaded here too, once per session open, so a default
+    // saved or reset from a settings panel takes effect on the very next session opened
+    // rather than requiring a page reload.
+    if (typeof loadBtDrawingDefaults === 'function') await loadBtDrawingDefaults();
     if (typeof loadBtDrawings === 'function') await loadBtDrawings();
 }
 

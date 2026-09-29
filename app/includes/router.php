@@ -110,6 +110,10 @@ $routes = [
     'add_backtest_drawing'    => ['BacktestDrawingController', 'add'],
     'update_backtest_drawing' => ['BacktestDrawingController', 'update'],
     'delete_backtest_drawing' => ['BacktestDrawingController', 'delete'],
+    // Per-user, per-tool saved drawing defaults (v3.21.12) — "Save as default"/"Reset to default"
+    'get_drawing_defaults'    => ['BacktestDrawingController', 'getDefaults'],
+    'save_drawing_default'    => ['BacktestDrawingController', 'saveDefault'],
+    'reset_drawing_default'   => ['BacktestDrawingController', 'resetDefault'],
 ];
 
 if (!isset($routes[$action])) {

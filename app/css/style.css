@@ -480,6 +480,11 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-draw-popover-body input[type=checkbox]{width:14px;height:14px;flex:0 0 auto;accent-color:#2962ff}
 .bt-fib-levels{max-height:140px;overflow-y:auto;border-top:1px solid #232733;padding-top:6px;margin-top:2px}
 .bt-draw-popover-actions{display:flex;justify-content:space-between;margin-top:10px;padding-top:10px;border-top:1px solid #232733}
+/* v3.21.12 — "Save as default"/"Reset to default." Sits above the tool's own settings,
+   set off with the same divider style .bt-draw-popover-actions already uses below them,
+   so it reads as a distinct action row rather than another settings field. */
+.bt-draw-popover-template-row{display:flex;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #232733}
+.bt-draw-popover-template-row .btn{flex:1 1 auto}
 
 /* ── BACKTESTING SETUP FORM (Screen A) — grouped sections, centred ── */
 .bt-form-wrap{max-width:640px;margin:0 auto}

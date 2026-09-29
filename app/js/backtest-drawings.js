@@ -40,6 +40,13 @@ let btSelectedDrawingId = null;
 let btDragState = null;           // {drawingId, handleIndex|'move', startPoints, startMouse}
 let btMagnetEnabled = true;
 let btDrawRaf = null;             // requestAnimationFrame handle, for throttled redraws
+let btDrawingDefaults = {};       // {tool: settings}, this user's saved defaults — loaded once per session open (v3.21.12)
+
+// Tools that currently expose "Save as default"/"Reset to default" in their settings
+// panel (v3.21.12). Fib retracement only this release, per the briefing's own scope —
+// btTemplateRowHtml()/btMergedToolDefaults() are already generic by tool, so adding
+// another tool here later needs no further plumbing change.
+const BT_TEMPLATE_TOOLS = ['fib_retracement'];
 
 const BT_TOOL_DEFAULTS = {
     position_long:   { color: '#26a69a', rr_ratio: 3, rr_locked: true },
@@ -306,8 +313,71 @@ async function loadBtDrawings() {
     if (!btActiveSessionId) return;
     const res = await btApi(`get_backtest_drawings&session_id=${btActiveSessionId}`);
     btDrawings = (res && !res.error && Array.isArray(res)) ? res : [];
-    if (res && res.error) console.warn('[backtest-drawings] could not load drawings:', res.error);
+    if (res && res.error) {
+        console.warn('[backtest-drawings] could not load drawings:', res.error);
+        toast('Could not load drawings — ' + res.error, 'error');
+    }
     btScheduleRedraw();
+}
+/** This user's saved per-tool defaults — user-scoped, not session-scoped, but loaded
+ *  once per session open (alongside loadBtDrawings()) rather than once ever, so a
+ *  default saved/reset from a settings panel takes effect on every session opened after
+ *  that without needing a page reload in between. Failure degrades to "no saved
+ *  defaults" (every tool falls back to BT_TOOL_DEFAULTS alone via btMergedToolDefaults())
+ *  rather than blocking the session from opening at all. */
+async function loadBtDrawingDefaults() {
+    const res = await btApi('get_drawing_defaults');
+    if (res && res.error) {
+        console.warn('[backtest-drawings] could not load drawing defaults:', res.error);
+        toast('Could not load drawing defaults — ' + res.error, 'error');
+        btDrawingDefaults = {};
+        return;
+    }
+    btDrawingDefaults = (res && typeof res === 'object' && !Array.isArray(res)) ? res : {};
+}
+/** Deep-merges this user's saved default (if any) over the code's own BT_TOOL_DEFAULTS
+ *  for a tool. The saved default wins field-by-field, but any field the code defines
+ *  that the saved default predates (added to BT_TOOL_DEFAULTS after the user last saved)
+ *  still comes through from the code default rather than being silently dropped.
+ *
+ *  `levels` (fib only) is merged by `ratio`, not array index — a saved default is just
+ *  the settings object as it existed at save time, so a ratio added to BT_TOOL_DEFAULTS
+ *  later has to be matched by its own value to appear at all, not by array position
+ *  (which could point at an entirely different ratio between the two arrays). A ratio
+ *  that only exists in the saved default (removed from the code since) is deliberately
+ *  dropped, not resurrected — the code's own ratio list is authoritative for which levels
+ *  exist at all; the saved default only ever overrides enabled/color per ratio. */
+function btMergedToolDefaults(tool) {
+    const codeDefault = BT_TOOL_DEFAULTS[tool] || {};
+    const saved = btDrawingDefaults[tool];
+    if (!saved) return JSON.parse(JSON.stringify(codeDefault));
+    const merged = Object.assign(JSON.parse(JSON.stringify(codeDefault)), JSON.parse(JSON.stringify(saved)));
+    if (Array.isArray(codeDefault.levels)) {
+        merged.levels = codeDefault.levels.map(codeLevel => {
+            const savedLevel = (saved.levels || []).find(l => l.ratio === codeLevel.ratio);
+            return savedLevel ? Object.assign({}, codeLevel, savedLevel) : Object.assign({}, codeLevel);
+        });
+    }
+    return merged;
+}
+/** Saves this drawing's CURRENT settings as this user's default for its tool. Never
+ *  touches the drawing itself (no id/session_id in the request) — only the separate
+ *  per-user/per-tool row, per the briefing's own "existing drawings are never modified"
+ *  constraint. */
+async function btSaveDrawingDefault(d) {
+    const res = await btApi('save_drawing_default', 'POST', { tool: d.tool, settings: d.settings });
+    if (res && res.error) { toast('Could not save default — ' + res.error, 'error'); return; }
+    btDrawingDefaults[d.tool] = JSON.parse(JSON.stringify(d.settings));
+    toast('Saved as default for ' + d.tool.replace(/_/g, ' '));
+}
+/** Deletes the saved default for a tool. Never touches any existing drawing, including
+ *  the one whose settings panel this was clicked from — resetting the default only
+ *  changes what the NEXT new drawing of this tool starts with. */
+async function btResetDrawingDefault(tool) {
+    const res = await btApi('reset_drawing_default', 'POST', { tool });
+    if (res && res.error) { toast('Could not reset default — ' + res.error, 'error'); return; }
+    delete btDrawingDefaults[tool];
+    toast('Reset to code default for ' + tool.replace(/_/g, ' '));
 }
 async function btSaveNewDrawing(tool, points, settings) {
     const res = await btApi('add_backtest_drawing', 'POST', { session_id: btActiveSessionId, tool, points, settings });
@@ -621,7 +691,11 @@ function btComputeTpFromRatio(tool, entry, stop, ratio) {
 const BT_POSITION_TOOL_SPAN_BARS = 20;
 
 async function btFinalizeNewDrawing(tool, points) {
-    const settings = JSON.parse(JSON.stringify(BT_TOOL_DEFAULTS[tool] || {}));
+    // v3.21.12 — merged with this user's saved per-tool default (btMergedToolDefaults()),
+    // not the code default alone, so a customised fib (or any future opted-in tool)
+    // starts from what the trader actually saved, matching the TradingView behaviour the
+    // ticket named. Falls back to the plain code default when nothing's been saved.
+    const settings = btMergedToolDefaults(tool);
     if (tool === 'position_long' || tool === 'position_short') {
         settings.entry = points[0].price;
         settings.stop_loss = points[1].price;
@@ -740,7 +814,10 @@ function btRenderDrawings() {
     if (btDrawInProgress) {
         const isPosition = btDrawInProgress.tool === 'position_long' || btDrawInProgress.tool === 'position_short';
         const previewPoints = [btDrawInProgress.points[0], btDrawInProgress.previewPoint];
-        const preview = { tool: btDrawInProgress.tool, points: previewPoints, settings: JSON.parse(JSON.stringify(BT_TOOL_DEFAULTS[btDrawInProgress.tool] || {})) };
+        // v3.21.12 — same merged (code default + saved user default) settings as
+        // btFinalizeNewDrawing() uses, so the preview never shows something different from
+        // what actually gets saved a moment later.
+        const preview = { tool: btDrawInProgress.tool, points: previewPoints, settings: btMergedToolDefaults(btDrawInProgress.tool) };
         if (isPosition) {
             // Same fixed span used at finalize time (btFinalizeNewDrawing) -- shown live
             // while dragging so the preview never misleadingly renders a near-zero-width
@@ -1167,12 +1244,23 @@ function btDrawSettingsHtml(d) {
             <button type="button" id="bt-draw-popover-close-x" class="bt-draw-popover-close-x" title="Close">✕</button>
         </div>
         <div class="bt-draw-popover-body">
+            ${btTemplateRowHtml(d.tool)}
             ${colorWidthStyle}${extra}
             <div class="bt-draw-popover-actions">
                 <button type="button" id="bt-draw-delete-btn" class="btn btn-ghost btn-sm">Delete</button>
                 <button type="button" id="bt-draw-close-btn" class="btn btn-primary btn-sm">Done</button>
             </div>
         </div>`;
+}
+/** "Save as default"/"Reset to default" row — only for tools in BT_TEMPLATE_TOOLS (fib
+ *  only this release). Generic by tool so opting another tool in later is a one-line
+ *  change to that list, not new HTML/wiring. */
+function btTemplateRowHtml(tool) {
+    if (!BT_TEMPLATE_TOOLS.includes(tool)) return '';
+    return `<div class="bt-draw-popover-template-row">
+        <button type="button" id="bt-draw-save-default-btn" class="btn btn-ghost btn-sm">Save as default</button>
+        <button type="button" id="bt-draw-reset-default-btn" class="btn btn-ghost btn-sm">Reset to default</button>
+    </div>`;
 }
 function btWireDrawSettingsPopover(d) {
     const pop = document.getElementById('bt-draw-settings-popover');
@@ -1200,4 +1288,10 @@ function btWireDrawSettingsPopover(d) {
     });
     document.getElementById('bt-draw-delete-btn').onclick = () => btDeleteDrawing(d.id);
     document.getElementById('bt-draw-close-btn').onclick = () => btHideDrawSettingsPopover();
+
+    // v3.21.12 — only present when btTemplateRowHtml(d.tool) actually rendered the row.
+    const saveDefaultBtn = document.getElementById('bt-draw-save-default-btn');
+    if (saveDefaultBtn) saveDefaultBtn.onclick = () => btSaveDrawingDefault(d);
+    const resetDefaultBtn = document.getElementById('bt-draw-reset-default-btn');
+    if (resetDefaultBtn) resetDefaultBtn.onclick = () => btResetDrawingDefault(d.tool);
 }

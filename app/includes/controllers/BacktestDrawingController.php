@@ -4,6 +4,15 @@
  * Handles: get_backtest_drawings, add_backtest_drawing, update_backtest_drawing,
  *          delete_backtest_drawing
  *
+ * v3.21.12 also handles: get_drawing_defaults, save_drawing_default,
+ * reset_drawing_default — per-user, per-tool saved settings ("Save as default"/"Reset
+ * to default" on the fib retracement tool's settings panel this release). These read/
+ * write user_drawing_defaults, a separate table keyed on (user_id, tool) only — no
+ * session_id, since a default belongs to the user across every session, not one replay.
+ * Ownership here is direct (user_id IS the owner, no session to resolve through, unlike
+ * backtest_drawings below), so these three methods scope every query to $this->uid
+ * themselves rather than via assertOwnedSession().
+ *
  * Pure CRUD over backtest_drawings — no simulation logic, no lookahead implications.
  * Drawings are user annotations only and are never read by BacktestController's own
  * replay/order/challenge-rule engine, exactly per the briefing's own constraint.
@@ -124,6 +133,52 @@ class BacktestDrawingController {
         $row->execute([$id, $this->uid]);
         if (!$row->fetch()) jsonError('Drawing not found.');
         $this->db->prepare("DELETE FROM backtest_drawings WHERE id=?")->execute([$id]);
+        jsonResponse(['success' => true]);
+    }
+
+    /** {tool: settings} for every tool this user has ever saved a default for — omits
+     *  any tool with no saved row entirely, rather than a null/empty placeholder, so the
+     *  frontend's own merge (BT_TOOL_DEFAULTS[tool] deep-merged with this) can tell
+     *  "never saved" apart from "saved as empty" by simple key presence. */
+    public function getDefaults() {
+        $s = $this->db->prepare("SELECT tool, settings FROM user_drawing_defaults WHERE user_id=?");
+        $s->execute([$this->uid]);
+        $out = [];
+        foreach ($s->fetchAll() as $r) {
+            $out[$r['tool']] = json_decode($r['settings'], true) ?? [];
+        }
+        jsonResponse($out);
+    }
+
+    /** Writes this user's default settings for one tool. Never touches backtest_drawings
+     *  — an existing drawing is never modified by saving a default, per the briefing's own
+     *  constraint. AS new / new.settings (MySQL 8.0.19+ row-alias syntax, confirmed
+     *  supported on this project's live MySQL 8.4 host) is the non-deprecated replacement
+     *  for the old VALUES() function inside ON DUPLICATE KEY UPDATE. */
+    public function saveDefault() {
+        $d = jsonInput();
+        $tool = trim((string) ($d['tool'] ?? ''));
+        if (!in_array($tool, self::TOOLS, true)) jsonError('Invalid tool.');
+        $settings = $d['settings'] ?? null;
+        if (!is_array($settings) || empty($settings)) jsonError('Invalid settings.');
+
+        $this->db->prepare(
+            "INSERT INTO user_drawing_defaults (user_id, tool, settings) VALUES (?,?,?)
+             AS new ON DUPLICATE KEY UPDATE settings = new.settings"
+        )->execute([$this->uid, $tool, json_encode($settings)]);
+
+        jsonResponse(['success' => true]);
+    }
+
+    /** Deletes this user's saved default for one tool. A no-op, not an error, when no
+     *  default was saved for it — "reset to the code default" is correct either way, and
+     *  the row simply not existing yet is not a failure worth surfacing. Never touches
+     *  backtest_drawings — no existing drawing is affected. */
+    public function resetDefault() {
+        $d = jsonInput();
+        $tool = trim((string) ($d['tool'] ?? ''));
+        if (!in_array($tool, self::TOOLS, true)) jsonError('Invalid tool.');
+        $this->db->prepare("DELETE FROM user_drawing_defaults WHERE user_id=? AND tool=?")->execute([$this->uid, $tool]);
         jsonResponse(['success' => true]);
     }
 }

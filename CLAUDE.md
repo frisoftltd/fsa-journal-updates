@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.11 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.21.12 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3425,6 +3425,86 @@ the connection-level fix to be safe. The two open items from v3.21.10 (confirmin
 by this same server-side change — once confirmed, update those two bullets in the v3.21.10
 section above rather than leaving them as open questions indefinitely.
 
+### v3.21.12: Backtesting Drawing Tools — Per-User "Save as Default" for the Fib Tool
+
+**Problem.** Every new fib retracement was built purely from the hardcoded
+`BT_TOOL_DEFAULTS.fib_retracement` object in `js/backtest-drawings.js` — a trader's
+customised levels/colours lived only on the one drawing they were set on. Delete that
+drawing, or draw a new one, and the customisation is gone; the trader expects TradingView
+behaviour, where a new fib starts from a saved template. Confirmed on live before
+building anything: saving/editing/deleting an individual drawing all worked correctly
+(200s throughout, no errors) — this was a missing feature, not a bug in the existing CRUD.
+
+**Schema (`2026_09_29_0001_create_user_drawing_defaults.sql`):** `user_drawing_defaults`
+— one row per `(user_id, tool)` (`UNIQUE KEY uq_user_tool`), `tool` reusing
+`backtest_drawings.tool`'s exact ENUM literal, `settings` JSON holding a settings object
+only (never points/geometry — a default is "what a brand-new drawing should start with,"
+not a drawing of its own). Unlike `backtest_drawings.user_id` (no FK — ownership there
+resolves through the parent session's own FK to `users`, per that controller's own doc
+comment), this table has no session to resolve through, so `user_id` gets a direct FK to
+`users(id) ON DELETE CASCADE`, the same precedent `backtest_sessions.user_id` already
+uses. `CREATE TABLE IF NOT EXISTS` only — a brand-new table needs no guarded-ALTER
+pattern.
+
+**Controller (`BacktestDrawingController`):** three new methods, all scoped to
+`uid()` — `getDefaults()` (`{tool: settings}` for this user, omitting any tool with no
+saved row rather than a null placeholder), `saveDefault()` (`INSERT ... AS new ON
+DUPLICATE KEY UPDATE settings = new.settings` — MySQL 8.0.19+ row-alias syntax,
+deliberately not the older `VALUES()` function MySQL 8.0.20+ deprecates; confirmed this
+project's live database is real MySQL 8.4, not MariaDB, per §1A, so this syntax is safe
+to rely on), `resetDefault()` (a plain `DELETE`, a no-op rather than an error when no
+default was ever saved for that tool). Neither `saveDefault()` nor `resetDefault()`
+references `backtest_drawings` at all — structurally incapable of touching an existing
+drawing, satisfying the briefing's own "existing drawings are never modified" constraint
+by construction rather than by a runtime check.
+
+**Frontend (`js/backtest-drawings.js`):** `loadBtDrawingDefaults()` loads this user's
+saved defaults once per session open (`openBacktestSession()`, `js/backtest.js`,
+alongside the existing `loadBtDrawings()`) — user-scoped, not session-scoped, but reloaded
+per session open anyway so a save/reset takes effect on the next session opened without
+needing a page reload. `btMergedToolDefaults(tool)` deep-merges the code's own
+`BT_TOOL_DEFAULTS[tool]` with the saved default (saved values win field-by-field; any
+field the code defines that predates the saved default still comes through, never
+silently dropped) — fib's `levels` array is merged **by `ratio`, not array index**,
+specifically so a ratio added to `BT_TOOL_DEFAULTS` after a user last saved their default
+still appears for them, and a ratio that only exists in an old saved default (removed from
+the code since) is deliberately not resurrected. Both `btFinalizeNewDrawing()` (what
+actually gets saved) and the in-progress drag preview (`btRenderDrawings()`) call the same
+merge function, so the preview can never show something different from what the save
+actually produces.
+
+**UI:** a Template row (`btTemplateRowHtml()`) with "Save as default"/"Reset to default"
+buttons, added to the fib settings panel only, gated by a `BT_TEMPLATE_TOOLS` list —
+generic by tool by design (per the briefing's own instruction), so opting another tool in
+later is a one-line addition to that list, not new plumbing. Both buttons toast on
+success or error (`btSaveDrawingDefault()`/`btResetDrawingDefault()`).
+
+**Also fixed:** `loadBtDrawings()` previously only logged a load failure to
+`console.warn` — a real "why is nothing showing" gap for anyone not watching devtools.
+Now also shows a toast, matching every other failure path in this file.
+
+**Verified (code-level trace, not a live browser session — no browser/DB access from
+this environment, same standing limitation as every other UI-only verification in this
+file):**
+1. `saveDefault()`'s `INSERT ... AS new ON DUPLICATE KEY UPDATE` writes exactly one row
+   per `(user_id, tool)`, confirmed against the `UNIQUE KEY`.
+2. `btFinalizeNewDrawing()` and the preview in `btRenderDrawings()` both call
+   `btMergedToolDefaults(tool)` — traced both call sites to confirm neither still
+   references the old bare `BT_TOOL_DEFAULTS[tool]`.
+3. `loadBtDrawingDefaults()` runs on every `openBacktestSession()`, including a resumed
+   session after a reload (`js/app.js`'s hash-restore path calls the same function) — a
+   saved default is not session-local, so it survives a reload by construction.
+4. `resetDefault()`'s `DELETE FROM user_drawing_defaults WHERE user_id=? AND tool=?` has
+   no reference to `backtest_drawings` anywhere in the method — an existing fib is
+   structurally unreachable from this code path.
+5. `getDefaults()`'s query is `WHERE user_id=?` (`$this->uid`, from the session) — a
+   second user has no row at all and `btMergedToolDefaults()` falls back to the pure code
+   default when `btDrawingDefaults[tool]` is undefined.
+
+Acrob still needs to click through the actual five-step verification list in a real
+browser against live once this deploys and its migration runs — this trace confirms the
+code does what it's supposed to, not that it renders/behaves correctly on screen.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4525,7 +4605,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.11
+Current Version: v3.21.12
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

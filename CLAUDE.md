@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.9 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.21.10 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3279,6 +3279,90 @@ but not code, pending its own decision). This release also does not confirm what
 live server's `local_version` actually is post-deploy; that still needs a real `Check
 Update` click against `updater.php` to close the loop.
 
+### v3.21.10: `migrate.php`'s Own Unbuffered-Cursor Bug, Plus a Related Rollback-Path Defect
+
+**Symptom, from the live error log:** two separate `mode=run` attempts against the four
+still-pending backtest migrations (`2026_09_25_0002` through `2026_09_26_0003`) both
+fataled with an uncaught `PDOException SQLSTATE[HY000]`, error 2014, "Cannot execute
+queries while other unbuffered queries are active" — once inside `recordMigration()`'s
+`PDOStatement->execute()` (`migrate.php:182`), once inside `PDO->rollBack()`
+(`migrate.php:145`), on two different attempts.
+
+**Root cause.** `migrate.php`'s `$stmt = $db->query("SELECT * FROM schema_migrations")`
+(the tracking-table read done once, unconditionally, before any mode branches) was never
+`closeCursor()`'d. `fetchAll()` drains the row data into PHP arrays, but the cursor itself
+stayed marked active on the connection for the rest of the request — the textbook trigger
+for MySQL error 2014. Every statement inside the `mode=run` loop runs via plain
+`$db->exec($statement)`, which tolerated the stale cursor (dozens of `CREATE`/`ALTER`/
+`SET`/`PREPARE`/`EXECUTE` statements all ran fine first) — the first thing in the whole
+request that isn't a plain `exec()` is `recordMigration()`'s own `$db->prepare(...)->
+execute(...)`, a genuine native prepared statement, and that's exactly where the first
+log entry died. `PDO::rollBack()` is a transaction-control call on the same connection and
+hit the identical stale cursor on the second attempt. **Fix:** one line, `$stmt->
+closeCursor();` immediately after the `fetchAll()` loop.
+
+**A second, independent bug, found while checking whether `rollBack()` itself was safe.**
+`containsDdl()` decided whether a migration needed `beginTransaction()`/`commit()`/
+`rollBack()` at all by checking each *split statement's own leading token* for `CREATE|
+ALTER|DROP|RENAME|TRUNCATE`. That check structurally cannot see a DDL keyword that only
+exists **inside a quoted string handed to `PREPARE`** — which is exactly the shape of
+every conditional `ALTER TABLE` in this project since the `information_schema`-check +
+`PREPARE`/`EXECUTE` pattern became the standing convention (v3.20.3, §3A step 2a). Two of
+the four pending files (`2026_09_25_0002_add_backtest_session_name.sql`,
+`2026_09_26_0001_add_backtest_rewind_support.sql`) are built *entirely* from that pattern
+— every statement is `SET`/`PREPARE`/`EXECUTE`/`DEALLOCATE`, with no bare `ALTER TABLE ...`
+statement anywhere — so both were misclassified as pure DML, wrongly wrapped in a
+transaction that protects nothing (MySQL DDL auto-commits regardless of the wrapper), and
+that's precisely what put `rollBack()` on the failure path in the second log entry above.
+**Fix:** `containsDdl()` now scans the whole comment-stripped migration text (all split
+statements joined, unanchored keyword search) instead of anchoring to each statement's own
+prefix. **Verified against all 38 existing migration files with a standalone script before
+shipping:** only the two files named above flip from DML to DDL under the new check; every
+other file — including the three other pending ones, which already contained a literal
+`ALTER`/`CREATE` statement — classifies identically to before.
+
+**Resolving item 4 from the original investigation (was rollback leaving migrations
+half-applied?):** no, not for these files specifically, and not because of anything in this
+fix. MySQL's implicit commit on every DDL statement already meant the transaction wrapper
+around a DDL-containing migration protected nothing, wrapper-bug or not — this file's own
+§3A has documented that exact limitation since v3.7.0 ("DDL commits implicitly... there is
+no rollback"). The real cost of the crash was diagnostic, not data-corruption: the uncaught
+exception skipped `recordMigration()` and `renderReport()` entirely, so no `failed` row was
+ever written to `schema_migrations` and the operator got a blank 500 instead of a report
+naming the failing statement. Both bugs fixed here remove that crash; they don't change
+what was already true about DDL migrations not being transactional.
+
+**Two items flagged, not fixed here — `includes/config.php` is never committed to this
+repo (§13 rule 4), so neither is checkable or editable from this environment. Acrob is
+checking both directly on the server:**
+
+1. **Is `PDO::MYSQL_ATTR_USE_BUFFERED_QUERY` explicitly disabled?** PDO's own default for
+   this driver is buffered (`true`) — the 2014 error is only reproducible at all if
+   something in `config.php`'s PDO constructor options explicitly set this to `false`
+   (plausibly for the candles pipeline's large `SELECT`s). Grep for it:
+   ```
+   grep -n "MYSQL_ATTR_USE_BUFFERED_QUERY" includes/config.php
+   ```
+   The `migrate.php` fix above works regardless of what this is set to — but if it's
+   explicitly `false`, every other `$db->query()` call anywhere in this app that's ever
+   left un-`closeCursor()`'d carries the same latent 2014 risk, not just this file.
+2. **Is `PDO::ATTR_PERSISTENT` set to `true`?** Flagged as an open risk for any *future*
+   migration that's genuinely DML-only (not DDL): on a normal, non-persistent connection, a
+   fatal PHP error tears down the DB connection, and MySQL auto-rolls-back any transaction
+   still open on disconnect — so even a failed, uncaught `rollBack()` doesn't leave a real
+   DML transaction dangling. A persistent connection would survive the PHP-level crash and
+   could leave that transaction open on the MySQL side across requests. Grep for it:
+   ```
+   grep -n "ATTR_PERSISTENT" includes/config.php
+   ```
+   Report both results back so this section can be closed out with a confirmed answer
+   instead of an open question.
+
+**Shipped this release:** the `closeCursor()` fix and the broadened `containsDdl()` in
+`migrate.php` only. No database was touched and `mode=run` was not executed as part of this
+turn, per instruction — the four migrations still pending on live should now apply cleanly
+the next time `mode=run` is triggered, but that action itself is still Acrob's to take.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4379,7 +4463,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.9
+Current Version: v3.21.10
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

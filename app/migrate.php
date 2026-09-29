@@ -64,6 +64,10 @@ $stmt = $db->query("SELECT * FROM schema_migrations");
 foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
     $rowsByFile[$row['filename']] = $row;
 }
+// Without this, the cursor stays open for the rest of the request and the first
+// real prepared-statement execute() after it (recordMigration(), or a rollBack())
+// dies with SQLSTATE[HY000] 2014 "unbuffered queries are active" -- see CLAUDE.md.
+$stmt->closeCursor();
 
 $mismatches = []; // filename => [expected, actual]
 $pending    = []; // filename => full path
@@ -239,14 +243,20 @@ function splitSqlStatements(string $sql): array
     return $statements;
 }
 
+/**
+ * Scans the whole (comment-stripped) migration text for a DDL keyword -- not just
+ * each split statement's own leading token. A migration built entirely from the
+ * information_schema-check + PREPARE/EXECUTE guarded-ALTER pattern (CLAUDE.md §3A)
+ * never has a bare "ALTER TABLE ..." statement; the real ALTER text only exists
+ * inside a quoted string assigned to a variable for PREPARE. The old anchored
+ * check (`^\s*(CREATE|ALTER|...)`) missed that entirely and classified such a
+ * migration as pure DML, which wrongly wrapped it in beginTransaction()/rollBack()
+ * for no benefit (DDL auto-commits regardless) and left rollBack() reachable on
+ * failure.
+ */
 function containsDdl(array $statements): bool
 {
-    foreach ($statements as $statement) {
-        if (preg_match('/^\s*(CREATE|ALTER|DROP|RENAME|TRUNCATE)\b/i', $statement)) {
-            return true;
-        }
-    }
-    return false;
+    return (bool) preg_match('/\b(CREATE|ALTER|DROP|RENAME|TRUNCATE)\b/i', implode("\n", $statements));
 }
 
 function renderReport(array $report): void

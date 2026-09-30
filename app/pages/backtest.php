@@ -57,10 +57,29 @@
       </div>
 
       <div class="card form-section">
-        <div class="card-title">Risk</div>
-        <div class="form-grid-2" style="margin-bottom:0">
-          <div class="form-group"><label>Risk % per Trade</label><input type="number" id="bt-setup-risk-pct" value="1" step="0.1" min="0.01" max="100"></div>
-          <div class="form-group"><label>Fee Rate % per Fill</label><input type="number" id="bt-setup-fee-rate" value="0.055" step="0.001" min="0"></div>
+        <div class="card-title">Risk &amp; Leverage</div>
+        <div class="form-grid-2" style="margin-bottom:14px">
+          <div class="form-group"><label>Fee Rate % per Fill (entry &amp; exit)</label><input type="number" id="bt-setup-fee-rate" value="0.04" step="0.001" min="0"></div>
+          <div class="form-group"><label>Default Leverage</label>
+            <select id="bt-setup-leverage">
+              <option value="1">1×</option><option value="2">2×</option><option value="3">3×</option>
+              <option value="5" selected>5×</option><option value="10">10×</option><option value="20">20×</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:14px">
+          <label><input type="checkbox" id="bt-setup-flat-risk" style="width:auto;margin-right:6px" onchange="onBtFlatRiskToggle()">Flat risk % per trade (skip the ladder below)</label>
+        </div>
+        <div class="form-group" id="bt-setup-flat-risk-row" style="margin-bottom:14px">
+          <label>Risk % per Trade</label><input type="number" id="bt-setup-risk-pct" value="1" step="0.1" min="0.01" max="100">
+        </div>
+        <div id="bt-setup-ladder-wrap">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <label style="margin:0">Risk Ladder (% of starting balance → % risk per trade)</label>
+            <button type="button" class="btn btn-ghost btn-sm" id="bt-setup-ladder-prefill-btn" onclick="onBtLadderPrefill()" disabled>Prefill from challenge</button>
+          </div>
+          <div id="bt-setup-ladder-rows"></div>
+          <div style="font-size:11px;color:var(--text3);margin-top:4px">Tiers are % of THIS session's own starting balance below — not absolute dollars, since starting balance varies per session. Top tier's upper bound is always "and above."</div>
         </div>
       </div>
 

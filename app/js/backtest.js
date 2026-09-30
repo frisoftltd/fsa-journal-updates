@@ -155,8 +155,99 @@ function escapeHtml(s) {
 }
 
 // ── SETUP FORM (Screen A) ────────────────────────────────
+// v3.22.0 — risk ladder default, mirroring BacktestController::DEFAULT_RISK_LADDER
+// (PHP) exactly: >=95% starting balance -> 1.0% risk, 92.5-95% -> 0.5%, <92.5% -> 0.25%.
+// Percentages of THIS SESSION's own starting_balance, not absolute dollars -- see the
+// 2026_09_30_0001 migration's own doc comment for why a %-based ladder is the only
+// representation that stays meaningful across sessions with different starting balances.
+const BT_DEFAULT_RISK_LADDER = [
+    { lower_pct: 0,    upper_pct: 92.5, risk_pct: 0.25 },
+    { lower_pct: 92.5, upper_pct: 95,   risk_pct: 0.5 },
+    { lower_pct: 95,   upper_pct: null, risk_pct: 1.0 },
+];
+// Mirrors BacktestController::ALLOWED_LEVERAGES (PHP) exactly — the setup form's
+// leverage <select> options and the order ticket's own dropdown (v3.22.1) are both
+// built from this same list.
+const BT_ALLOWED_LEVERAGES = [1, 2, 3, 5, 10, 20];
+/** Renders exactly 3 editable rows -- the ladder is always exactly 3 tiers, matching the
+ *  server's own validateRiskLadder() (BacktestController.php), which rejects anything
+ *  else and falls back to the coded default. The last row's Upper input is always
+ *  disabled/blank ("and above") -- the top tier never has an upper bound, structurally,
+ *  not just by convention. */
+function btRenderLadderRows(tiers) {
+    const wrap = document.getElementById('bt-setup-ladder-rows');
+    wrap.innerHTML = tiers.map((t, i) => {
+        const isLast = i === tiers.length - 1;
+        return `<div class="form-grid-2" data-ladder-row="${i}" style="margin-bottom:6px;gap:8px;grid-template-columns:1fr 1fr 1fr">
+            <input type="number" class="bt-ladder-lower" value="${t.lower_pct}" step="0.1" min="0" max="100" title="Lower bound (% of starting balance)">
+            <input type="number" class="bt-ladder-upper" value="${t.upper_pct === null || t.upper_pct === undefined ? '' : t.upper_pct}" step="0.1" min="0" max="100" placeholder="and above" ${isLast ? 'disabled' : ''} title="Upper bound, blank/disabled = and above">
+            <input type="number" class="bt-ladder-risk" value="${t.risk_pct}" step="0.01" min="0.01" max="100" title="Risk % at this tier">
+        </div>`;
+    }).join('');
+}
+/** Reads whatever is currently in the 3 rows back into the same {lower_pct, upper_pct,
+ *  risk_pct} shape btRenderLadderRows() renders from — the last row's upper_pct is
+ *  always sent as null regardless of its (disabled) input value, matching the render
+ *  side exactly. */
+function btReadLadderRows() {
+    const rows = Array.from(document.querySelectorAll('#bt-setup-ladder-rows [data-ladder-row]'));
+    return rows.map((row, i) => {
+        const isLast = i === rows.length - 1;
+        const upperRaw = row.querySelector('.bt-ladder-upper').value;
+        return {
+            lower_pct: parseFloat(row.querySelector('.bt-ladder-lower').value),
+            upper_pct: (isLast || upperRaw === '') ? null : parseFloat(upperRaw),
+            risk_pct: parseFloat(row.querySelector('.bt-ladder-risk').value),
+        };
+    });
+}
+/** Flat risk % and the tiered ladder are mutually exclusive DISPLAYS, not mutually
+ *  exclusive DATA — both stay in the DOM (never removed/disabled) so toggling back and
+ *  forth doesn't lose whatever the trader already typed into either one. createBacktest
+ *  Session() always reads and sends both; the server decides which one is actually
+ *  authoritative from use_flat_risk. Unchecked (the HTML default) means the ladder is
+ *  active for a brand-new session -- per the briefing, the ladder is the new default
+ *  behavior, flat is the explicit opt-back-to-old-behavior toggle. */
+function onBtFlatRiskToggle() {
+    const flat = document.getElementById('bt-setup-flat-risk').checked;
+    document.getElementById('bt-setup-flat-risk-row').style.display = flat ? '' : 'none';
+    document.getElementById('bt-setup-ladder-wrap').style.display = flat ? 'none' : '';
+}
+/** Converts the selected challenge's OWN live risk_ladder_tiers (absolute dollar
+ *  bounds, get_risk_status's own ladder_tiers field) into % of that same challenge's
+ *  starting_balance, then renders them into the 3 ladder rows -- same conversion
+ *  principle onBtPrefillChange() already uses for daily_loss_limit -> daily_drawdown_pct
+ *  a few lines below. Every field stays editable afterward, same as every other prefill
+ *  in this form. get_risk_status accepts challenge_id directly (CalculatorController::
+ *  getRiskStatus()) -- no new backend endpoint was needed for this. */
+async function onBtLadderPrefill() {
+    const raw = document.getElementById('bt-setup-prefill').value;
+    if (!raw) return;
+    let ch; try { ch = JSON.parse(raw); } catch (e) { return; }
+    if (!ch.id || !ch.starting_balance) return;
+    const res = await btApi(`get_risk_status&challenge_id=${ch.id}`);
+    if (res && res.error) { toast('Could not load that challenge\'s risk ladder — ' + res.error, 'error'); return; }
+    const liveTiers = Array.isArray(res.ladder_tiers) ? res.ladder_tiers : [];
+    if (!liveTiers.length) { toast('That challenge has no risk ladder configured.', 'error'); return; }
+    const converted = liveTiers.map(t => ({
+        lower_pct: +(t.lower_balance / ch.starting_balance * 100).toFixed(2),
+        upper_pct: t.upper_balance !== null ? +(t.upper_balance / ch.starting_balance * 100).toFixed(2) : null,
+        risk_pct: t.risk_pct,
+    }));
+    // The server's own validateRiskLadder() requires exactly 3 tiers or it silently
+    // falls back to the coded default -- a live challenge's ladder could in principle
+    // have a different count (risk_ladder_tiers has no such constraint), so this is
+    // checked here, with a clear message, rather than letting a real prefill silently
+    // turn into the coded default with no explanation.
+    if (converted.length !== 3) { toast(`That challenge's ladder has ${converted.length} tiers — this form needs exactly 3. Not prefilled.`, 'error'); return; }
+    btRenderLadderRows(converted);
+    toast('Ladder prefilled from ' + ch.name);
+}
+
 async function populateBtSetupForm() {
     document.getElementById('bt-setup-error').textContent = '';
+    btRenderLadderRows(BT_DEFAULT_RISK_LADDER);
+    onBtFlatRiskToggle(); // sets initial flat-row/ladder-wrap visibility to match the checkbox's own (unchecked -> ladder) default state
     const symSel = document.getElementById('bt-setup-symbol');
     symSel.innerHTML = '<option>Loading…</option>';
 
@@ -231,6 +322,13 @@ async function onBtSetupPairChange() {
 }
 function onBtPrefillChange() {
     const raw = document.getElementById('bt-setup-prefill').value;
+    // v3.22.0 — the ladder's own "Prefill from challenge" button (a separate action,
+    // since a challenge's ladder is fetched via its own API call rather than already
+    // being embedded in this dropdown's JSON like the other fields below) only makes
+    // sense once a real challenge is selected -- kept in sync with this dropdown on
+    // every change, including back to "— Custom —", so it can't stay stuck enabled
+    // after the selection is cleared.
+    document.getElementById('bt-setup-ladder-prefill-btn').disabled = !raw;
     if (!raw) return;
     let ch; try { ch = JSON.parse(raw); } catch (e) { return; }
     if (ch.starting_balance) document.getElementById('bt-setup-balance').value = ch.starting_balance;
@@ -238,6 +336,12 @@ function onBtPrefillChange() {
     if (ch.daily_loss_limit && ch.starting_balance) document.getElementById('bt-setup-daily-dd').value = (ch.daily_loss_limit / ch.starting_balance * 100).toFixed(2);
     if (ch.max_drawdown_pct) document.getElementById('bt-setup-max-dd').value = ch.max_drawdown_pct;
     if (ch.drawdown_type) document.getElementById('bt-setup-dd-type').value = ch.drawdown_type;
+    // v3.22.0 — only applied when the challenge's own default_leverage is both set and
+    // one of the six values this form's dropdown actually offers; BT_ALLOWED_LEVERAGES
+    // mirrors BacktestController::ALLOWED_LEVERAGES (PHP) exactly.
+    if (ch.default_leverage && BT_ALLOWED_LEVERAGES.includes(Math.round(ch.default_leverage))) {
+        document.getElementById('bt-setup-leverage').value = String(Math.round(ch.default_leverage));
+    }
     // Every field stays editable afterward (per the briefing) — this only ever copies
     // values in once, on selection; nothing here re-links the session to this challenge.
 }
@@ -253,6 +357,14 @@ async function createBacktestSession() {
         start_date: document.getElementById('bt-setup-start-date').value,
         risk_pct: document.getElementById('bt-setup-risk-pct').value,
         fee_rate_pct: document.getElementById('bt-setup-fee-rate').value,
+        // v3.22.0 — both the flat risk_pct above and the tiered risk_ladder below are
+        // always sent together, regardless of which one is currently displayed
+        // (onBtFlatRiskToggle() only hides the other, never removes/disables it) — the
+        // server decides which is authoritative from use_flat_risk, so switching the
+        // toggle back and forth in this form before submitting never loses either value.
+        default_leverage: document.getElementById('bt-setup-leverage').value,
+        use_flat_risk: document.getElementById('bt-setup-flat-risk').checked,
+        risk_ladder: btReadLadderRows(),
         blind_mode: document.getElementById('bt-setup-blind').checked,
         starting_balance: document.getElementById('bt-setup-balance').value,
         profit_target_pct: document.getElementById('bt-setup-target').value,

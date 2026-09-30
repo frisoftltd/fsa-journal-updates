@@ -28,8 +28,32 @@ class BacktestController {
     private $db;
     private $uid;
 
-    // Bybit's own standard taker fee, used as this app's default fee_rate_pct.
-    const DEFAULT_FEE_RATE_PCT = 0.0550;
+    // v3.22.0 — was Bybit's generic 0.0550 (an unvalidated guess made when this column
+    // was first added). Replaced with the calibrated, live-verified rate: 0.0400%, from
+    // 64 real Bitfunded fills on challenge 6 (source='import'), where min=max=avg to
+    // four decimal places — no maker/taker split exists on this account, confirmed by
+    // hand against trade 123's own recorded fee. See CLAUDE.md's v3.22.0 section for the
+    // full calibration. Only affects a brand-new session's own default — an existing
+    // session's already-stored fee_rate_pct is never touched by this constant.
+    const DEFAULT_FEE_RATE_PCT = 0.0400;
+    // v3.22.0 — the order ticket's leverage dropdown (v3.22.1) offers exactly these six
+    // multiples; a session's own default_leverage must be one of them, and this is the
+    // single source of truth both createSession() and any future validation check
+    // against. 5x (the DB column's own DEFAULT) is the mid-point of this list, not a
+    // specially significant number.
+    const ALLOWED_LEVERAGES = [1, 2, 3, 5, 10, 20];
+    // v3.22.0 — the coded fallback ladder, applied whenever a session is created without
+    // a valid risk_ladder payload (never an error — same "fall back to a sane default"
+    // treatment this method already gives drawdown_type). Percentages of the SESSION's
+    // OWN starting_balance, not absolute dollars — see the migration's own doc comment
+    // for why. Matches the briefing's own stated default: >=95% starting balance -> 1.0%
+    // risk, 92.5-95% -> 0.5%, <92.5% -> 0.25% (on a $10k account, the same 9,500/9,250
+    // bands the live risk_ladder_tiers table already uses for challenge 6).
+    const DEFAULT_RISK_LADDER = [
+        ['lower_pct' => 0,    'upper_pct' => 92.5, 'risk_pct' => 0.25],
+        ['lower_pct' => 92.5, 'upper_pct' => 95,   'risk_pct' => 0.5],
+        ['lower_pct' => 95,   'upper_pct' => null, 'risk_pct' => 1.0],
+    ];
     // v3.20.9 — how many bars of real history the setup form defaults Start Date to
     // being *behind*, so a session created without touching the field still opens with
     // genuine lead-in chart context (js/backtest.js's BT_LEAD_IN_BARS uses the same
@@ -196,6 +220,24 @@ class BacktestController {
         if ($riskPct <= 0 || $riskPct > 100) jsonError('Risk % must be between 0 and 100.');
         $feeRatePct = num($d['fee_rate_pct'] ?? self::DEFAULT_FEE_RATE_PCT);
         if ($feeRatePct < 0) jsonError('Fee rate cannot be negative.');
+
+        // v3.22.0 — leverage/ladder/flat-risk. Invalid or omitted input falls back to a
+        // sane coded default rather than rejecting the request outright — the same
+        // treatment drawdown_type already gets a few lines below, for the same reason:
+        // these are optional session-setup fields, not measurements where a silent
+        // default would hide something real (contrast trades.session/r_multiple, where
+        // NULL-means-unknown is the rule specifically because a wrong guess there would
+        // misrepresent a fact about an actual trade).
+        $defaultLeverage = (int) ($d['default_leverage'] ?? 5);
+        if (!in_array($defaultLeverage, self::ALLOWED_LEVERAGES, true)) $defaultLeverage = 5;
+        // Missing entirely -> 1 (flat), matching the DB column's own DEFAULT -- a
+        // request that says nothing about risk mode gets the historically-existing
+        // behavior. The setup form itself always sends an explicit value either way (its
+        // own checkbox default determines what a NEW session actually gets day-to-day);
+        // this branch only matters for a malformed/direct API call.
+        $useFlatRisk = array_key_exists('use_flat_risk', $d) ? (!empty($d['use_flat_risk']) ? 1 : 0) : 1;
+        $riskLadder = $this->validateRiskLadder($d['risk_ladder'] ?? null);
+
         $startingBalance = num($d['starting_balance'] ?? 0);
         if ($startingBalance <= 0) jsonError('Account size must be greater than 0.');
         $profitTargetPct = num($d['profit_target_pct'] ?? 0);
@@ -215,15 +257,43 @@ class BacktestController {
         // advance()/rewind() explicitly updating this column alongside the cursor.
         $this->db->prepare(
             "INSERT INTO backtest_sessions
-                (user_id, session_name, symbol, replay_timeframe, start_time, replay_cursor_ms, cursor_step_tf, risk_pct, fee_rate_pct, blind_mode,
+                (user_id, session_name, symbol, replay_timeframe, start_time, replay_cursor_ms, cursor_step_tf, risk_pct, fee_rate_pct,
+                 default_leverage, risk_ladder_json, use_flat_risk, blind_mode,
                  starting_balance, profit_target_pct, daily_drawdown_pct, max_drawdown_pct, drawdown_type, max_trades_per_day)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )->execute([
-            $this->uid, $sessionName, $symbol, $timeframe, (int) $realStart, (int) $realStart, $timeframe, $riskPct, $feeRatePct, $blindMode,
+            $this->uid, $sessionName, $symbol, $timeframe, (int) $realStart, (int) $realStart, $timeframe, $riskPct, $feeRatePct,
+            $defaultLeverage, json_encode($riskLadder), $useFlatRisk, $blindMode,
             $startingBalance, $profitTargetPct, $dailyDrawdownPct, $maxDrawdownPct, $drawdownType, $maxTradesPerDay,
         ]);
 
         jsonResponse(['success' => true, 'id' => (int) $this->db->lastInsertId()]);
+    }
+
+    /**
+     * v3.22.0 — normalizes/validates a risk-ladder payload from create_backtest_session,
+     * falling back to self::DEFAULT_RISK_LADDER (not an error) on anything structurally
+     * wrong — same "sane coded default for an optional setup field" policy createSession()
+     * already applies to drawdown_type. Deliberately loose about individual tier values
+     * (no cross-tier ordering/gap check) — same "MySQL validates well-formedness, not
+     * shape" contract this whole column already carries; the engine that actually reads
+     * these tiers (v3.22.2) is what will need a real value to look up against, not this
+     * write path guaranteeing a perfectly-formed ladder in every edge case.
+     */
+    private function validateRiskLadder($raw): array {
+        if (!is_array($raw) || count($raw) !== 3) return self::DEFAULT_RISK_LADDER;
+        $out = [];
+        foreach ($raw as $tier) {
+            if (!is_array($tier) || !isset($tier['lower_pct']) || !isset($tier['risk_pct'])) return self::DEFAULT_RISK_LADDER;
+            $lower = num($tier['lower_pct']);
+            $risk = num($tier['risk_pct']);
+            if ($lower < 0 || $lower > 100 || $risk <= 0 || $risk > 100) return self::DEFAULT_RISK_LADDER;
+            $upperRaw = $tier['upper_pct'] ?? null;
+            $upper = ($upperRaw === null || $upperRaw === '') ? null : num($upperRaw);
+            if ($upper !== null && ($upper < 0 || $upper > 100)) return self::DEFAULT_RISK_LADDER;
+            $out[] = ['lower_pct' => $lower, 'upper_pct' => $upper, 'risk_pct' => $risk];
+        }
+        return $out;
     }
 
     // ── REPLAY DATA (no-lookahead) ───────────────────────────
@@ -904,6 +974,19 @@ class BacktestController {
             'status' => $session['status'],
             'risk_pct' => (float) $session['risk_pct'],
             'fee_rate_pct' => (float) $session['fee_rate_pct'],
+            // v3.22.0 — default_leverage/use_flat_risk are NOT NULL with a real column
+            // DEFAULT, so a pre-migration session already has a concrete value (5,
+            // flat=1) the instant this migration runs; the `?? ` fallbacks below are
+            // defensive only. risk_ladder_json IS nullable (a pre-migration session has
+            // no ladder ever written), so a NULL there falls back to
+            // DEFAULT_RISK_LADDER for display — this session is use_flat_risk=1 anyway,
+            // so nothing currently reads this array for it, but the response always
+            // carries a real, well-shaped ladder rather than null for any future reader.
+            'default_leverage' => (int) ($session['default_leverage'] ?? 5),
+            'risk_ladder' => $session['risk_ladder_json'] !== null
+                ? (json_decode($session['risk_ladder_json'], true) ?? self::DEFAULT_RISK_LADDER)
+                : self::DEFAULT_RISK_LADDER,
+            'use_flat_risk' => (bool) ($session['use_flat_risk'] ?? 1),
             'starting_balance' => $starting,
             'profit_target_pct' => (float) $session['profit_target_pct'],
             'daily_drawdown_pct' => (float) $session['daily_drawdown_pct'],

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.13 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.0 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3583,6 +3583,161 @@ entry, the same two `fillRect()` calls render solid on their own.
 briefing's own scope. `php -l` doesn't apply (no PHP changed); `node --check
 js/backtest-drawings.js` passed.
 
+### v3.22.0: Backtest Realism, Part 1 — Calibrated Fee Default, Leverage, Risk Ladder Schema
+
+First release of a multi-part series (v3.22.0–v3.22.3) making backtests behave like a
+real Bitfunded trade — same sizing rule, same costs — so backtest results can be trusted
+to decide whether live trading resumes. **A separate, earlier gate-checklist/R-results
+briefing was renumbered to v3.23.0** during scoping — this series' own order ticket
+(v3.22.1) is where that gate checklist will eventually plug in, but it is not part of
+this series.
+
+**Delivery split into four releases, not one, given how many subtle bugs this project
+has already found in much smaller backtest UI changes** (see v3.20.10's rewind, v3.21.0's
+drawing-tool hit-testing races, v3.21.13's position-tool side-of-entry bug) — the user's
+own choice, confirmed before any code was written:
+- **v3.22.0** (this release) — schema + session-setup fields.
+- **v3.22.1** — order ticket UI, replacing one-click Place Long/Short.
+- **v3.22.2** — risk-ladder engine (start-of-day equity tier lookup, wired into fills).
+- **v3.22.3** — running-trade chart display (live lines/zones, linked drawing hide/show,
+  rewind-safe).
+
+**Funding was dropped from the entire series, after §0's own live calibration.** The
+original briefing specified a `funding_rates` table, a Bybit `GET /v5/market/funding/
+history` backfill/cron, maker/taker fee differentiation, and a funding-simulation mode —
+all removed once the calibration query (below) came back with a single flat fee and no
+maker/taker split at all: there was nothing left for a funding rate to be calibrated
+*against* either, on this account. **No `funding_rates` table, no funding backfill/cron,
+no funding field anywhere in this series — do not resurrect any of it without a new,
+separate briefing.** The original plan's `v3.22.4` (fees/funding engine) is gone; its one
+surviving piece — the flat-fee charging check — folds into v3.22.1 instead.
+
+#### §0 calibration (live data, not guessed)
+
+This environment has no live DB credentials (§13 rule 4) — the calibration SQL was run
+by Acrob directly against live challenge 6 and the raw results pasted back, per this
+project's standing pattern for exactly this situation (the same one already used for the
+v3.9.4/v3.10.0/v3.11.0 audit queries documented elsewhere in this file).
+
+**Result: a flat 0.0400% fee per fill, identical across all 64 real Bitfunded fills on
+challenge 6 (`source='import'`)** — `min = max = avg` to four decimal places, meaning
+there is no maker/taker distinction on this account at all; a Limit order costs exactly
+the same as a Market order. Hand-verified against trade 123's own recorded fee:
+`(6.4×782.51 + 6.4×766.07) × 0.0004 = 3.964`, matching the stored `3.9644` to the cent
+(the small residual is the same class of sub-cent rounding gap already documented at
+v3.13.2/v3.13.4 — not a discrepancy worth chasing further).
+
+**This single flat number replaced what would otherwise have been three separate pieces
+of the original briefing** — the fee default (§2), the maker/taker fee split (§1/§5), and
+the funding-proxy comparison (§0's own second half, against Bybit's historical funding
+rates) — since a flat, un-split fee with no funding to calibrate meant two of those three
+questions simply had no answer to find, and the third (the fee default) had one number,
+not two.
+
+#### Schema (`2026_09_30_0001_add_backtest_session_leverage_ladder_fee_defaults.sql`)
+
+Three new `backtest_sessions` columns via the standard guarded-ALTER pattern (§3A step
+2a), plus one bare `MODIFY COLUMN` (always safe/idempotent, same precedent as
+`2026_09_25_0001`'s `source` ENUM modify and `2026_09_26_0002`'s `cursor_step_tf`
+modify):
+
+- **`default_leverage`** `TINYINT UNSIGNED NOT NULL DEFAULT 5` — the order ticket's
+  leverage dropdown (v3.22.1: 1×/2×/3×/5×/10×/20×) defaults to this per session, and can
+  always be overridden per order; leverage is never written back to the session from an
+  order. `NOT NULL DEFAULT 5` (not nullable like `challenges.default_leverage`) because
+  every backtest order needs a *concrete* leverage to compute margin/liquidation — there
+  is no meaningful "not set" state to protect with `NULL` here, unlike the live
+  calculator's own leverage field, which predates any leverage concept existing at all.
+- **`risk_ladder_json`** `JSON NULL` — three tiers, stored as **% of the session's own
+  `starting_balance`**, not absolute dollars like the live `risk_ladder_tiers` table. A
+  backtest's starting balance is arbitrary and chosen per session, so a
+  %-of-starting-balance tier is the only representation that stays meaningful across
+  every session — this mirrors how the setup form's own existing "Prefill from
+  challenge" already converts `daily_loss_limit` (an absolute dollar figure) into a % at
+  prefill time. Kept as JSON, not a child table like the live ladder — always exactly 3
+  tiers, always replaced as one whole unit from the setup form, never edited row-by-row.
+  Same "MySQL validates well-formedness, not shape" contract `backtest_drawings.
+  settings`/`points` already carries — the shape lives in `BacktestController.php`/
+  `js/backtest.js`, not the schema.
+- **`use_flat_risk`** `TINYINT(1) NOT NULL DEFAULT 1` — defaults to flat (`1`)
+  specifically so every **existing** session, which has only ever used the single
+  `risk_pct` column, keeps behaving exactly as before with zero engine change the moment
+  this migration runs (§6's "old sessions keep working, NULL-safe defaults" rule). A
+  **brand-new** session's own setup-form default is tiered instead (the checkbox defaults
+  unchecked) — that's an explicit application-layer choice made at `createSession()`
+  time, not something the schema's own `DEFAULT` clause decides.
+
+#### Controller (`BacktestController.php`)
+
+`DEFAULT_FEE_RATE_PCT` changed from `0.0550` (Bybit's generic, never-validated original
+guess) to `0.0400` (the calibrated value above) — affects only a brand-new session's own
+default; an existing session's already-stored `fee_rate_pct` is completely untouched,
+both by this constant and by the migration's `MODIFY COLUMN`, which only ever changes
+what a *future* insert defaults to.
+
+New `ALLOWED_LEVERAGES` (`[1,2,3,5,10,20]`) and `DEFAULT_RISK_LADDER` (the coded
+`≥95%→1.0% / 92.5–95%→0.5% / <92.5%→0.25%` ladder) constants, and a new
+`validateRiskLadder()` — falls back to `DEFAULT_RISK_LADDER` on anything missing or
+structurally wrong (not exactly 3 tiers, a missing `lower_pct`/`risk_pct` key, an
+out-of-range value) rather than rejecting the request outright, the same treatment
+`drawdown_type` already gets a few lines below in the same method, for the same reason:
+these are optional setup fields, not measurements where a silent default would
+misrepresent a real fact (contrast `trades.session`/`r_multiple`, where `NULL`-means-
+unknown is the rule specifically *because* a wrong guess there would misrepresent
+something that actually happened). `createSession()`'s handling of a missing
+`use_flat_risk` key defaults to `1` (flat), matching the DB column's own default — the
+setup form itself always sends an explicit value either way, so this branch only matters
+for a malformed or direct API call. `sessionSummary()` returns all three new fields for
+every session, decoding `risk_ladder_json` back to `DEFAULT_RISK_LADDER` when `NULL`
+(every pre-migration session) so the response always carries a well-shaped ladder array
+rather than `null`, even though that session's `use_flat_risk=1` means nothing currently
+reads it.
+
+Verified with a standalone PHP script (replicating `validateRiskLadder()`'s exact logic,
+outside the class since it needs no DB): a `null` payload, a valid custom 3-tier ladder, a
+wrong tier count, a tier missing `risk_pct`, a zero `risk_pct` (invalid — must be `>0`),
+and an out-of-range `upper_pct` (`150`) — all six cases resolved exactly as designed (the
+five invalid shapes all fall back to `DEFAULT_RISK_LADDER`; the valid custom ladder passes
+through with its values preserved, including a `null` top-tier `upper_pct`).
+
+#### Frontend (`pages/backtest.php` / `js/backtest.js`)
+
+New Backtest form gains: a Default Leverage `<select>` (the six `BT_ALLOWED_LEVERAGES`
+values, mirroring the PHP constant exactly); a "Flat risk % per trade" checkbox
+(`onBtFlatRiskToggle()`) that only ever toggles which of the flat-%-input / 3-ladder-rows
+is *visible* — both stay in the DOM and are always both submitted on create, so switching
+the toggle back and forth before submitting can never lose either value, the server alone
+decides which is authoritative via `use_flat_risk`; and a "Prefill from challenge" button
+on the ladder (`onBtLadderPrefill()`) that calls the *existing* `get_risk_status`
+endpoint (`CalculatorController::getRiskStatus()`, which already accepts an optional
+`challenge_id` param — no new backend route was needed) and converts the challenge's own
+absolute-dollar `ladder_tiers` into % of that challenge's `starting_balance`, the same
+conversion principle the existing daily-drawdown prefill already uses one function up.
+Rejects (with a clear toast, not a silent fallback to the coded default) a live ladder
+that doesn't have exactly 3 tiers — `risk_ladder_tiers` has no such constraint at the live
+-challenge level, so this is a real, if unlikely, case worth a real message rather than
+quietly substituting the coded default with no explanation. The "Prefill from challenge"
+*ladder* button is kept in sync with the existing challenge dropdown on every change
+(including back to "— Custom —"), so it can't get stuck enabled after the selection is
+cleared.
+
+Verified with a standalone Node script replicating the render→read round trip (confirms
+`btRenderLadderRows()` → `btReadLadderRows()` reproduces the exact input ladder, `null`
+top-tier `upper_pct` included) and the dollar→percent conversion math (a
+challenge-6-shaped live ladder — 0/9250/9500 dollar bounds on a $10,000 starting balance —
+converts to exactly 0/92.5/95%, matching `DEFAULT_RISK_LADDER`'s own coded values, as
+expected since that coded default was itself modeled on challenge 6's live ladder).
+
+`php -l` (both PHP files) and `node --check js/backtest.js` all pass.
+
+#### Not done in this release (deliberately — see the delivery split above)
+
+The order ticket (leverage dropdown wired to a real order, margin/liquidation display,
+blocking rules), the risk-ladder engine actually looking up a tier during a fill, and the
+running-trade chart display are all v3.22.1–v3.22.3. This release only adds the schema
+and the setup-form fields to capture the session-level configuration those later releases
+will read.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4683,7 +4838,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.13
+Current Version: v3.22.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

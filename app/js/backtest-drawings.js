@@ -161,6 +161,17 @@ function btScheduleRedraw() {
     btDrawRaf = requestAnimationFrame(() => { btDrawRaf = null; btRenderDrawings(); });
 }
 
+/** v3.22.2 Fix 5 — the sidebar's one-line discoverability hint (#bt-no-drawing-hint,
+ *  pages/backtest.php), shown only while this session has no position-tool drawing at
+ *  all. Called on session load and after any drawing add/delete -- the only two ways the
+ *  set of position-tool drawings can change from empty to non-empty or back. */
+function btUpdateNoDrawingHint() {
+    const el = document.getElementById('bt-no-drawing-hint');
+    if (!el) return;
+    const hasPosition = btDrawings.some(d => d.tool === 'position_long' || d.tool === 'position_short');
+    el.style.display = hasPosition ? 'none' : 'block';
+}
+
 // v3.21.1: btUpdateOverlayInteractivity() removed -- see btInitDrawOverlay()'s own
 // docblock for why the hover-based pointer-events toggle it implemented was a genuine,
 // verified race condition, replaced by capture-phase listeners deciding synchronously.
@@ -327,6 +338,7 @@ async function loadBtDrawings() {
             await btUpdateDrawing(d.id, { settings: d.settings });
         }
     }
+    btUpdateNoDrawingHint();
     btScheduleRedraw();
 }
 /** This user's saved per-tool defaults — user-scoped, not session-scoped, but loaded
@@ -394,6 +406,7 @@ async function btSaveNewDrawing(tool, points, settings) {
     if (res && res.error) { toast('Could not save drawing — ' + res.error, 'error'); return null; }
     const drawing = { id: res.id, tool, points, settings };
     btDrawings.push(drawing);
+    btUpdateNoDrawingHint();
     return drawing;
 }
 // v3.21.6 — the settings panel fires a save on every individual field change (colour
@@ -431,6 +444,7 @@ async function btDeleteDrawing(id) {
     btDrawings = btDrawings.filter(d => d.id !== id);
     if (btSelectedDrawingId === id) btSelectedDrawingId = null;
     btHideDrawSettingsPopover();
+    btUpdateNoDrawingHint();
     btScheduleRedraw();
 }
 
@@ -518,8 +532,25 @@ function btTicketLineHitTest(x, y) {
     return null;
 }
 
+/** v3.22.2 — the order ticket (#bt-ticket) and the floating selection toolbar
+ *  (#bt-pos-toolbar) are real DOM widgets that live INSIDE .tv-chart-wrap (so they dock
+ *  against the chart, per the v3.22.1 briefing), which means this capture-phase listener
+ *  sees every mousedown inside THEM too, not just ones on the actual chart/canvas. A
+ *  click on either -- typing in the SL field, clicking Cancel, dragging the toolbar's own
+ *  handle -- was falling through to the "nothing hit, deselect" branch below (canvas
+ *  hit-testing has no concept of "this click was actually on a widget, not the chart"),
+ *  silently clearing btSelectedDrawingId and hiding the toolbar the moment the trader
+ *  touched anything inside the ticket, including Cancel -- so a drawing that was clearly
+ *  still selected (still drawn with its pills) lost its toolbar for no visible reason.
+ *  The overlay canvas itself is pointer-events:none (css/style.css), so a REAL chart
+ *  click always lands with e.target somewhere under #tv-chart, never inside either widget. */
+function btEventIsOnDrawingSurface(e) {
+    return !e.target.closest('#bt-ticket, #bt-pos-toolbar');
+}
+
 function btOnDrawMouseDown(e) {
     if (e.button !== 0) return; // left click only -- right click is contextmenu (settings)
+    if (!btEventIsOnDrawingSurface(e)) return;
     const { x, y } = btMousePos(e);
 
     // v3.22.1 — the order ticket's own lines take priority over everything else while
@@ -647,6 +678,7 @@ function btOnDrawMouseUp(e) {
 }
 
 function btOnDrawDblClick(e) {
+    if (!btEventIsOnDrawingSurface(e)) return;
     const { x, y } = btMousePos(e);
     const hit = btHitTest(x, y);
     if (hit) {
@@ -657,6 +689,7 @@ function btOnDrawDblClick(e) {
     }
 }
 function btOnDrawContextMenu(e) {
+    if (!btEventIsOnDrawingSurface(e)) return;
     const { x, y } = btMousePos(e);
     const hit = btHitTest(x, y);
     if (hit) {
@@ -974,15 +1007,27 @@ function btPositionSelectionToolbar() {
     const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
     if (x1 === null || x2 === null) { el.style.display = 'none'; return; }
     const cx = (x1 + x2) / 2;
+    // v3.22.2 Fix 4 — measure from the actual pill extents (d._btPillBounds, set by
+    // btDrawPosition() earlier in this same render pass), not the entry/stop/TP LINE
+    // positions: the pills are drawn offset outside their line (btDrawPosition's own
+    // "outside the box" comment), so the topmost LINE is not the topmost PILL -- placing
+    // the toolbar relative to the line is exactly what let it sit on top of the
+    // Target pill (Long) or Stop pill (Short). Falls back to the line positions only if
+    // pill bounds somehow aren't available yet (e.g. a price scale not ready this frame).
     const ys = [btPriceToY(d.settings.entry), btPriceToY(d.settings.stop_loss), btPriceToY(d.settings.take_profit)].filter(y => y !== null);
-    const topY = ys.length ? Math.min(...ys) : 0;
+    const topY = d._btPillBounds ? d._btPillBounds.top : (ys.length ? Math.min(...ys) : 0);
+    const bottomY = d._btPillBounds ? d._btPillBounds.bottom : (ys.length ? Math.max(...ys) : 0);
 
     const toolbarW = el.offsetWidth || 180, toolbarH = el.offsetHeight || 32;
+    const margin = 4;
     let left = cx - toolbarW / 2 + btToolbarOffset.dx;
     let top = topY - toolbarH - 10 + btToolbarOffset.dy;
+    // Above the highest pill would put the toolbar above the chart area entirely --
+    // flip to below the lowest pill instead, per the briefing.
+    if (top < margin) top = bottomY + 10 + btToolbarOffset.dy;
     const maxW = btDrawOverlay ? btDrawOverlay.width : 9999;
-    left = Math.max(4, Math.min(left, maxW - toolbarW - 4));
-    top = Math.max(4, top);
+    left = Math.max(margin, Math.min(left, maxW - toolbarW - margin));
+    top = Math.max(margin, top);
     el.style.left = left + 'px';
     el.style.top = top + 'px';
 }
@@ -1125,7 +1170,41 @@ function btRenderDrawings() {
     const ctx = btDrawCtx;
     ctx.clearRect(0, 0, btDrawOverlay.width, btDrawOverlay.height);
 
-    for (const d of btDrawings) btDrawOne(ctx, d, d.id === btSelectedDrawingId, false);
+    // v3.22.2 Fix 3 — the drawing linked to an open ticket (sourceDrawingId) renders from
+    // the ticket's own live values, not its last-saved settings, so the box/pills and the
+    // ticket panel/lines can never show two different trades at once. btTicketRenderValues()
+    // (js/backtest.js) is null whenever no ticket is open or this isn't the linked drawing.
+    for (const d of btDrawings) {
+        const override = (typeof btTicket !== 'undefined' && btTicket && btTicket.sourceDrawingId === d.id) ? btTicketRenderValues() : null;
+        btDrawOne(ctx, d, d.id === btSelectedDrawingId, false, override);
+    }
+
+    // v3.22.2 Fix 3 — a ticket opened with no source drawing (from the sidebar's "New
+    // Trade" with nothing selected/drawn) still needs the chart to show the trade being
+    // placed: draw a temporary, unselectable box from the ticket's own values, anchored
+    // at the current replay bar, same span a freshly-drawn position tool gets
+    // (BT_POSITION_TOOL_SPAN_BARS). Never saved as a real drawing -- purely a render.
+    if (typeof btTicket !== 'undefined' && btTicket && !btTicket.sourceDrawingId) {
+        const override = btTicketRenderValues();
+        const lastCandle = chartState.candles[chartState.candles.length - 1];
+        if (override && lastCandle) {
+            const tool = override.tool;
+            // chartState.candles[].time is raw UTC ms straight from the API -- every real
+            // drawing's own points[].time is in the chart's DISPLAY-shifted seconds domain
+            // (toDisplaySeconds(), chart.js), which is what btTimeToX()/btXToTime() and
+            // every other drawing tool's own points actually use. Anchoring this temporary
+            // box at the raw ms value would place it wildly off-chart.
+            const anchorSec = toDisplaySeconds(lastCandle.time, chartState.timezone);
+            const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
+            const tempDrawing = {
+                id: null,
+                tool,
+                points: [{ time: anchorSec }, { time: anchorSec + spanMs / 1000 }],
+                settings: btMergedToolDefaults(tool),
+            };
+            btDrawOne(ctx, tempDrawing, false, true, override);
+        }
+    }
 
     if (btDrawInProgress) {
         const isPosition = btDrawInProgress.tool === 'position_long' || btDrawInProgress.tool === 'position_short';
@@ -1164,14 +1243,14 @@ function btRenderDrawings() {
     btDrawTicketLines(ctx);
     btPositionSelectionToolbar();
 }
-function btDrawOne(ctx, d, selected, isPreview) {
+function btDrawOne(ctx, d, selected, isPreview, override) {
     ctx.save();
     ctx.globalAlpha = isPreview ? 0.65 : 1;
     if (d.tool === 'trend_line') btDrawTrendLine(ctx, d, selected);
     else if (d.tool === 'horizontal_line') btDrawHLine(ctx, d, selected, false);
     else if (d.tool === 'horizontal_ray') btDrawHLine(ctx, d, selected, true);
     else if (d.tool === 'fib_retracement') btDrawFib(ctx, d, selected);
-    else if (d.tool === 'position_long' || d.tool === 'position_short') btDrawPosition(ctx, d, selected);
+    else if (d.tool === 'position_long' || d.tool === 'position_short') btDrawPosition(ctx, d, selected, override);
     ctx.restore();
 }
 function btLineDash(style) { return style === 'dashed' ? [6, 4] : style === 'dotted' ? [1, 3] : []; }
@@ -1403,14 +1482,26 @@ function btDrawPill(ctx, cx, cy, lines, bgColor) {
  * — a plain drawing has no leverage/risk chosen yet; that only exists once "Place trade"
  * opens the real ticket (v3.22.1 Part B), which is free to size differently.
  */
-function btDrawPosition(ctx, d, selected) {
+/** v3.22.2 Fix 3 — `override`, when given (js/backtest.js::btTicketRenderValues()), is
+ *  the open order ticket's own effective entry/stop/TP and net risk/reward, sourced from
+ *  the exact same btComputeTicket() the ticket panel itself renders from. Passed in only
+ *  for the one drawing the ticket is linked to (btTicket.sourceDrawingId), or for a
+ *  standalone temporary box when the ticket has no source drawing at all (opened from
+ *  New Trade). Without this, switching the ticket to Market (or dragging its lines) left
+ *  the box/pills still showing the drawing's stale, pre-ticket numbers while the ticket
+ *  panel and on-chart ticket lines had already moved on — two different trades on
+ *  screen at once. */
+function btDrawPosition(ctx, d, selected, override) {
     const s = d.settings;
     const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
     if (x1 === null || x2 === null) return;
     const left = Math.min(x1, x2), right = Math.max(x1, x2);
     const cx = (left + right) / 2;
-    const yEntry = btPriceToY(s.entry), yStop = btPriceToY(s.stop_loss), yTp = btPriceToY(s.take_profit);
-    if (yEntry === null || yStop === null || yTp === null) return;
+    const entry = override ? override.entry : s.entry;
+    const stopLoss = override ? override.stop_loss : s.stop_loss;
+    const takeProfit = override ? override.take_profit : s.take_profit;
+    const yEntry = btPriceToY(entry), yStop = btPriceToY(stopLoss), yTp = takeProfit !== null ? btPriceToY(takeProfit) : null;
+    if (yEntry === null || yStop === null) return;
 
     // v3.21.13 — the red (entry↔stop) and teal (entry↔TP) fills already share the same
     // 0.18 alpha; no change needed here. What made a broken Short look "pale greyish-red
@@ -1420,36 +1511,56 @@ function btDrawPosition(ctx, d, selected) {
     // non-overlapping fillRect calls render as solid colour on their own, unchanged.
     ctx.fillStyle = 'rgba(239,83,80,0.18)';
     ctx.fillRect(left, Math.min(yEntry, yStop), right - left, Math.abs(yStop - yEntry));
-    ctx.fillStyle = 'rgba(38,166,154,0.18)';
-    ctx.fillRect(left, Math.min(yEntry, yTp), right - left, Math.abs(yTp - yEntry));
+    if (yTp !== null) {
+        ctx.fillStyle = 'rgba(38,166,154,0.18)';
+        ctx.fillRect(left, Math.min(yEntry, yTp), right - left, Math.abs(yTp - yEntry));
+    }
 
     const line = (y, color) => { ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke(); };
-    line(yEntry, '#d1d4dc'); line(yStop, '#ef5350'); line(yTp, '#26a69a');
+    line(yEntry, '#d1d4dc'); line(yStop, '#ef5350'); if (yTp !== null) line(yTp, '#26a69a');
 
-    const equity = btSession ? btSession.equity : 0;
-    const riskPct = btSession ? btSession.risk_pct : 1;
-    const feeRatePct = btSession ? btSession.fee_rate_pct : 0;
-    const grossRiskUsd = equity * riskPct / 100;
-    const stopDist = Math.abs(s.entry - s.stop_loss);
-    const tpDist = Math.abs(s.take_profit - s.entry);
-    const size = stopDist > 0 ? grossRiskUsd / stopDist : 0;
-    const entryFee = (typeof btCalcFee === 'function') ? btCalcFee(size, s.entry, feeRatePct) : 0;
-    const exitFeeAtStop = (typeof btCalcFee === 'function') ? btCalcFee(size, s.stop_loss, feeRatePct) : 0;
-    const exitFeeAtTp = (typeof btCalcFee === 'function') ? btCalcFee(size, s.take_profit, feeRatePct) : 0;
-    const riskUsdNet = grossRiskUsd + entryFee + exitFeeAtStop;
-    const rewardUsdNet = tpDist * size - (entryFee + exitFeeAtTp);
-    const rr = stopDist > 0 ? (tpDist / stopDist).toFixed(2) : '—';
-    const stopPct = s.entry !== 0 ? (stopDist / Math.abs(s.entry) * 100).toFixed(2) : '0.00';
-    const tpPct = s.entry !== 0 ? (tpDist / Math.abs(s.entry) * 100).toFixed(2) : '0.00';
+    const stopDist = Math.abs(entry - stopLoss);
+    const tpDist = takeProfit !== null ? Math.abs(takeProfit - entry) : null;
+    let riskUsdNet, rewardUsdNet;
+    if (override) {
+        riskUsdNet = override.riskUsdNet;
+        rewardUsdNet = override.rewardUsdNet;
+    } else {
+        const equity = btSession ? btSession.equity : 0;
+        const riskPct = btSession ? btSession.risk_pct : 1;
+        const feeRatePct = btSession ? btSession.fee_rate_pct : 0;
+        const grossRiskUsd = equity * riskPct / 100;
+        const size = stopDist > 0 ? grossRiskUsd / stopDist : 0;
+        const entryFee = (typeof btCalcFee === 'function') ? btCalcFee(size, entry, feeRatePct) : 0;
+        const exitFeeAtStop = (typeof btCalcFee === 'function') ? btCalcFee(size, stopLoss, feeRatePct) : 0;
+        riskUsdNet = grossRiskUsd + entryFee + exitFeeAtStop;
+        if (tpDist !== null) {
+            const exitFeeAtTp = (typeof btCalcFee === 'function') ? btCalcFee(size, takeProfit, feeRatePct) : 0;
+            rewardUsdNet = tpDist * size - (entryFee + exitFeeAtTp);
+        }
+    }
+    const rr = (stopDist > 0 && tpDist !== null) ? (tpDist / stopDist).toFixed(2) : '—';
+    const stopPct = entry !== 0 ? (stopDist / Math.abs(entry) * 100).toFixed(2) : '0.00';
+    const tpPct = (tpDist !== null && entry !== 0) ? (tpDist / Math.abs(entry) * 100).toFixed(2) : '0.00';
 
     // "Outside the box" — offset further away from entry than the level itself, on
     // whichever side of entry that level already sits (works for both Long and Short
     // without a direction branch: the sign of (yLevel - yEntry) already encodes which
     // way is "away").
+    // v3.22.2 Fix 4 — d._btPillBounds tracks the actual on-screen extent of whichever
+    // pills get drawn this frame (not just the entry/stop/TP LINES, which is what the
+    // old toolbar placement measured from and is why the toolbar sat on top of the
+    // Target/Stop pill: those pills are drawn OFFSET outside their line, so the line's
+    // own y is not the pill's top edge). btPositionSelectionToolbar() reads this same
+    // frame's value right after this draw call, in the same render pass.
+    let pillTop = Infinity, pillBottom = -Infinity;
+    const trackPill = b => { pillTop = Math.min(pillTop, b.y); pillBottom = Math.max(pillBottom, b.y + b.h); };
     const stopPillY = yStop + Math.sign(yStop - yEntry || 1) * 16;
-    const tpPillY = yTp + Math.sign(yTp - yEntry || -1) * 16;
-    btDrawPill(ctx, cx, stopPillY, `Stop: ${fmtPrice5(s.stop_loss)}, ${stopDist.toFixed(2)} pts (${stopPct}%), Amount: $${riskUsdNet.toFixed(2)}`, '#ef5350');
-    btDrawPill(ctx, cx, tpPillY, `Target: ${fmtPrice5(s.take_profit)}, ${tpDist.toFixed(2)} pts (${tpPct}%), Amount: $${rewardUsdNet.toFixed(2)}`, '#26a69a');
+    trackPill(btDrawPill(ctx, cx, stopPillY, `Stop: ${fmtPrice5(stopLoss)}, ${stopDist.toFixed(2)} pts (${stopPct}%), Amount: $${riskUsdNet.toFixed(2)}`, '#ef5350'));
+    if (yTp !== null) {
+        const tpPillY = yTp + Math.sign(yTp - yEntry || -1) * 16;
+        trackPill(btDrawPill(ctx, cx, tpPillY, `Target: ${fmtPrice5(takeProfit)}, ${tpDist.toFixed(2)} pts (${tpPct}%), Amount: $${rewardUsdNet.toFixed(2)}`, '#26a69a'));
+    }
     // Centre pill: neutral grey until a real trade is linked (v3.22.3's
     // linked_trade_id) — d._linkedTrade doesn't exist yet in this release, so this
     // always takes the neutral branch today; the floating-P&L branch is wired in
@@ -1458,14 +1569,15 @@ function btDrawPosition(ctx, d, selected) {
     const linked = d._linkedTrade || null;
     const centreColor = !linked ? '#4b5563' : (linked.floating_pnl < 0 ? '#ef5350' : '#26a69a');
     const centreLines = linked
-        ? [`Open P&L: ${linked.floating_pnl >= 0 ? '+' : ''}${fmt(linked.floating_pnl)}, Qty: ${linked.lot_size}`, `Entry: ${fmtPrice5(s.entry)}, RR 1:${rr}`]
-        : [`Entry: ${fmtPrice5(s.entry)}, RR 1:${rr}${s.rr_locked ? ' (locked)' : ''}`];
-    btDrawPill(ctx, cx, yEntry, centreLines, centreColor);
+        ? [`Open P&L: ${linked.floating_pnl >= 0 ? '+' : ''}${fmt(linked.floating_pnl)}, Qty: ${linked.lot_size}`, `Entry: ${fmtPrice5(entry)}, RR 1:${rr}`]
+        : [`Entry: ${fmtPrice5(entry)}, RR 1:${rr}${s.rr_locked ? ' (locked)' : ''}`];
+    trackPill(btDrawPill(ctx, cx, yEntry, centreLines, centreColor));
+    d._btPillBounds = { top: pillTop, bottom: pillBottom };
 
     if (selected) {
         btDrawHandle(ctx, left, yEntry, '#d1d4dc');
         btDrawHandle(ctx, left, yStop, '#ef5350');
-        btDrawHandle(ctx, left, yTp, '#26a69a');
+        if (yTp !== null) btDrawHandle(ctx, left, yTp, '#26a69a');
         // x-axis time pills — the box's own start/end times, small blue pills, shown
         // only while selected (per the spec's own "when the tool is selected").
         // HH:MM is deliberately compact -- there's no room for a full date on the

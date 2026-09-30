@@ -222,25 +222,20 @@
         </div>
 
         <div class="bt-panel-block">
-          <!-- v3.22.1 — this panel no longer submits an order directly. It's now a
-               quick prefill for the order ticket: "New Trade" opens the same docked
-               ticket panel the position tool's own "Place trade" button opens,
-               prefilled from whatever's filled in here. All real validation/submission
-               happens in the ticket (js/backtest.js::btOpenTicket()/btSubmitTicket()) --
-               this panel's own fields are never sent to the server directly anymore. -->
+          <!-- v3.22.2 Fix 2 — this panel is no longer a second way to fill in an order;
+               it never validated anything itself (all real validation lives in the
+               ticket's own disabled-button reason, js/backtest.js::btComputeTicket()).
+               "New Trade" always opens the ticket -- see js/backtest.js::
+               btNewTradeClick() for the three-step prefill priority (selected position
+               tool, else the most recent not-yet-linked position drawing, else a bare
+               Market ticket from the direction toggle below). -->
           <div class="bt-panel-title">New Trade</div>
-          <div class="form-group" style="margin-bottom:8px">
-            <select id="bt-order-type"><option value="market">Market</option><option value="limit">Limit</option></select>
-          </div>
-          <div style="display:flex;gap:6px;margin-bottom:8px">
+          <div id="bt-no-drawing-hint" style="display:none;font-size:11px;color:#9ca3af;margin-bottom:8px">Draw a Long/Short position on the chart, or click New Trade.</div>
+          <div style="display:flex;gap:6px;margin-bottom:10px">
             <button class="btn btn-sm bt-dir-btn" id="bt-dir-long" onclick="setBtDirection('Long')">Long</button>
             <button class="btn btn-sm bt-dir-btn" id="bt-dir-short" onclick="setBtDirection('Short')">Short</button>
           </div>
-          <div class="form-group" id="bt-limit-price-group" style="display:none;margin-bottom:8px"><label>Limit Price</label><input type="number" id="bt-order-limit" step="any"></div>
-          <div class="form-group" style="margin-bottom:8px"><label>Stop Loss</label><input type="number" id="bt-order-sl" step="any"></div>
-          <div class="form-group" style="margin-bottom:10px"><label>Take Profit (optional)</label><input type="number" id="bt-order-tp" step="any"></div>
-          <button class="btn btn-primary" style="width:100%" onclick="placeBtOrder()">Open Ticket</button>
-          <div id="bt-order-error" style="color:var(--red);font-size:11px;margin-top:6px"></div>
+          <button class="btn btn-primary" style="width:100%" onclick="btNewTradeClick()">New Trade</button>
         </div>
 
         <div class="bt-panel-block">

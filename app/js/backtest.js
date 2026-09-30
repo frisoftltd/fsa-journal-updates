@@ -773,38 +773,44 @@ function setBtDirection(dir) {
     document.getElementById('bt-dir-short').classList.toggle('active-short', dir === 'Short');
 }
 document.addEventListener('DOMContentLoaded', () => {
-    const typeSel = document.getElementById('bt-order-type');
-    typeSel?.addEventListener('change', () => {
-        document.getElementById('bt-limit-price-group').style.display = typeSel.value === 'limit' ? 'flex' : 'none';
-    });
     setBtDirection('Long');
 });
 
-// v3.22.1 — the sidebar's own "Place Order" button no longer submits directly; it opens
-// the ticket, prefilled from these same fields. All real submission now goes through
-// btSubmitTicket(). Renamed in spirit, not in name, to avoid touching the onclick=
-// already wired in pages/backtest.php.
-async function placeBtOrder() {
-    const errEl = document.getElementById('bt-order-error');
-    errEl.textContent = '';
-    if (!btSession || btSession.status !== 'active') { errEl.textContent = 'Session is not active.'; return; }
-    const sl = document.getElementById('bt-order-sl').value;
-    if (!sl) { errEl.textContent = 'Stop loss is required.'; return; }
-    btOpenTicket({
-        sourceDrawingId: null,
-        direction: btDirection,
-        orderType: document.getElementById('bt-order-type').value,
-        entry: document.getElementById('bt-order-type').value === 'limit' ? parseFloat(document.getElementById('bt-order-limit').value) || 0 : null,
-        stopLoss: parseFloat(sl),
-        takeProfit: document.getElementById('bt-order-tp').value ? parseFloat(document.getElementById('bt-order-tp').value) : null,
-    });
+/** v3.22.2 Fix 2 — the sidebar's "New Trade" button ALWAYS opens the ticket now (it used
+ *  to refuse with "Stop loss is required." when its own now-removed SL field was empty,
+ *  which read as the ticket itself being broken). All validation lives in the ticket's
+ *  own disabled-button reason (btComputeTicket()'s blockReason) -- this function does
+ *  none itself beyond "is there a session."
+ *
+ *  Prefill priority, per the briefing:
+ *   1. the selected position tool (btSelectedDrawingId, from js/backtest-drawings.js)
+ *   2. otherwise the most recent position-tool drawing in this session with no trade
+ *      linked yet (d._linkedTrade -- always unset in this release, since linking a
+ *      drawing to a live trade is v3.22.3's linked_trade_id; checked anyway so this
+ *      still does the right thing once that ships without touching this function again)
+ *   3. otherwise a bare Market ticket at the current close, direction from the sidebar's
+ *      own Long/Short toggle, SL left empty for the trader to fill in on the ticket. */
+function btNewTradeClick() {
+    if (!btSession || btSession.status !== 'active') { toast('Session is not active.', 'error'); return; }
+    const isPositionTool = d => d.tool === 'position_long' || d.tool === 'position_short';
+    let source = btSelectedDrawingId ? btDrawings.find(d => d.id === btSelectedDrawingId && isPositionTool(d)) : null;
+    if (!source) {
+        const candidates = btDrawings.filter(d => isPositionTool(d) && !d._linkedTrade);
+        source = candidates.length ? candidates[candidates.length - 1] : null;
+    }
+    if (source) {
+        btOpenTicketFromDrawing(source);
+    } else {
+        btOpenTicket({ sourceDrawingId: null, direction: btDirection, orderType: 'market', stopLoss: 0 });
+    }
 }
 
 // ── ORDER TICKET (v3.22.1) ──────────────────────────────────
 // Replaces the old one-click "Place Long/Short" submit. Opened either from a position
 // tool's own floating toolbar (js/backtest-drawings.js::btOpenTicketFromDrawing(), which
 // calls btOpenTicket() below with sourceDrawingId set) or from the sidebar's "New Trade"
-// panel (placeBtOrder() above, sourceDrawingId null). Nothing is sent to the server until
+// button (btNewTradeClick() above, sourceDrawingId null unless a drawing was prefilled
+// from). Nothing is sent to the server until
 // the trader clicks Place Trade — every field here is local state until then.
 //
 // Single source of truth: btTicket itself. Both the panel's own number inputs AND the
@@ -885,6 +891,7 @@ function btOpenTicket(init) {
         riskValue: btSession.risk_pct,
         leverage: btSession.default_leverage,
     };
+    btTicketApplyKeep3R(); // ticket-open is one of the five Keep-3R recompute paths (v3.22.2 Fix 1)
     btRenderTicket();
 }
 function btCloseTicket() {
@@ -893,26 +900,57 @@ function btCloseTicket() {
     if (el) { el.style.display = 'none'; el.innerHTML = ''; }
     if (typeof btScheduleRedraw === 'function') btScheduleRedraw(); // clears the on-chart ticket lines, drawn only while btTicket is truthy
 }
+/** v3.22.2 — the ONE place "what is entry, right now" is computed for the ticket's own
+ *  interaction code (as opposed to btComputeTicket()'s own local copy of the same
+ *  formula, kept separate since that function already had its own well-tested shape
+ *  before this fix and touching it wasn't necessary to fix the bug). For a Limit
+ *  ticket, entry is whatever was typed/dragged. For Market, it's ALWAYS the live
+ *  close, never the possibly-stale btTicket.entry a previous orderType switch happened
+ *  to snapshot — this is the root cause Fix 1 exists for: switching to Market copied
+ *  the close into btTicket.entry ONCE, at switch time, and every recompute after that
+ *  (including Keep 3R) kept reading that now-stale snapshot instead of the live price. */
+function btTicketEffectiveEntry() {
+    if (!btTicket) return 0;
+    if (btTicket.orderType !== 'market') return btTicket.entry;
+    const lastCandle = chartState.candles[chartState.candles.length - 1];
+    return lastCandle ? lastCandle.close : btTicket.entry;
+}
+/** v3.22.2 Fix 1 — the ONE place TP is recomputed from the 3R ratio. Called from every
+ *  path that can change the effective entry, the stop, or the direction while Keep 3R
+ *  is checked: opening the ticket, switching orderType (Limit<->Market — the bug this
+ *  fix exists for: switching to Market moved the effective entry but nothing recomputed
+ *  TP against it, so a 3R take-profit silently stopped being 3R), switching direction,
+ *  and every stop-loss change whether typed or dragged. Does nothing when Keep 3R is
+ *  off or there's no take-profit to keep at all — checked once, here, rather than
+ *  duplicated at every call site (the whole point of this fix: one function, called from
+ *  everywhere, not five copies of the same recompute that can individually go stale). */
+function btTicketApplyKeep3R() {
+    if (!btTicket || !btTicket.keep3R || btTicket.takeProfit === null) return;
+    const entry = btTicketEffectiveEntry();
+    btTicket.takeProfit = btComputeTpFromRatio(btTicket.direction === 'Long' ? 'position_long' : 'position_short', entry, btTicket.stopLoss, 3);
+}
 /** Two-way sync entry point for a ticket-line drag (js/backtest-drawings.js). field is
  *  'entry'|'stopLoss'|'takeProfit'. Applies the exact same v3.21.13 side-clamp/mirror
  *  rules a position-tool drawing's own handles already use, via the shared
  *  btPositionMinDist()/btClampPositionSide() helpers — a ticket's stop/TP can no more
- *  cross entry than a drawing's can. */
+ *  cross entry than a drawing's can. Clamps against btTicketEffectiveEntry(), not
+ *  btTicket.entry directly, so a stop/TP drag on a MARKET ticket clamps against the
+ *  live price, not a stale snapshot — same v3.22.2 fix as btTicketApplyKeep3R() above. */
 function btTicketSetField(field, price) {
     if (!btTicket) return;
     const isLong = btTicket.direction === 'Long';
+    const entry = btTicketEffectiveEntry();
     if (field === 'entry') {
         if (btTicket.orderType !== 'limit') return; // entry is only draggable for Limit, per the briefing
         btTicket.entry = price;
+        btTicketApplyKeep3R();
     } else if (field === 'stopLoss') {
-        const minDist = btPositionMinDist(btTicket.entry);
-        btTicket.stopLoss = btClampPositionSide(btTicket.entry, price, !isLong, minDist);
-        if (btTicket.keep3R && btTicket.takeProfit !== null) {
-            btTicket.takeProfit = btComputeTpFromRatio(btTicket.direction === 'Long' ? 'position_long' : 'position_short', btTicket.entry, btTicket.stopLoss, 3);
-        }
+        const minDist = btPositionMinDist(entry);
+        btTicket.stopLoss = btClampPositionSide(entry, price, !isLong, minDist);
+        btTicketApplyKeep3R();
     } else if (field === 'takeProfit') {
-        const minDist = btPositionMinDist(btTicket.entry);
-        btTicket.takeProfit = btClampPositionSide(btTicket.entry, price, isLong, minDist);
+        const minDist = btPositionMinDist(entry);
+        btTicket.takeProfit = btClampPositionSide(entry, price, isLong, minDist);
         btTicket.keep3R = false; // dragging TP directly always unlocks 3R, same rule a drawing's own tp handle already follows
     }
     btRenderTicket();
@@ -965,7 +1003,13 @@ function btComputeTicket() {
     // therefore never blocked client-side — same reasoning BacktestController.php
     // itself already has to re-check it at submit regardless.
     let blockReason = null;
-    if (t.direction === 'Long' && t.stopLoss >= entry) blockReason = 'For a Long, stop loss must be below entry.';
+    // v3.22.2 Fix 2 — a New Trade ticket opened with no source drawing starts with
+    // stopLoss 0 (rendered as an empty field, per the briefing's "SL empty" default),
+    // which the side-of-entry checks below don't actually catch (0 is a valid "below
+    // entry" value for a Long). Checked first, and explicitly, so the disabled reason
+    // reads "Enter a stop loss" rather than silently letting a zero-stop ticket through.
+    if (!t.stopLoss) blockReason = 'Enter a stop loss.';
+    else if (t.direction === 'Long' && t.stopLoss >= entry) blockReason = 'For a Long, stop loss must be below entry.';
     else if (t.direction === 'Short' && t.stopLoss <= entry) blockReason = 'For a Short, stop loss must be above entry.';
     else if (marginRequired > availableMargin) blockReason = `Margin required (${fmt(marginRequired)}) exceeds available margin (${fmt(Math.max(0, availableMargin))}).`;
     else if (liquidationBeforeStop) blockReason = `At ${t.leverage}x leverage, liquidation (~${fmtPrice5(liquidationPrice)}) would hit before your stop.`;
@@ -975,6 +1019,26 @@ function btComputeTicket() {
         entry, lotSize, notional, marginRequired, availableMargin, liquidationPrice, liquidationBeforeStop,
         entryFee, exitFee, totalFees, rr, riskUsdInput, riskUsdNet, rewardUsdNet, riskPctEffective,
         ladderTier, offLadder, blockReason,
+    };
+}
+
+/** v3.22.2 Fix 3 — the shape js/backtest-drawings.js::btDrawPosition() needs to render
+ *  the source drawing's box/pills from the OPEN TICKET's own values instead of the
+ *  drawing's last-saved settings (or, with no source drawing, a temporary standalone
+ *  box) -- built from the identical btComputeTicket() the ticket panel and on-chart
+ *  ticket lines already read, so all three can never disagree. Returns null when no
+ *  ticket is open. */
+function btTicketRenderValues() {
+    if (!btTicket) return null;
+    const c = btComputeTicket();
+    return {
+        tool: btTicket.direction === 'Long' ? 'position_long' : 'position_short',
+        entry: c.entry,
+        stop_loss: btTicket.stopLoss,
+        take_profit: btTicket.takeProfit,
+        riskUsdNet: c.riskUsdNet,
+        rewardUsdNet: c.rewardUsdNet,
+        lotSize: c.lotSize,
     };
 }
 
@@ -1087,6 +1151,10 @@ function btWireTicket(c) {
                 } else {
                     btTicket[group] = val;
                 }
+                // orderType and direction are two of the five Keep-3R recompute paths
+                // (v3.22.2 Fix 1) -- covers both branches above in one call rather than
+                // duplicating the recompute in each.
+                btTicketApplyKeep3R();
                 btRenderTicket();
             };
         });
@@ -1109,9 +1177,7 @@ function btWireTicket(c) {
     }
     document.getElementById('bt-ticket-keep3r').addEventListener('change', e => {
         btTicket.keep3R = e.target.checked;
-        if (btTicket.keep3R && btTicket.takeProfit !== null) {
-            btTicket.takeProfit = btComputeTpFromRatio(btTicket.direction === 'Long' ? 'position_long' : 'position_short', c.entry, btTicket.stopLoss, 3);
-        }
+        btTicketApplyKeep3R();
         btRenderTicket();
     });
     document.getElementById('bt-ticket-risk-value').addEventListener('change', e => {
@@ -1144,9 +1210,14 @@ async function btSubmitTicket() {
     const res = await btApi('backtest_place_order', 'POST', payload);
     if (res && res.error) { toast(res.error, 'error'); return; }
     toast(res.filled ? `Filled @ ${fmtPrice5(res.entry_price)}` : 'Limit order placed');
-    // The drawing tool that opened this ticket (if any) is left as a plain drawing for
-    // now -- linking it to the resulting trade and hiding it while the position is open
-    // is Part C (linked_trade_id, v3.22.3), not this release.
+    // v3.22.2 Fix 3 — the source drawing (if any) is saved with the ticket's own final
+    // values before closing, so what's left on the chart after Place Trade matches what
+    // was actually submitted, not whatever the drawing happened to say before the ticket
+    // was opened. Linking it to the resulting trade / hiding it while the position is
+    // open is still Part C (linked_trade_id, v3.22.3), not this release.
+    if (btTicket.sourceDrawingId) {
+        await btUpdateDrawing(btTicket.sourceDrawingId, { settings: { entry: c.entry, stop_loss: btTicket.stopLoss, take_profit: btTicket.takeProfit } });
+    }
     btCloseTicket();
     await refreshBtSession();
 }

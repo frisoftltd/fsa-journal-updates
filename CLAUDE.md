@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.22.1 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.2 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3988,6 +3988,122 @@ environment can't create one). Acrob still needs to run the eight-item verify li
 the briefing against a live deploy before this is trusted the way the rest of this file's
 verified-in-a-real-browser sections are.
 
+### v3.22.2: Backtest Realism, Part 2 Fixes — Keep-3R Recompute, New Trade, Ticket/Drawing Sync, Toolbar Overlap
+
+A fix release for v3.22.1's own bugs, found by actually running v3.22.1 in a real
+browser (headless Chromium via a new harness, see below) — not new scope. Confirms the
+browser-verification gap flagged at the end of v3.22.1 was real: every bug here was
+found by clicking through, not by reading the code.
+
+**Fix 1 (real calculation bug, gate 5):** Keep 3R wasn't recomputing TP when the
+*effective* entry changed — switching a ticket from Limit to Market moved the entry used
+for margin/lot-size/RR everywhere else, but TP stayed wherever it was computed at ticket-
+open time, so a "3R" take-profit silently stopped being 3R the moment the trader switched
+order types. Root cause: `js/backtest.js`'s own market-entry formula was duplicated
+inline at each call site instead of centralized, so ticket-open and the orderType switch
+never re-ran it. Fixed with two new small functions — `btTicketEffectiveEntry()` (the
+one place "what is entry right now" is computed: the live close for Market, the typed/
+dragged price for Limit) and `btTicketApplyKeep3R()` (the one place TP gets recomputed
+from it) — called from every path that can move effective entry, stop, or direction while
+Keep 3R is checked: ticket open, the orderType toggle, the direction toggle, a stop-loss
+edit (typed or dragged), and an entry-line drag. Verified in the browser: entry 8602.59/
+stop 8545.04 (Limit) → switch to Market (close 8580.94) → TP recomputes to 8688.64, RR
+reads exactly 1:3.00, and the submitted `backtest_place_order` payload's `take_profit`
+matches.
+
+**Fix 2:** the sidebar panel's own "Open Ticket" button wrongly refused with "Stop loss
+is required." when its own SL field was empty, reading as the ticket itself being broken.
+Renamed **New Trade**, and it now always opens the ticket (`btNewTradeClick()`), prefilled
+in priority order: the selected position tool, else the most recent position-tool drawing
+with no linked trade yet (`d._linkedTrade`, structurally still unset until v3.22.3), else
+a bare Market ticket at the current close with the sidebar's own direction toggle and SL
+empty. All validation now lives only in the ticket's own disabled-button reason — a
+missing stop is a new, explicit `blockReason` check in `btComputeTicket()` ("Enter a stop
+loss.", since a zero/empty stop doesn't trip the existing wrong-side-of-entry checks).
+The sidebar's own SL/TP/Limit-price inputs (and the order-type select) are removed
+entirely — one way to enter a trade, not two.
+
+**Fix 3:** while a ticket is open, the box/pills it was opened from kept showing the
+drawing's stale, pre-ticket numbers — after switching to Market above, the chart still
+said Entry 8761/Target 9049 while the ticket and its own on-chart lines already said
+8819/9281, i.e. the trader could see two different trades on screen at once.
+`btDrawPosition()` (`js/backtest-drawings.js`) now accepts an optional `override` —
+`js/backtest.js::btTicketRenderValues()`, built from the exact same `btComputeTicket()`
+the ticket panel itself renders from — and renders the linked drawing's box/pills from
+that instead of `d.settings` whenever `btTicket.sourceDrawingId === d.id`. `d.settings`
+itself is never touched while the ticket is open, so Cancel needs no revert logic at all
+— it already shows the original values the instant the override stops applying. A ticket
+opened with no source drawing (New Trade with nothing selected) draws a temporary,
+unselectable box from the ticket's values instead, anchored at the current replay bar
+(same `BT_POSITION_TOOL_SPAN_BARS` span a real drawing gets) — **caught in browser
+verification, not code review:** the anchor is `chartState.candles[].time` (raw UTC ms
+from the API) run through `toDisplaySeconds()` first — using the raw ms value directly,
+which every real drawing's own `points[].time` never does, would have placed the box
+wildly off-chart. Place Trade now saves the ticket's final entry/SL/TP into the source
+drawing via the existing `btUpdateDrawing()` before closing.
+
+**Fix 4:** the floating selection toolbar was positioned `topY − toolbarH − 10` measured
+from the topmost entry/stop/TP *line*, but the Stop/Target pills are drawn *offset
+outside* their line (Part A's own "outside the box" placement) — so the toolbar sat on
+top of the Target pill (Long) or Stop pill (Short) whenever the pill's own height pushed
+it above where the toolbar assumed the top of the box was. `btDrawPosition()` now tracks
+the actual on-screen bounding box of whichever pills it draws each frame
+(`d._btPillBounds`), and the toolbar measures from that instead; if that would place it
+above the chart area, it flips to below the lowest pill. Verified for both Long and Short
+in the browser via exact pixel-rectangle overlap checks (not just eyeballing
+screenshots), zero overlap both times.
+
+**Fix 5:** a one-line hint ("Draw a Long/Short position on the chart, or click New
+Trade.") now shows in the sidebar whenever the session has no position-tool drawing at
+all (`btUpdateNoDrawingHint()`, called on session load and after every drawing add/
+delete). Clicking inside a position box to select it already worked and needed no change.
+
+**A real, previously-unknown bug found *while building the browser harness itself*, not
+part of the original five-item list:** the order ticket (`#bt-ticket`) and the floating
+toolbar (`#bt-pos-toolbar`) are real DOM widgets that live *inside* `.tv-chart-wrap`
+(so they dock against the chart, per the v3.22.1 architecture) — but the drawing tools'
+own capture-phase `mousedown` listener is attached to that same `.tv-chart-wrap`, so it
+saw every click inside the ticket and toolbar too, hit-tested them against canvas
+coordinates, found no drawing there, and silently deselected whatever was selected. In
+practice: closing the ticket (even via Cancel) cleared `btSelectedDrawingId`, so the
+floating toolbar never came back for a drawing that was clearly still on screen — the
+only way to get "Place trade" back was to click the box again. Fixed with one guard,
+`btEventIsOnDrawingSurface(e)` (`!e.target.closest('#bt-ticket, #bt-pos-toolbar')`),
+checked first in `btOnDrawMouseDown`/`btOnDrawDblClick`/`btOnDrawContextMenu` — mousemove/
+mouseup need no change, since they only ever act on state a guarded mousedown could have
+set in the first place. This is exactly the kind of bug the browser-verification gap
+flagged at the end of v3.22.1 was warning about: invisible to code review, obvious the
+first time a real click sequence (open ticket → Cancel → try to reopen) ran in a real
+browser.
+
+**New: `tools/ui-harness/`** — a reusable, DB-free Playwright+PHP harness (outside
+`app/`, never deployed — not in `version.json`'s `files` array). `setup.js` copies `app/`
+into a fresh OS temp dir per run, overlays a stub `includes/config.php`
+(`requireLogin()`/`currentUser()` only) and a stub `includes/api.php` (mocks exactly the
+six backtest actions this flow needs, plus `get_user`/`get_challenges`/`get_risk_status`
+so `js/app.js`'s own `DOMContentLoaded` startup sequence doesn't throw before the page
+ever settles), vendors `lightweight-charts@4.1.3`/`chart.js@4.4.0` locally (this
+package's own npm dependencies) in place of the two CDN `<script>` tags, and serves it
+via `php -S` behind a one-file router. `drive.mjs` drives it with real Chromium,
+asserting on live page state (`btTicket`/`btComputeTicket()`/`btDrawings` read directly
+via `page.evaluate()`, not just DOM text) and saving a numbered screenshot after every
+step. `backtest_place_order` always returns `{error:'MOCK', received:<payload>}` — real
+enough to verify exactly what a ticket submitted, deliberately inert so nothing looks
+like a real fill; the one test that needs to see the *post-success* path
+(`btUpdateDrawing()` + close) monkey-patches the page's own `btApi()` for that single
+call instead of changing the PHP mock, so the real committed `btSubmitTicket()` code
+still runs end-to-end in the browser. **Use this for every UI release in this project
+from now on**, per the instruction that created it — no more shipping chart/canvas UI
+changes verified only by standalone math scripts.
+
+**Verified in the browser, all passing:** the Fix 1 repro exactly (TP 9281, RR 1:3.00,
+matching submitted payload); New Trade opening empty-SL on Market with the "Enter a stop
+loss" reason, enabling once a stop is typed; the drawing/ticket pill sync during a Limit→
+Market switch and Cancel correctly reverting it; save-into-drawing on a successful Place
+Trade; zero toolbar/pill overlap for both Long and Short; the discoverability hint
+appearing/disappearing with drawing count. `php -l` and `node --check` clean on every
+changed file.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -5088,7 +5204,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.1
+Current Version: v3.22.2
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

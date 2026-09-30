@@ -1,22 +1,16 @@
 {
-    "current_version": "3.21.12",
-    "release_date": "2026-09-29",
+    "current_version": "3.21.13",
+    "release_date": "2026-09-30",
     "changelog": [
-        "Backtesting drawing tools: added a per-user, per-tool 'Save as default' / 'Reset to default' template for the fib retracement tool. Previously every new fib was built purely from the hardcoded BT_TOOL_DEFAULTS.fib_retracement settings — a trader's customised levels/colours lived only on the one drawing they were set on, and were lost the moment that drawing was deleted or a new one was drawn, unlike TradingView's own behaviour of remembering the last-used (or explicitly saved) template.",
-        "New table user_drawing_defaults (migration 2026_09_29_0001), one row per (user, tool), storing a tool's settings object. Three new routes on BacktestDrawingController, all scoped to the logged-in user: get_drawing_defaults, save_drawing_default (INSERT ... AS new ON DUPLICATE KEY UPDATE — MySQL 8.0.19+ row-alias syntax, confirmed supported on this project's live MySQL 8.4 host), reset_drawing_default.",
-        "js/backtest-drawings.js loads this user's saved defaults once per session open (loadBtDrawingDefaults(), alongside the existing loadBtDrawings()). A new drawing's settings — and its live drag preview, so the preview never shows something different from what actually gets saved — are now btMergedToolDefaults(tool): the code's own BT_TOOL_DEFAULTS deep-merged with the user's saved default, with fib's levels array merged by ratio rather than array index specifically so a ratio added to the code later still appears even for a user who saved their default before that ratio existed.",
-        "The fib settings panel gains a Template row with 'Save as default' (saves the currently-open drawing's settings as this user's default for the tool) and 'Reset to default' (deletes the saved default; never touches the drawing itself, or any other existing drawing). Both toast on success/error. Generic by tool via a BT_TEMPLATE_TOOLS list — fib is the only tool opted in this release, so another tool can get the same two buttons later with a one-line change, no new plumbing.",
-        "Also fixed: loadBtDrawings() previously only logged a load failure to console.warn, silently — it now also shows a toast, matching every other failure path in this file.",
-        "Existing drawings are never modified by saving or resetting a default (verified: neither save_drawing_default nor reset_drawing_default touches backtest_drawings at all), and neither table is read by the replay/order/challenge engine — unchanged constraints from v3.21.0."
+        "Fixed the backtesting position tool (Long/Short) never checking which side of entry the stop/take-profit belonged on. Confirmed on live: a Short showed Entry 6883.40, SL 6330.28, TP 5305.40 — both below entry, when a Short's stop must be ABOVE entry. Root cause: btFinalizeNewDrawing() took the drag end's raw price as stop_loss verbatim regardless of direction, so dragging a Short DOWN (the natural gesture, same motion as a Long) put the stop below entry — wrong for a Short, and rejected outright by BacktestController::placeOrder()'s own direction check ('For a Short, stop loss must be above entry.'). The live drag preview had the identical defect. Long was never affected.",
+        "New drawing creation and the live preview now treat the drag end as the stop DISTANCE, not its side — the stop always lands on the correct side for the tool (below entry for Long, above for Short) regardless of which way the user drags, matching the Long tool's existing (already-correct) behaviour.",
+        "btApplyDrag() now clamps the stop and TP handles to the correct side of entry while dragging (a drag past entry stops at a minimum distance rather than crossing to the wrong side), and defensively re-clamps stop/TP when the entry handle itself is dragged. Minimum distance is 0.01% of entry — this app has no real tick-size concept (prices span 0.0044 to 71,968 on this account alone, per CLAUDE.md's v3.14.5 note), so a percentage-of-entry floor was used instead of a fixed absolute tick, scaling correctly across that whole range.",
+        "New helper btNormalizePositionSides(tool, settings): mirrors a wrong-side stop/TP across entry, preserving its original distance, and enforces the minimum distance. loadBtDrawings() now runs this on every position_long/position_short drawing on load and saves the repair once if anything changed — this is what fixes the already-broken live Short without any manual data edit. Verified against the exact live values from the bug report: entry 6883.40 / stop 6330.28 mirrors to stop ≈7436.52, TP (already on the correct side) is left untouched.",
+        "The red (entry-to-stop) and teal (entry-to-TP) fills already used the same 0.18 alpha — no colour change was needed. The 'pale greyish-red' look reported on the broken Short was the two zones overlapping (both below entry), not an alpha mismatch; once the geometry fix keeps them on opposite sides, the existing fills render solid on their own."
     ],
-    "release_notes": "New migration 2026_09_29_0001_create_user_drawing_defaults.sql — CREATE TABLE IF NOT EXISTS only, no MariaDB-only syntax. After Update Now, run migrate.php?mode=status then mode=run to apply it (this is in addition to, not instead of, the four backtest migrations already pending from earlier releases).",
+    "release_notes": "Code-only fix to js/backtest-drawings.js. No PHP, no migration. The existing live broken Short self-repairs the next time its session is opened (loadBtDrawings() now runs the repair automatically) — no manual data fix or DB access needed.",
     "files": [
-        {"path": "migrations/2026_09_29_0001_create_user_drawing_defaults.sql", "critical": false},
-        {"path": "includes/controllers/BacktestDrawingController.php", "critical": false},
-        {"path": "includes/router.php", "critical": false},
-        {"path": "js/backtest-drawings.js", "critical": false},
-        {"path": "js/backtest.js", "critical": false},
-        {"path": "css/style.css", "critical": false}
+        {"path": "js/backtest-drawings.js", "critical": false}
     ],
     "db_migrations": []
 }

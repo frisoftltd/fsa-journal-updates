@@ -317,6 +317,16 @@ async function loadBtDrawings() {
         console.warn('[backtest-drawings] could not load drawings:', res.error);
         toast('Could not load drawings — ' + res.error, 'error');
     }
+    // v3.21.13 — repairs any position drawing saved with the pre-fix bug (stop/TP on the
+    // wrong side of entry, e.g. a Short's stop below entry instead of above). Runs once
+    // per load; btNormalizePositionSides() mutates d.settings in place and returns true
+    // only when it actually changed something, so an already-correct drawing (every
+    // Long, and any Short drawn after this fix ships) triggers no save at all.
+    for (const d of btDrawings) {
+        if ((d.tool === 'position_long' || d.tool === 'position_short') && btNormalizePositionSides(d.tool, d.settings)) {
+            await btUpdateDrawing(d.id, { settings: d.settings });
+        }
+    }
     btScheduleRedraw();
 }
 /** This user's saved per-tool defaults — user-scoped, not session-scoped, but loaded
@@ -655,19 +665,34 @@ function btApplyDrag(dragState, newPoint) {
         return;
     }
     if (dragState.handleIndex === 'entry') {
+        const isLong = d.tool === 'position_long';
         const deltaEntry = newPoint.price - dragState.startSettings.entry;
         d.settings.entry = newPoint.price;
-        d.settings.stop_loss = dragState.startSettings.stop_loss + deltaEntry;
+        // v3.21.13 — shifting stop/tp by the same delta as entry preserves their original
+        // distance and side, so this can't newly cross entry on its own; still clamped
+        // defensively (btPositionMinDist is recomputed against the NEW entry, so a very
+        // large entry move to a tiny price still keeps a valid minimum gap either way).
+        const minDist = btPositionMinDist(d.settings.entry);
+        d.settings.stop_loss = btClampPositionSide(d.settings.entry, dragState.startSettings.stop_loss + deltaEntry, !isLong, minDist);
         d.settings.take_profit = d.settings.rr_locked
             ? btComputeTpFromRatio(d.tool, d.settings.entry, d.settings.stop_loss, d.settings.rr_ratio)
-            : dragState.startSettings.take_profit + deltaEntry;
+            : btClampPositionSide(d.settings.entry, dragState.startSettings.take_profit + deltaEntry, isLong, minDist);
     } else if (dragState.handleIndex === 'stop') {
-        d.settings.stop_loss = newPoint.price;
+        const isLong = d.tool === 'position_long';
+        const minDist = btPositionMinDist(d.settings.entry);
+        // v3.21.13 — clamped to the correct side of entry: Long's stop must stay below
+        // entry (wantAbove=false), Short's must stay above (wantAbove=true) — dragging
+        // past entry stops the handle at the boundary instead of crossing to the wrong
+        // side, which is what produced the live SL-below-entry Short this release fixes.
+        d.settings.stop_loss = btClampPositionSide(d.settings.entry, newPoint.price, !isLong, minDist);
         if (d.settings.rr_locked) {
             d.settings.take_profit = btComputeTpFromRatio(d.tool, d.settings.entry, d.settings.stop_loss, d.settings.rr_ratio);
         }
     } else if (dragState.handleIndex === 'tp') {
-        d.settings.take_profit = newPoint.price;
+        const isLong = d.tool === 'position_long';
+        const minDist = btPositionMinDist(d.settings.entry);
+        // Long's TP must stay above entry (wantAbove=true), Short's must stay below.
+        d.settings.take_profit = btClampPositionSide(d.settings.entry, newPoint.price, isLong, minDist);
         d.settings.rr_locked = false;
         const dist = Math.abs(d.settings.entry - d.settings.stop_loss);
         d.settings.rr_ratio = dist > 0 ? +(Math.abs(d.settings.take_profit - d.settings.entry) / dist).toFixed(2) : 0;
@@ -677,6 +702,80 @@ function btApplyDrag(dragState, newPoint) {
 function btComputeTpFromRatio(tool, entry, stop, ratio) {
     const dist = Math.abs(entry - stop);
     return tool === 'position_long' ? entry + dist * ratio : entry - dist * ratio;
+}
+
+// v3.21.13 — the position tool never checked which side of entry the stop/TP should be
+// on: btFinalizeNewDrawing() took the drag end's raw price as stop_loss regardless of
+// direction, so a Short dragged DOWN produced a stop BELOW entry (should be above) and,
+// via btComputeTpFromRatio()'s own Math.abs, a TP also below entry (should be above the
+// stop, below entry is right for TP on a short -- but the stop being below entry too is
+// what broke it: BacktestController::placeOrder() lines 550-558 reject exactly this
+// shape with "For a Short, stop loss must be above entry."). Same defect in the live
+// drag preview (mirrored the saved-drawing path exactly, since v3.21.12 made both call
+// the same merge helper). Long was never affected -- dragging down already put the stop
+// below entry, which happens to be correct for a Long.
+//
+// No real tick-size concept exists anywhere in this app -- prices span 0.0044 to 71,968
+// on this account alone (CLAUDE.md's v3.14.5 note) -- so "1 tick" from the ticket's own
+// instruction is interpreted as 0.01% of entry, the same relative-tolerance approach
+// this codebase already uses everywhere a fixed absolute epsilon would be wrong by
+// orders of magnitude across that range (e.g. btSnapPrice()'s own pixel-based cutoff).
+// Floored at Number.EPSILON purely so entry=0 (never a real price, but not worth a
+// crash) can't make minDist itself zero.
+function btPositionMinDist(entry) {
+    return Math.max(Math.abs(entry) * 0.0001, Number.EPSILON);
+}
+
+/** Clamps `price` to the correct side of `entry` for one handle, at least `minDist` away
+ *  -- used while dragging, so a handle that's dragged past entry (or too close to it)
+ *  STOPS at the boundary rather than jumping to the opposite side. `wantAbove` says which
+ *  side is correct for the handle being clamped (true = must be > entry, false = must be
+ *  < entry) -- callers pass the right side for their own handle+direction combination;
+ *  this function has no opinion about which handle or which tool it's clamping for. */
+function btClampPositionSide(entry, price, wantAbove, minDist) {
+    return wantAbove ? Math.max(price, entry + minDist) : Math.min(price, entry - minDist);
+}
+
+/** Repairs a position drawing's settings in place so stop_loss/take_profit land on the
+ *  correct side of entry for the tool (Long: stop < entry < tp; Short: tp < entry <
+ *  stop), each at least btPositionMinDist(entry) away. A stop/TP on the wrong side is
+ *  MIRRORED across entry (preserving its original distance from entry, per the ticket's
+ *  own "stop = entry ± |entry − stop|"), not clamped to the minimum -- mirroring is for
+ *  repairing an already-saved bad drawing (loadBtDrawings(), where there's no "boundary"
+ *  the user is dragging toward, just wrong data to fix), whereas the drag-time clamp in
+ *  btApplyDrag() uses btClampPositionSide() instead, deliberately, so a live drag stops
+ *  at the boundary rather than teleporting the handle to the opposite side mid-drag.
+ *  Returns true iff anything was actually changed, so callers (loadBtDrawings()) only
+ *  issue a save when a repair genuinely happened. */
+function btNormalizePositionSides(tool, s) {
+    const entry = s.entry;
+    const isLong = tool === 'position_long';
+    const minDist = btPositionMinDist(entry);
+    let changed = false;
+
+    const stopWrongSide = isLong ? (s.stop_loss >= entry) : (s.stop_loss <= entry);
+    if (stopWrongSide) {
+        const mirrored = isLong ? entry - Math.abs(entry - s.stop_loss) : entry + Math.abs(entry - s.stop_loss);
+        s.stop_loss = mirrored;
+        changed = true;
+    }
+    if (Math.abs(entry - s.stop_loss) < minDist) {
+        s.stop_loss = isLong ? entry - minDist : entry + minDist;
+        changed = true;
+    }
+
+    const tpWrongSide = isLong ? (s.take_profit <= entry) : (s.take_profit >= entry);
+    if (tpWrongSide) {
+        const mirrored = isLong ? entry + Math.abs(entry - s.take_profit) : entry - Math.abs(entry - s.take_profit);
+        s.take_profit = mirrored;
+        changed = true;
+    }
+    if (Math.abs(entry - s.take_profit) < minDist) {
+        s.take_profit = isLong ? entry + minDist : entry - minDist;
+        changed = true;
+    }
+
+    return changed;
 }
 
 // v3.21.1 — a real trader drags a position tool mostly VERTICALLY (the whole point is
@@ -698,7 +797,17 @@ async function btFinalizeNewDrawing(tool, points) {
     const settings = btMergedToolDefaults(tool);
     if (tool === 'position_long' || tool === 'position_short') {
         settings.entry = points[0].price;
-        settings.stop_loss = points[1].price;
+        // v3.21.13 — the drag end sets the stop DISTANCE, never its side: the stop
+        // always lands on the correct side for the tool (below entry for a Long, above
+        // for a Short) regardless of which way the user actually dragged. Previously
+        // this took points[1].price as the stop verbatim, so dragging a Short DOWN (the
+        // natural gesture, same as a Long) put the stop below entry — wrong for a Short,
+        // and rejected outright by BacktestController::placeOrder()'s own direction
+        // check ("For a Short, stop loss must be above entry.").
+        const isLong = tool === 'position_long';
+        const minDist = btPositionMinDist(settings.entry);
+        const stopDist = Math.max(Math.abs(points[1].price - points[0].price), minDist);
+        settings.stop_loss = isLong ? settings.entry - stopDist : settings.entry + stopDist;
         settings.take_profit = btComputeTpFromRatio(tool, settings.entry, settings.stop_loss, settings.rr_ratio);
         const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
         points = [{ time: points[0].time }, { time: points[0].time + spanMs / 1000 }];
@@ -822,8 +931,14 @@ function btRenderDrawings() {
             // Same fixed span used at finalize time (btFinalizeNewDrawing) -- shown live
             // while dragging so the preview never misleadingly renders a near-zero-width
             // box that the saved drawing won't actually have.
+            // v3.21.13 — same drag-end-is-a-distance-not-a-side treatment as
+            // btFinalizeNewDrawing(), so the preview always matches what actually gets
+            // saved a moment later, including for a Short.
             preview.settings.entry = previewPoints[0].price;
-            preview.settings.stop_loss = previewPoints[1].price;
+            const isLong = preview.tool === 'position_long';
+            const minDist = btPositionMinDist(preview.settings.entry);
+            const stopDist = Math.max(Math.abs(previewPoints[1].price - previewPoints[0].price), minDist);
+            preview.settings.stop_loss = isLong ? preview.settings.entry - stopDist : preview.settings.entry + stopDist;
             preview.settings.take_profit = btComputeTpFromRatio(preview.tool, preview.settings.entry, preview.settings.stop_loss, preview.settings.rr_ratio);
             const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
             preview.points = [{ time: previewPoints[0].time }, { time: previewPoints[0].time + spanMs / 1000 }];
@@ -1025,6 +1140,12 @@ function btDrawPosition(ctx, d, selected) {
     const yEntry = btPriceToY(s.entry), yStop = btPriceToY(s.stop_loss), yTp = btPriceToY(s.take_profit);
     if (yEntry === null || yStop === null || yTp === null) return;
 
+    // v3.21.13 — the red (entry↔stop) and teal (entry↔TP) fills already share the same
+    // 0.18 alpha; no change needed here. What made a broken Short look "pale greyish-red
+    // instead of solid red" was never the alpha — it was the two zones OVERLAPPING (stop
+    // and TP both below entry), so the fills painted on top of each other. Once the
+    // geometry fix above keeps stop and TP on opposite sides of entry, these two
+    // non-overlapping fillRect calls render as solid colour on their own, unchanged.
     ctx.fillStyle = 'rgba(239,83,80,0.18)';
     ctx.fillRect(left, Math.min(yEntry, yStop), right - left, Math.abs(yStop - yEntry));
     ctx.fillStyle = 'rgba(38,166,154,0.18)';

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.21.12 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.21.13 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3505,6 +3505,84 @@ Acrob still needs to click through the actual five-step verification list in a r
 browser against live once this deploys and its migration runs — this trace confirms the
 code does what it's supposed to, not that it renders/behaves correctly on screen.
 
+### v3.21.13: Position Tool Never Checked Which Side of Entry SL/TP Belonged On
+
+**Symptom, confirmed from a live screenshot:** a Short showed **Entry 6883.40 · SL
+6330.28 · TP 5305.40** — both below entry, when a Short's stop must sit *above* entry
+(the position loses money as price rises, so the stop that closes it out is above, not
+below). The Long tool was never affected — dragging down already puts the stop below
+entry, which happens to be correct for a Long, so the missing side-check never surfaced
+there.
+
+**Root cause.** `btFinalizeNewDrawing()` took the drag end's raw price as `stop_loss`
+verbatim, with no check of which side of entry it landed on. Dragging a Short **down**
+— the natural gesture, the same motion a Long tool is dragged — put the stop below
+entry: wrong for a Short. `btComputeTpFromRatio()`'s own `Math.abs` then computed a TP
+that was *also* below entry, which happens to be the *correct* side for a Short's TP —
+so the visible defect was specifically the stop, not the TP. The live drag preview had
+the identical bug (it mirrored the same math, unconditionally, since v3.21.12 made both
+paths call one shared settings function). `btApplyDrag()`'s `stop`/`tp` drag handles,
+and the `entry` handle with the R:R lock off, accepted any price with no side check
+either, so an existing drawing's handles could be dragged across entry to the wrong side
+just as easily as a brand-new one could be created wrong.
+
+**This geometry was never silently wrong on the server** — `BacktestController::
+placeOrder()` (lines 550–558) already rejects it outright (`"For a Short, stop loss must
+be above entry."`), so "Place Order" from a broken Short always failed; the bug was
+confined to the drawing tool's own client-side geometry, never reached a real trade.
+
+**Fix, four call sites:**
+1. **Creation (`btFinalizeNewDrawing()`) and the live preview** now treat the drag
+   end's distance from entry as the stop *distance*, never its side — `stopDist =
+   Math.abs(dragEnd - entry)`, then `stop = isLong ? entry - stopDist : entry +
+   stopDist`. Dragging a Short up or down now produces the identical, correct geometry
+   either way, matching how the Long tool already behaved.
+2. **`btApplyDrag()`**'s `stop` and `tp` handles are now clamped to the correct side of
+   entry via a new `btClampPositionSide(entry, price, wantAbove, minDist)` — dragging
+   past entry **stops the handle at the boundary** rather than letting it cross to the
+   wrong side. The `entry` handle (which shifts stop/TP by the same delta, so it can't
+   newly cross on its own) got the same clamp defensively, recomputed against the new
+   entry position.
+3. **Minimum distance is 0.01% of entry**, via `btPositionMinDist(entry)` — this app has
+   no real tick-size concept anywhere (prices span 0.0044 to 71,968 on this account
+   alone, per the v3.14.5 note above), so a fixed absolute tick would be wrong by orders
+   of magnitude across that range. A percentage-of-entry floor is the same relative-
+   tolerance approach this codebase already uses for exactly that reason (e.g.
+   `btSnapPrice()`'s own pixel-based, not price-based, cutoff).
+4. **Repair on load (`btNormalizePositionSides(tool, settings)`, new).** *Mirrors* — not
+   clamps — a wrong-side stop/TP across entry, preserving its original distance
+   (`entry ± |entry − original|`), then enforces the minimum distance. Mirroring, not
+   clamping, is deliberate here: this function repairs already-saved bad data where
+   there's no drag boundary to stop at, only a wrong number to fix; `btApplyDrag()`'s
+   clamp is for the live-drag case, where teleporting the handle to the opposite side
+   mid-drag would be a worse UX than stopping it at the boundary. `loadBtDrawings()` now
+   runs this on every `position_long`/`position_short` drawing and saves the fix once,
+   only if something actually changed — this is what repairs the already-broken live
+   Short with no manual data edit, the next time its session is opened.
+
+**Verified against the exact live values from the bug report**, via a standalone Node
+script (not a browser — no browser/DB access from this environment): mirroring
+`entry=6883.40, stop_loss=6330.28` for a Short produces `stop_loss ≈ 7436.52`
+(`6883.40 + |6883.40 − 6330.28|`), matching the ticket's own expected "~7436.5." The
+existing `take_profit=5305.40` is already on the correct side (below entry, correct for
+a Short) and is left untouched by the repair — confirmed the helper reports it
+unmodified. A parallel check confirmed an already-correct Long (`stop < entry < tp`)
+reports `changed = false` from the same function, so no already-good drawing gets an
+unnecessary save. Also verified: creating a Short by dragging either up or down from the
+same entry produces identical `stop`/`tp` values (geometry no longer depends on drag
+direction), and the drag-clamp math stops each handle on the correct side of entry for
+both Long and Short, mirrored correctly in both directions.
+
+**Colours (`btDrawPosition()`) needed no change.** The red (entry↔stop) and teal
+(entry↔TP) fills already used the same `0.18` alpha on both sides — the "pale greyish-
+red" look reported on the broken Short was the two zones **overlapping** (both below
+entry), not an alpha mismatch. Once the geometry fix keeps them on opposite sides of
+entry, the same two `fillRect()` calls render solid on their own.
+
+**Not touched:** no PHP, no migration — `js/backtest-drawings.js` only, per the
+briefing's own scope. `php -l` doesn't apply (no PHP changed); `node --check
+js/backtest-drawings.js` passed.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4605,7 +4683,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.21.12
+Current Version: v3.21.13
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

@@ -780,22 +780,374 @@ document.addEventListener('DOMContentLoaded', () => {
     setBtDirection('Long');
 });
 
+// v3.22.1 — the sidebar's own "Place Order" button no longer submits directly; it opens
+// the ticket, prefilled from these same fields. All real submission now goes through
+// btSubmitTicket(). Renamed in spirit, not in name, to avoid touching the onclick=
+// already wired in pages/backtest.php.
 async function placeBtOrder() {
     const errEl = document.getElementById('bt-order-error');
     errEl.textContent = '';
     if (!btSession || btSession.status !== 'active') { errEl.textContent = 'Session is not active.'; return; }
+    const sl = document.getElementById('bt-order-sl').value;
+    if (!sl) { errEl.textContent = 'Stop loss is required.'; return; }
+    btOpenTicket({
+        sourceDrawingId: null,
+        direction: btDirection,
+        orderType: document.getElementById('bt-order-type').value,
+        entry: document.getElementById('bt-order-type').value === 'limit' ? parseFloat(document.getElementById('bt-order-limit').value) || 0 : null,
+        stopLoss: parseFloat(sl),
+        takeProfit: document.getElementById('bt-order-tp').value ? parseFloat(document.getElementById('bt-order-tp').value) : null,
+    });
+}
+
+// ── ORDER TICKET (v3.22.1) ──────────────────────────────────
+// Replaces the old one-click "Place Long/Short" submit. Opened either from a position
+// tool's own floating toolbar (js/backtest-drawings.js::btOpenTicketFromDrawing(), which
+// calls btOpenTicket() below with sourceDrawingId set) or from the sidebar's "New Trade"
+// panel (placeBtOrder() above, sourceDrawingId null). Nothing is sent to the server until
+// the trader clicks Place Trade — every field here is local state until then.
+//
+// Single source of truth: btTicket itself. Both the panel's own number inputs AND the
+// on-chart entry/stop/TP lines (js/backtest-drawings.js's own rendering) are pure,
+// derived views of this one object — typing in the panel or dragging a line both just
+// mutate btTicket and call btRenderTicket(), which re-renders both. No separate
+// "sync" step and no feedback-loop risk, the same single-state-object pattern
+// btDrawings/d.settings already uses throughout the drawing-tools file.
+let btTicket = null; // null = closed
+
+// Mirrors backtest_engine.php's pure functions exactly (same formulas, same names minus
+// the bt-engine prefix collision) — duplicated deliberately, not shared over a network
+// round trip, matching how btComputeTpFromRatio()/btApplyDrag() in backtest-drawings.js
+// already duplicate server-side math for live, no-round-trip preview. BacktestController
+// ::checkMarginAndLiquidation()/fillPosition() remain the actual source of truth at
+// submit time — this is preview-only.
+function btCalcPositionSize(equity, riskPct, entry, stop) {
+    const dist = Math.abs(entry - stop);
+    return dist > 0 ? (equity * riskPct / 100) / dist : 0;
+}
+function btCalcFee(lotSize, price, feeRatePct) { return lotSize * price * feeRatePct / 100; }
+function btCalcMarginRequired(notional, leverage) { return leverage > 0 ? notional / leverage : notional; }
+function btCalcLiquidationPrice(direction, entry, leverage) {
+    if (leverage <= 0) return direction === 'Long' ? 0 : Infinity;
+    const frac = 1 / leverage;
+    return direction === 'Long' ? entry * (1 - frac) : entry * (1 + frac);
+}
+function btCalcLiquidationBeforeStop(direction, liqPrice, stop) {
+    return direction === 'Long' ? liqPrice > stop : liqPrice < stop;
+}
+/** Mirrors helpers.php::ladderTierForBalance() — lower-inclusive, upper-exclusive, a
+ *  null upper_pct means "and above." Operates on % of starting balance (the session's
+ *  own risk_ladder shape, v3.22.0), not absolute dollars. Returns null if no tier
+ *  matches (shouldn't happen with a well-formed 3-tier ladder covering 0-100+, but this
+ *  is preview-only math, not something to let throw). */
+function btLadderTierForEquityPct(session, equityPct) {
+    const tiers = Array.isArray(session.risk_ladder) ? session.risk_ladder : [];
+    for (const t of tiers) {
+        if (equityPct >= t.lower_pct && (t.upper_pct === null || t.upper_pct === undefined || equityPct < t.upper_pct)) return t;
+    }
+    return null;
+}
+
+/** sourceDrawingId: the backtest_drawings.id this ticket was opened from (position tool
+ *  "Place trade"), or null when opened from the sidebar panel. init: {direction,
+ *  orderType, entry, stopLoss, takeProfit} — entry is only meaningful for orderType
+ *  'limit'; a 'market' ticket always recomputes entry from the current bar's close on
+ *  every render (see btComputeTicket()), matching "switching to Market sets entry to
+ *  the current price" from the briefing. */
+function btOpenTicket(init) {
+    if (!btSession) return;
+    const lastCandle = chartState.candles[chartState.candles.length - 1];
+    const closePrice = lastCandle ? lastCandle.close : (init.entry || 0);
+    // Default: Limit if the tool's/panel's own entry is more than 0.05% from the
+    // current close, otherwise Market -- per the briefing. init.orderType, when given
+    // explicitly (the sidebar panel always sends one), overrides this default.
+    let orderType = init.orderType;
+    if (!orderType) {
+        const refEntry = init.entry || closePrice;
+        const pctFromClose = closePrice > 0 ? Math.abs(refEntry - closePrice) / closePrice * 100 : 0;
+        orderType = pctFromClose > 0.05 ? 'limit' : 'market';
+    }
+    btTicket = {
+        sourceDrawingId: init.sourceDrawingId || null,
+        direction: init.direction === 'Short' ? 'Short' : 'Long',
+        orderType,
+        // For a fresh Limit ticket with no real entry yet, default to the last close --
+        // the trader adjusts from there (per the hint text "Drag the orange entry line
+        // to set your price").
+        entry: (init.entry && init.entry > 0) ? init.entry : closePrice,
+        stopLoss: init.stopLoss || 0,
+        takeProfit: (init.takeProfit !== undefined && init.takeProfit !== null) ? init.takeProfit : null,
+        keep3R: true,
+        riskMode: '%',
+        // Prefilled from the session's flat risk_pct always, per the briefing ("Until
+        // [v3.22.2] lands, use flat risk") -- the ladder tier is looked up separately,
+        // for the off-ladder comparison only, not as the prefilled value.
+        riskValue: btSession.risk_pct,
+        leverage: btSession.default_leverage,
+    };
+    btRenderTicket();
+}
+function btCloseTicket() {
+    btTicket = null;
+    const el = document.getElementById('bt-ticket');
+    if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw(); // clears the on-chart ticket lines, drawn only while btTicket is truthy
+}
+/** Two-way sync entry point for a ticket-line drag (js/backtest-drawings.js). field is
+ *  'entry'|'stopLoss'|'takeProfit'. Applies the exact same v3.21.13 side-clamp/mirror
+ *  rules a position-tool drawing's own handles already use, via the shared
+ *  btPositionMinDist()/btClampPositionSide() helpers — a ticket's stop/TP can no more
+ *  cross entry than a drawing's can. */
+function btTicketSetField(field, price) {
+    if (!btTicket) return;
+    const isLong = btTicket.direction === 'Long';
+    if (field === 'entry') {
+        if (btTicket.orderType !== 'limit') return; // entry is only draggable for Limit, per the briefing
+        btTicket.entry = price;
+    } else if (field === 'stopLoss') {
+        const minDist = btPositionMinDist(btTicket.entry);
+        btTicket.stopLoss = btClampPositionSide(btTicket.entry, price, !isLong, minDist);
+        if (btTicket.keep3R && btTicket.takeProfit !== null) {
+            btTicket.takeProfit = btComputeTpFromRatio(btTicket.direction === 'Long' ? 'position_long' : 'position_short', btTicket.entry, btTicket.stopLoss, 3);
+        }
+    } else if (field === 'takeProfit') {
+        const minDist = btPositionMinDist(btTicket.entry);
+        btTicket.takeProfit = btClampPositionSide(btTicket.entry, price, isLong, minDist);
+        btTicket.keep3R = false; // dragging TP directly always unlocks 3R, same rule a drawing's own tp handle already follows
+    }
+    btRenderTicket();
+}
+
+/** All the ticket's derived numbers, computed fresh every render — nothing here is
+ *  stored, matching this whole app's "derive, don't store a stale copy" convention
+ *  (CLAUDE.md v3.13.0/v3.20.0). entry is recomputed from the live close on every call
+ *  for a Market order, never read from btTicket.entry directly — "Market recalculation"
+ *  from the briefing: entry always tracks the current price for a Market ticket. */
+function btComputeTicket() {
+    const t = btTicket;
+    const lastCandle = chartState.candles[chartState.candles.length - 1];
+    const entry = t.orderType === 'market' ? (lastCandle ? lastCandle.close : t.entry) : t.entry;
+    const equity = btSession.equity;
+    const feeRatePct = btSession.fee_rate_pct;
+
+    const riskUsdInput = t.riskMode === '$' ? t.riskValue : (equity * t.riskValue / 100);
+    const riskPctEffective = equity > 0 ? riskUsdInput / equity * 100 : 0;
+    const lotSize = btCalcPositionSize(equity, riskPctEffective, entry, t.stopLoss);
+    const notional = lotSize * entry;
+    const marginRequired = btCalcMarginRequired(notional, t.leverage);
+    const openPositions = (btSession.open_positions || []);
+    const marginInUse = openPositions.reduce((sum, p) => sum + (p.planned_margin || 0), 0);
+    const availableMargin = equity - marginInUse;
+    const liquidationPrice = btCalcLiquidationPrice(t.direction, entry, t.leverage);
+    const liquidationBeforeStop = btCalcLiquidationBeforeStop(t.direction, liquidationPrice, t.stopLoss);
+    const entryFee = btCalcFee(lotSize, entry, feeRatePct);
+    const exitFee = btCalcFee(lotSize, t.takeProfit !== null ? t.takeProfit : entry, feeRatePct);
+    const totalFees = entryFee + exitFee;
+    const stopDist = Math.abs(entry - t.stopLoss);
+    const rr = (stopDist > 0 && t.takeProfit !== null) ? Math.abs(t.takeProfit - entry) / stopDist : null;
+    // Amounts shown on the pills/ticket are net of the round-trip fee, per Part A's own
+    // spec ("Both are net of the round-trip fee"). riskUsdNet still uses the entry fee
+    // (already committed the moment the position opens) plus the exit fee AT THE STOP
+    // price specifically (the fee actually paid if the stop is what closes the trade) --
+    // not the same exitFee computed above at the TP price, which is what's paid if TP
+    // closes it instead.
+    const exitFeeAtStop = btCalcFee(lotSize, t.stopLoss, feeRatePct);
+    const riskUsdNet = riskUsdInput + entryFee + exitFeeAtStop;
+    const rewardUsdNet = t.takeProfit !== null ? Math.abs(t.takeProfit - entry) * lotSize - (entryFee + exitFee) : null;
+
+    const ladderTier = !btSession.use_flat_risk ? btLadderTierForEquityPct(btSession, equity / btSession.starting_balance * 100) : null;
+    const offLadder = ladderTier !== null && Math.abs(riskPctEffective - ladderTier.risk_pct) > 0.001;
+
+    // Blocking rules — mirrors BacktestController::placeOrder()'s own checks so the
+    // ticket's disabled reason is never a surprise once "Place Trade" is actually
+    // clicked. The cursor/latest-bar check has no local equivalent to verify against
+    // here (it's a server-side-only fact about the replay cursor at submit time) and is
+    // therefore never blocked client-side — same reasoning BacktestController.php
+    // itself already has to re-check it at submit regardless.
+    let blockReason = null;
+    if (t.direction === 'Long' && t.stopLoss >= entry) blockReason = 'For a Long, stop loss must be below entry.';
+    else if (t.direction === 'Short' && t.stopLoss <= entry) blockReason = 'For a Short, stop loss must be above entry.';
+    else if (marginRequired > availableMargin) blockReason = `Margin required (${fmt(marginRequired)}) exceeds available margin (${fmt(Math.max(0, availableMargin))}).`;
+    else if (liquidationBeforeStop) blockReason = `At ${t.leverage}x leverage, liquidation (~${fmtPrice5(liquidationPrice)}) would hit before your stop.`;
+    else if (btSession.max_trades_per_day && btSession.trades_today >= btSession.max_trades_per_day) blockReason = 'Daily trade cap reached for this session.';
+
+    return {
+        entry, lotSize, notional, marginRequired, availableMargin, liquidationPrice, liquidationBeforeStop,
+        entryFee, exitFee, totalFees, rr, riskUsdInput, riskUsdNet, rewardUsdNet, riskPctEffective,
+        ladderTier, offLadder, blockReason,
+    };
+}
+
+function btRenderTicket() {
+    if (!btTicket) return;
+    const c = btComputeTicket();
+    const el = document.getElementById('bt-ticket');
+    el.style.display = 'flex';
+    el.innerHTML = btTicketHtml(btTicket, c);
+    btWireTicket(c);
+    // Redraws the on-chart entry/stop/TP lines from this same, just-rendered state —
+    // btDrawTicketLines() (js/backtest-drawings.js) reads btTicket directly, so this is
+    // just a repaint trigger, not a second copy of the geometry.
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
+}
+
+function btTicketHtml(t, c) {
+    const segBtn = (group, val, label, extra) => `<button type="button" class="${t[group] === val ? 'active' : ''}" data-seg-group="${group}" data-seg-val="${val}">${label}</button>${extra || ''}`;
+    return `
+        <div class="bt-ticket-header">
+            <span class="bt-ticket-header-title">New Trade</span>
+            <button type="button" class="bt-ticket-close" id="bt-ticket-close-x" title="Cancel">✕</button>
+        </div>
+        <div class="bt-ticket-body">
+            <div class="bt-ticket-row">
+                <div class="bt-ticket-seg" data-seg-group="direction">
+                    ${segBtn('direction', 'Long', 'Long')}${segBtn('direction', 'Short', 'Short')}
+                </div>
+            </div>
+            <div class="bt-ticket-row">
+                <div class="bt-ticket-seg" data-seg-group="orderType">
+                    ${segBtn('orderType', 'market', 'Market')}${segBtn('orderType', 'limit', 'Limit')}
+                </div>
+                ${t.orderType === 'limit' ? '<div class="bt-ticket-hint">Drag the orange entry line to set your price</div>' : ''}
+            </div>
+            <div class="bt-ticket-row">
+                <div class="bt-ticket-toggle-row"><input type="checkbox" checked disabled><label style="margin:0;text-transform:none;font-size:12px;color:#d1d4dc">Stop Loss (required)</label></div>
+                <div class="bt-ticket-field-row">
+                    <input type="number" id="bt-ticket-sl" step="any" value="${t.stopLoss || ''}">
+                    <span class="bt-ticket-unit-badge">PRICE</span>
+                </div>
+            </div>
+            <div class="bt-ticket-row">
+                <div class="bt-ticket-toggle-row"><input type="checkbox" id="bt-ticket-tp-on" ${t.takeProfit !== null ? 'checked' : ''}><label style="margin:0;text-transform:none;font-size:12px;color:#d1d4dc">Take Profit</label></div>
+                <div class="bt-ticket-field-row" style="margin-bottom:6px">
+                    <input type="number" id="bt-ticket-tp" step="any" value="${t.takeProfit !== null ? t.takeProfit : ''}" ${t.takeProfit === null ? 'disabled' : ''}>
+                    <span class="bt-ticket-unit-badge">PRICE</span>
+                </div>
+                <div class="bt-ticket-toggle-row"><input type="checkbox" id="bt-ticket-keep3r" ${t.keep3R ? 'checked' : ''}><label style="margin:0;text-transform:none;font-size:12px;color:#d1d4dc">Keep 3R (gate 5)</label></div>
+            </div>
+            <div class="bt-ticket-row">
+                <label>Risk</label>
+                <div class="bt-ticket-field-row">
+                    <div class="bt-ticket-switch">
+                        <button type="button" data-risk-mode="%" class="${t.riskMode === '%' ? 'active' : ''}">%</button>
+                        <button type="button" data-risk-mode="$" class="${t.riskMode === '$' ? 'active' : ''}">$</button>
+                    </div>
+                    <input type="number" id="bt-ticket-risk-value" step="any" value="${t.riskValue}">
+                    <span class="bt-ticket-unit-badge">= ${fmt(c.riskUsdInput)}</span>
+                </div>
+                ${c.offLadder ? `<div class="bt-ticket-note amber">⚠ Off-ladder — ladder tier is ${c.ladderTier.risk_pct}% here, you're at ${c.riskPctEffective.toFixed(2)}%. Recorded as planned_risk_pct either way.</div>` : ''}
+            </div>
+            <div class="bt-ticket-row">
+                <label>Leverage</label>
+                <select id="bt-ticket-leverage">
+                    ${BT_ALLOWED_LEVERAGES.map(l => `<option value="${l}" ${t.leverage === l ? 'selected' : ''}>${l}×</option>`).join('')}
+                </select>
+                <div class="bt-ticket-computed"><span>Margin required</span><b>${fmt(c.marginRequired)}</b></div>
+                <div class="bt-ticket-computed"><span>Available margin</span><b>${fmt(c.availableMargin)}</b></div>
+                <div class="bt-ticket-computed"><span>Est. liquidation</span><b>${fmtPrice5(c.liquidationPrice)}</b></div>
+                <div class="bt-ticket-note">Leverage changes margin, not risk.</div>
+            </div>
+            <div class="bt-ticket-row">
+                <div class="bt-ticket-computed"><span>Lot Size</span><b>${c.lotSize.toFixed(4)}</b></div>
+                <div class="bt-ticket-computed"><span>RR</span><b>${c.rr !== null ? '1:' + c.rr.toFixed(2) : '—'}</b></div>
+            </div>
+            <div class="bt-ticket-row">
+                <div class="bt-ticket-computed"><span>Est. entry fee</span><b>${fmt(c.entryFee)}</b></div>
+                <div class="bt-ticket-computed"><span>Est. exit fee</span><b>${fmt(c.exitFee)}</b></div>
+                <div class="bt-ticket-computed"><span>Total fees</span><b>${fmt(c.totalFees)}</b></div>
+            </div>
+            ${c.blockReason ? `<div class="bt-ticket-disabled-reason">${escapeHtml(c.blockReason)}</div>` : ''}
+        </div>
+        <div class="bt-ticket-actions">
+            <button type="button" class="btn btn-ghost" id="bt-ticket-cancel-btn">Cancel</button>
+            <button type="button" class="btn btn-primary" id="bt-ticket-place-btn" ${c.blockReason ? 'disabled' : ''}>Place Trade</button>
+        </div>`;
+}
+
+function btWireTicket(c) {
+    document.getElementById('bt-ticket-close-x').onclick = btCloseTicket;
+    document.getElementById('bt-ticket-cancel-btn').onclick = btCloseTicket;
+
+    document.querySelectorAll('#bt-ticket [data-seg-group]').forEach(seg => {
+        seg.querySelectorAll('button[data-seg-val]').forEach(btn => {
+            btn.onclick = () => {
+                const group = btn.dataset.segGroup, val = btn.dataset.segVal;
+                if (group === 'direction' && val !== btTicket.direction) {
+                    // Switching Long<->Short mirrors SL/TP across entry, per the briefing --
+                    // reuses the exact same repair helper a drawing's own load-time fix
+                    // uses (v3.21.13), applied here to the ticket's own plain state object.
+                    const fakeSettings = { entry: c.entry, stop_loss: btTicket.stopLoss, take_profit: btTicket.takeProfit !== null ? btTicket.takeProfit : c.entry };
+                    btNormalizePositionSides(val === 'Long' ? 'position_long' : 'position_short', fakeSettings);
+                    btTicket.direction = val;
+                    btTicket.stopLoss = fakeSettings.stop_loss;
+                    if (btTicket.takeProfit !== null) btTicket.takeProfit = fakeSettings.take_profit;
+                } else if (group === 'orderType') {
+                    btTicket.orderType = val;
+                    if (val === 'market') btTicket.entry = c.entry; // snaps to current price immediately, not just on next render
+                } else {
+                    btTicket[group] = val;
+                }
+                btRenderTicket();
+            };
+        });
+    });
+
+    document.querySelectorAll('#bt-ticket [data-risk-mode]').forEach(btn => {
+        btn.onclick = () => { btTicket.riskMode = btn.dataset.riskMode; btRenderTicket(); };
+    });
+
+    document.getElementById('bt-ticket-sl').addEventListener('change', e => {
+        btTicketSetField('stopLoss', parseFloat(e.target.value) || 0);
+    });
+    document.getElementById('bt-ticket-tp-on').addEventListener('change', e => {
+        btTicket.takeProfit = e.target.checked ? btComputeTpFromRatio(btTicket.direction === 'Long' ? 'position_long' : 'position_short', c.entry, btTicket.stopLoss, 3) : null;
+        btRenderTicket();
+    });
+    const tpInput = document.getElementById('bt-ticket-tp');
+    if (tpInput && !tpInput.disabled) {
+        tpInput.addEventListener('change', e => btTicketSetField('takeProfit', parseFloat(e.target.value) || 0));
+    }
+    document.getElementById('bt-ticket-keep3r').addEventListener('change', e => {
+        btTicket.keep3R = e.target.checked;
+        if (btTicket.keep3R && btTicket.takeProfit !== null) {
+            btTicket.takeProfit = btComputeTpFromRatio(btTicket.direction === 'Long' ? 'position_long' : 'position_short', c.entry, btTicket.stopLoss, 3);
+        }
+        btRenderTicket();
+    });
+    document.getElementById('bt-ticket-risk-value').addEventListener('change', e => {
+        btTicket.riskValue = parseFloat(e.target.value) || 0;
+        btRenderTicket();
+    });
+    document.getElementById('bt-ticket-leverage').addEventListener('change', e => {
+        btTicket.leverage = parseInt(e.target.value, 10);
+        btRenderTicket();
+    });
+
+    document.getElementById('bt-ticket-place-btn').onclick = btSubmitTicket;
+}
+
+async function btSubmitTicket() {
+    if (!btTicket || !btSession) return;
+    const c = btComputeTicket();
+    if (c.blockReason) return; // button is disabled for this, but guard directly too
     const payload = {
         session_id: btActiveSessionId,
-        client_bar_time: btSession.replay_cursor_ms, // server rejects if this isn't exactly the session's own current bar -- "jump to latest" first
-        type: document.getElementById('bt-order-type').value,
-        direction: btDirection,
-        stop_loss: document.getElementById('bt-order-sl').value,
-        take_profit: document.getElementById('bt-order-tp').value || null,
-        limit_price: document.getElementById('bt-order-limit').value,
+        client_bar_time: btSession.replay_cursor_ms,
+        type: btTicket.orderType,
+        direction: btTicket.direction,
+        stop_loss: btTicket.stopLoss,
+        take_profit: btTicket.takeProfit,
+        leverage: btTicket.leverage,
+        risk_pct: c.riskPctEffective,
     };
+    if (btTicket.orderType === 'limit') payload.limit_price = btTicket.entry;
     const res = await btApi('backtest_place_order', 'POST', payload);
-    if (res && res.error) { errEl.textContent = res.error; return; }
+    if (res && res.error) { toast(res.error, 'error'); return; }
     toast(res.filled ? `Filled @ ${fmtPrice5(res.entry_price)}` : 'Limit order placed');
+    // The drawing tool that opened this ticket (if any) is left as a plain drawing for
+    // now -- linking it to the resulting trade and hiding it while the position is open
+    // is Part C (linked_trade_id, v3.22.3), not this release.
+    btCloseTicket();
     await refreshBtSession();
 }
 async function cancelBtOrder(orderId) {

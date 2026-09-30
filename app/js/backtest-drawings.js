@@ -483,26 +483,54 @@ function btPixelToPoint(x, y) {
  *  calling e.stopPropagation(), so a click on genuinely empty chart space is always left
  *  completely alone for the chart's own native pan/zoom/crosshair to handle. */
 function btIsCapturingInput() {
-    return !!(btActiveTool || btDrawInProgress || btDragState);
+    return !!(btActiveTool || btDrawInProgress || btDragState || btTicketDragField);
+}
+
+// v3.22.1 — which ticket line ('entry'|'stopLoss'|'takeProfit') is currently being
+// dragged, or null. A separate state var from btDragState (drawing drags) deliberately
+// -- the ticket's lines are not backtest_drawings rows, they're a plain rendering of
+// js/backtest.js's own btTicket state object, so they need their own drag tracking
+// rather than being folded into the drawing-drag machinery that assumes a real
+// drawing id to look up.
+let btTicketDragField = null;
+
+/** Full-width horizontal hit-test against the order ticket's own entry/stop/TP lines --
+ *  X doesn't matter (the lines span the whole canvas), only Y proximity, same
+ *  BT_LINE_HIT_TOLERANCE every other line-hit-test in this file already uses. Returns
+ *  null immediately when no ticket is open, so every caller of this function adds zero
+ *  behavior change for the overwhelming common case (no ticket open) without needing
+ *  its own guard. The Entry line only hit-tests at all for a Limit order -- a Market
+ *  order's entry always tracks the live close (see js/backtest.js::btComputeTicket())
+ *  and isn't meant to be dragged, per the briefing. */
+function btTicketLineHitTest(x, y) {
+    if (!btTicket) return null;
+    const c = btComputeTicket();
+    const yStop = btPriceToY(btTicket.stopLoss);
+    if (yStop !== null && Math.abs(y - yStop) <= BT_LINE_HIT_TOLERANCE) return 'stopLoss';
+    if (btTicket.takeProfit !== null) {
+        const yTp = btPriceToY(btTicket.takeProfit);
+        if (yTp !== null && Math.abs(y - yTp) <= BT_LINE_HIT_TOLERANCE) return 'takeProfit';
+    }
+    if (btTicket.orderType === 'limit') {
+        const yEntry = btPriceToY(c.entry);
+        if (yEntry !== null && Math.abs(y - yEntry) <= BT_LINE_HIT_TOLERANCE) return 'entry';
+    }
+    return null;
 }
 
 function btOnDrawMouseDown(e) {
     if (e.button !== 0) return; // left click only -- right click is contextmenu (settings)
     const { x, y } = btMousePos(e);
 
-    // A click on the position tool's own "Place Order" button, drawn during the last
-    // render -- checked before the general hit-test since the button sits on top of
-    // (and would otherwise be indistinguishable from) the entry/stop/tp level lines.
-    if (btSelectedDrawingId) {
-        const sel = btDrawings.find(d => d.id === btSelectedDrawingId);
-        if (sel && sel._placeOrderBtnRect) {
-            const r = sel._placeOrderBtnRect;
-            if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-                e.stopPropagation();
-                btPlaceOrderFromDrawing(sel);
-                return;
-            }
-        }
+    // v3.22.1 — the order ticket's own lines take priority over everything else while
+    // open: the trader is actively configuring an order, not drawing or panning.
+    // btTicketLineHitTest() returns null immediately when no ticket is open, so this
+    // adds zero behavior change the overwhelming majority of the time.
+    const ticketHit = btTicketLineHitTest(x, y);
+    if (ticketHit) {
+        e.stopPropagation();
+        btTicketDragField = ticketHit;
+        return;
     }
 
     if (btActiveTool) {
@@ -554,6 +582,16 @@ function btOnDrawMouseDown(e) {
 }
 
 function btOnDrawMouseMove(e) {
+    if (btTicketDragField) {
+        e.stopPropagation();
+        const { y } = btMousePos(e);
+        const price = btYToPrice(y);
+        // v3.21.13's own side-clamp is applied inside btTicketSetField()
+        // (js/backtest.js) itself, not here — same single-state-object/single-render
+        // pattern this whole ticket feature uses throughout.
+        if (price !== null) btTicketSetField(btTicketDragField, price);
+        return;
+    }
     if (!btDrawInProgress && !btDragState) return; // nothing of ours in progress -- let the chart's own crosshair/pan handle this move untouched
     e.stopPropagation();
     const { x, y } = btMousePos(e);
@@ -571,6 +609,11 @@ function btOnDrawMouseMove(e) {
 }
 
 function btOnDrawMouseUp(e) {
+    if (btTicketDragField) {
+        e.stopPropagation();
+        btTicketDragField = null; // the field's own value is already committed live, on every move -- nothing left to finalize here
+        return;
+    }
     if (!btDrawInProgress && !btDragState) return;
     e.stopPropagation();
     if (btDrawInProgress && btDrawInProgress.dragging) {
@@ -819,35 +862,199 @@ async function btFinalizeNewDrawing(tool, points) {
     btScheduleRedraw();
 }
 
-/** Reuses the existing, unchanged backtest_place_order endpoint -- this is what makes
- *  "blocked while the cursor isn't at the latest bar" and "blocked at the daily trade
- *  cap" work for free: both checks already live in BacktestController::placeOrder()
- *  (client_bar_time validation, checkTradeLimits()), and this sends exactly the same
- *  shape of request the manual New Order panel does. Entry at (or within 0.05% of) the
- *  current bar's close submits as a market order; anywhere else submits as a limit order
- *  at the tool's own entry price -- the position tool's entry is draggable to any price,
- *  which only makes sense as "enter here later" once it's away from the current price. */
-async function btPlaceOrderFromDrawing(d) {
+/** v3.22.1 — "Place trade" (the selection toolbar's own primary button, Part B1) now
+ *  OPENS THE TICKET instead of submitting directly — one-click submit with no
+ *  confirmation is exactly the behavior this whole release replaces. The drawing itself
+ *  is left untouched here; it's neither deleted nor yet linked to anything (that's
+ *  v3.22.3's linked_trade_id). Market-vs-Limit default (entry within 0.05% of the
+ *  current close) is computed inside js/backtest.js::btOpenTicket() itself from
+ *  whatever entry this drawing already has — not duplicated here. */
+function btOpenTicketFromDrawing(d) {
     if (!btSession || btSession.status !== 'active') { toast('Session is not active.', 'error'); return; }
-    const direction = d.tool === 'position_long' ? 'Long' : 'Short';
-    const lastCandle = chartState.candles[chartState.candles.length - 1];
-    const nearMarket = lastCandle && Math.abs(d.settings.entry - lastCandle.close) / lastCandle.close < 0.0005;
-    const payload = {
-        session_id: btActiveSessionId,
-        client_bar_time: btSession.replay_cursor_ms,
-        type: nearMarket ? 'market' : 'limit',
-        direction,
-        stop_loss: d.settings.stop_loss,
-        take_profit: d.settings.take_profit,
+    btOpenTicket({
+        sourceDrawingId: d.id,
+        direction: d.tool === 'position_long' ? 'Long' : 'Short',
+        entry: d.settings.entry,
+        stopLoss: d.settings.stop_loss,
+        takeProfit: d.settings.take_profit,
+    });
+}
+
+/**
+ * v3.22.1 Part B3 — full-width entry/stop/TP lines for the open order ticket, drawn on
+ * THIS SAME overlay canvas (not Lightweight Charts' native createPriceLine()) because
+ * native price lines have no drag support at all in this app's pinned chart version —
+ * this file's own original v3.21.0 architecture note already made exactly this call for
+ * every other drawing tool, for the same reason. Reuses btDrawPill() (Part A) for the
+ * near-right-edge pill labels. Entry line colour/style/label switch on order type
+ * (orange dashed "Limit {price}" vs. blue solid "Entry {price}"); Stop is always red
+ * dashed, TP always green dashed, both labelled with their net-of-fee dollar amount —
+ * same riskUsdNet/rewardUsdNet js/backtest.js::btComputeTicket() already computes for
+ * the ticket panel itself, so the on-chart pill and the panel's own numbers can never
+ * disagree.
+ */
+function btDrawTicketLines(ctx) {
+    if (!btTicket || !btDrawOverlay) return;
+    const c = btComputeTicket();
+    const w = btDrawOverlay.width;
+    const pillX = Math.max(60, w - 70);
+
+    const drawLine = (price, color, dashed) => {
+        const y = btPriceToY(price);
+        if (y === null) return null;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+        ctx.setLineDash(dashed ? [6, 4] : []);
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        ctx.setLineDash([]);
+        return y;
     };
-    if (!nearMarket) payload.limit_price = d.settings.entry;
-    const res = await btApi('backtest_place_order', 'POST', payload);
-    if (res && res.error) { toast(res.error, 'error'); return; }
-    toast(res.filled ? `Filled @ ${fmtPrice5(res.entry_price)}` : 'Limit order placed');
-    // "the tool converts to a live position marker" -- the real trade is now tracked by
-    // the replay engine itself; renderOpenPositions() (js/backtest.js) already shows it.
-    await btDeleteDrawing(d.id);
-    await refreshBtSession();
+
+    const entryColor = btTicket.orderType === 'limit' ? '#f59e0b' : '#2962ff';
+    const yEntry = drawLine(c.entry, entryColor, btTicket.orderType === 'limit');
+    if (yEntry !== null) {
+        const label = btTicket.orderType === 'limit' ? `Limit ${fmtPrice5(c.entry)}` : `Entry ${fmtPrice5(c.entry)}`;
+        btDrawPill(ctx, pillX, yEntry, label, entryColor);
+    }
+
+    const yStop = drawLine(btTicket.stopLoss, '#ef5350', true);
+    if (yStop !== null) btDrawPill(ctx, pillX, yStop, `Stop Loss −$${c.riskUsdNet.toFixed(2)}`, '#ef5350');
+
+    if (btTicket.takeProfit !== null) {
+        const yTp = drawLine(btTicket.takeProfit, '#26a69a', true);
+        if (yTp !== null && c.rewardUsdNet !== null) btDrawPill(ctx, pillX, yTp, `Take Profit +$${c.rewardUsdNet.toFixed(2)}`, '#26a69a');
+    }
+}
+
+// v3.22.1 Part B1 — the floating selection toolbar's own state. btToolbarOffset is a
+// lightweight, non-persisted manual-drag adjustment (see btWirePositionToolbar()'s own
+// doc comment for why this doesn't need the settings popover's remembered-position
+// treatment) — reset the moment a different drawing becomes selected.
+let btToolbarOffset = { dx: 0, dy: 0 };
+let btToolbarBuiltForId = null;
+
+/**
+ * v3.22.1 Part B1 — replaces the old canvas-drawn "Place Order" button
+ * (btDrawPlaceOrderButton(), removed this release) with a real, positioned DOM element:
+ * drag handle, colour, settings, Place trade (primary), Lock, Delete, left to right per
+ * the briefing. Shown only while a position_long/position_short drawing is selected and
+ * nothing else is capturing the gesture (a drag or an open ticket both hide it —
+ * showing a clickable toolbar mid-drag would be a confusing, easy-to-mis-click target).
+ * Called every redraw (btRenderDrawings()'s own tail call) but only rebuilds its inner
+ * HTML when the SELECTED DRAWING actually changes — btToolbarBuiltForId is what makes
+ * every other call a cheap reposition-only pass, not a full DOM rebuild every frame.
+ */
+function btPositionSelectionToolbar() {
+    const el = document.getElementById('bt-pos-toolbar');
+    if (!el) return;
+    const d = btSelectedDrawingId ? btDrawings.find(x => x.id === btSelectedDrawingId) : null;
+    const isPosition = d && (d.tool === 'position_long' || d.tool === 'position_short');
+    if (!isPosition || btDragState || btTicketDragField || btDrawInProgress) {
+        el.style.display = 'none';
+        btToolbarBuiltForId = null;
+        return;
+    }
+
+    if (btToolbarBuiltForId !== d.id) {
+        btToolbarOffset = { dx: 0, dy: 0 };
+        el.innerHTML = btPositionToolbarHtml(d);
+        btWirePositionToolbar(d);
+        btToolbarBuiltForId = d.id;
+    } else {
+        // Same drawing still selected -- just refresh the two bits of toolbar state
+        // that can change without the selection itself changing (the lock state via
+        // drag, the colour via the settings popover), without losing an in-progress
+        // colour-picker interaction (document.activeElement check).
+        const lockBtn = el.querySelector('[data-toolbar-lock]');
+        if (lockBtn) lockBtn.classList.toggle('active', !!d.settings.rr_locked);
+        const colorInput = document.getElementById('bt-pos-toolbar-color');
+        if (colorInput && document.activeElement !== colorInput) colorInput.value = d.settings.color || '#26a69a';
+    }
+    el.style.display = 'flex';
+
+    const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
+    if (x1 === null || x2 === null) { el.style.display = 'none'; return; }
+    const cx = (x1 + x2) / 2;
+    const ys = [btPriceToY(d.settings.entry), btPriceToY(d.settings.stop_loss), btPriceToY(d.settings.take_profit)].filter(y => y !== null);
+    const topY = ys.length ? Math.min(...ys) : 0;
+
+    const toolbarW = el.offsetWidth || 180, toolbarH = el.offsetHeight || 32;
+    let left = cx - toolbarW / 2 + btToolbarOffset.dx;
+    let top = topY - toolbarH - 10 + btToolbarOffset.dy;
+    const maxW = btDrawOverlay ? btDrawOverlay.width : 9999;
+    left = Math.max(4, Math.min(left, maxW - toolbarW - 4));
+    top = Math.max(4, top);
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+}
+
+/** Original, hand-drawn glyphs (24x24 viewBox, stroke-based) matching this file's own
+ *  existing v3.21.1 toolbar icon set — no tracing of any reference tool's artwork,
+ *  same convention that toolbar's own docblock already establishes. */
+function btPositionToolbarHtml(d) {
+    const locked = !!d.settings.rr_locked;
+    return `
+        <span class="bt-pos-toolbar-handle" id="bt-pos-toolbar-handle" title="Move toolbar">
+            <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
+        </span>
+        <div class="bt-pos-toolbar-sep"></div>
+        <input type="color" id="bt-pos-toolbar-color" value="${d.settings.color || '#26a69a'}" title="Colour">
+        <button type="button" id="bt-pos-toolbar-settings" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M4 12h2m12 0h2M12 4v2m0 12v2M6.3 6.3l1.4 1.4m8.6 8.6l1.4 1.4M6.3 17.7l1.4-1.4m8.6-8.6l1.4-1.4"/></svg>
+        </button>
+        <div class="bt-pos-toolbar-sep"></div>
+        <button type="button" class="bt-pos-toolbar-place" id="bt-pos-toolbar-place">Place trade</button>
+        <div class="bt-pos-toolbar-sep"></div>
+        <button type="button" id="bt-pos-toolbar-lock" data-toolbar-lock class="${locked ? 'active' : ''}" title="Lock R:R ratio">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="1"/>${locked ? '<path d="M8 11V7a4 4 0 0 1 8 0v4"/>' : '<path d="M8 11V7a4 4 0 0 1 7.6-1.8"/>'}</svg>
+        </button>
+        <button type="button" id="bt-pos-toolbar-delete" title="Delete">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        </button>`;
+}
+
+function btWirePositionToolbar(d) {
+    const colorInput = document.getElementById('bt-pos-toolbar-color');
+    if (colorInput) colorInput.oninput = () => {
+        d.settings.color = colorInput.value;
+        btUpdateDrawing(d.id, { settings: d.settings });
+        btScheduleRedraw();
+    };
+    const settingsBtn = document.getElementById('bt-pos-toolbar-settings');
+    if (settingsBtn) settingsBtn.onclick = (e) => btShowDrawSettingsPopover(d, e.clientX, e.clientY);
+    const placeBtn = document.getElementById('bt-pos-toolbar-place');
+    if (placeBtn) placeBtn.onclick = () => btOpenTicketFromDrawing(d);
+    const lockBtn = document.getElementById('bt-pos-toolbar-lock');
+    if (lockBtn) lockBtn.onclick = () => {
+        d.settings.rr_locked = !d.settings.rr_locked;
+        if (d.settings.rr_locked) d.settings.take_profit = btComputeTpFromRatio(d.tool, d.settings.entry, d.settings.stop_loss, d.settings.rr_ratio);
+        btUpdateDrawing(d.id, { settings: d.settings });
+        btScheduleRedraw();
+    };
+    const deleteBtn = document.getElementById('bt-pos-toolbar-delete');
+    if (deleteBtn) deleteBtn.onclick = () => btDeleteDrawing(d.id);
+
+    // Drag handle: moves the toolbar only, for as long as THIS drawing stays selected
+    // (btToolbarOffset resets in btPositionSelectionToolbar() the moment the selection
+    // changes). Deliberately not persisted to localStorage/the server the way the
+    // settings popover's own position is (v3.21.4) — a toolbar that only exists while
+    // one specific drawing is selected has nothing meaningful to remember the position
+    // FOR once that selection ends; this is a same-session convenience, not a
+    // preference.
+    const handle = document.getElementById('bt-pos-toolbar-handle');
+    if (handle) {
+        handle.onmousedown = (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const startX = e.clientX, startY = e.clientY;
+            const startOffset = { dx: btToolbarOffset.dx, dy: btToolbarOffset.dy };
+            const onMove = (ev) => {
+                btToolbarOffset = { dx: startOffset.dx + (ev.clientX - startX), dy: startOffset.dy + (ev.clientY - startY) };
+                btPositionSelectionToolbar();
+            };
+            const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        };
+    }
 }
 
 // ── HIT-TESTING ────────────────────────────────────────────
@@ -945,6 +1152,17 @@ function btRenderDrawings() {
         }
         btDrawOne(ctx, preview, false, true);
     }
+
+    // v3.22.1 — the order ticket's own full-width lines (Part B3) and the floating
+    // selection toolbar (Part B1) are both real, separate rendering passes: the lines
+    // are canvas-drawn (same overlay, same coordinate system as every drawing tool,
+    // which is what makes them draggable at all — Lightweight Charts' native
+    // createPriceLine() has no drag support), the toolbar is a real DOM element
+    // positioned to match. Both no-op immediately when their own state (btTicket /
+    // btSelectedDrawingId) is empty, so neither changes anything when the ticket is
+    // closed and nothing is selected — the overwhelming common case.
+    btDrawTicketLines(ctx);
+    btPositionSelectionToolbar();
 }
 function btDrawOne(ctx, d, selected, isPreview) {
     ctx.save();
@@ -1132,11 +1350,65 @@ function btDrawFib(ctx, d, selected) {
     });
     if (selected) { btDrawHandle(ctx, p1.x, p1.y, s.trend_color || '#787b86'); btDrawHandle(ctx, p2.x, p2.y, s.trend_color || '#787b86'); }
 }
+/** Rounded-rect path, used by btDrawPill() below and nowhere else — a small, self-
+ *  contained helper rather than relying on ctx.roundRect() (Chrome 99+ only; this app
+ *  makes no assumption about a specific minimum Chrome version elsewhere, so a manual
+ *  arcTo-based path is the safer default). */
+function btRoundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+/** v3.22.1 — the pill label primitive Part A's Stop/Centre/Target labels and Part B3's
+ *  ticket-line labels both use: a filled, rounded rectangle centred at (cx, cy), white
+ *  text, one line or several (stacked, fixed line height). Returns the drawn rect so a
+ *  caller can hit-test against it later if needed (not currently used for that, but
+ *  kept for parity with btDrawPlaceOrderButton()'s old _placeOrderBtnRect pattern). */
+function btDrawPill(ctx, cx, cy, lines, bgColor) {
+    const arr = Array.isArray(lines) ? lines : [lines];
+    ctx.font = '11px monospace';
+    const lineH = 14, padX = 8, padY = 5;
+    const textW = Math.max(...arr.map(l => ctx.measureText(l).width));
+    const w = textW + padX * 2, h = arr.length * lineH + padY * 2 - 2;
+    const x = cx - w / 2, y = cy - h / 2;
+    btRoundRectPath(ctx, x, y, w, h, Math.min(5, h / 2));
+    ctx.fillStyle = bgColor;
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    arr.forEach((l, i) => ctx.fillText(l, cx, y + padY + lineH * (i + 1) - 3));
+    ctx.textAlign = 'left';
+    return { x, y, w, h };
+}
+
+/**
+ * v3.22.1 rewrite — Part A of the order-ticket briefing. Replaces the old plain
+ * monospace text block (Entry/SL TP/R:R/Risk/Size stacked to the right of the box) with
+ * three pill labels: Stop (red, on the stop edge, outside the box), Centre (on the
+ * entry line — neutral grey until a real trade is linked, v3.22.3's linked_trade_id;
+ * red/teal by floating P&L once it is), Target (teal, on the TP edge, outside the box).
+ * All three are centred HORIZONTALLY on the box, per the spec table.
+ *
+ * Amounts (Stop's risk $, Target's reward $) are net of the round-trip fee — entry fee
+ * plus the exit fee AT THAT LEVEL'S OWN PRICE (the stop's exit fee for the Stop pill's
+ * Amount, the target's own exit fee for the Target pill's Amount; these differ slightly
+ * since fee is charged on fill price, not a single shared number) — same formula
+ * js/backtest.js's own btComputeTicket() uses for riskUsdNet/rewardUsdNet, so a drawing's
+ * own preview pills and the eventual order ticket never disagree about what "Amount"
+ * means. Sizing itself still comes from the session's flat risk_pct (btSession.risk_pct)
+ * — a plain drawing has no leverage/risk chosen yet; that only exists once "Place trade"
+ * opens the real ticket (v3.22.1 Part B), which is free to size differently.
+ */
 function btDrawPosition(ctx, d, selected) {
     const s = d.settings;
     const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
     if (x1 === null || x2 === null) return;
     const left = Math.min(x1, x2), right = Math.max(x1, x2);
+    const cx = (left + right) / 2;
     const yEntry = btPriceToY(s.entry), yStop = btPriceToY(s.stop_loss), yTp = btPriceToY(s.take_profit);
     if (yEntry === null || yStop === null || yTp === null) return;
 
@@ -1156,37 +1428,55 @@ function btDrawPosition(ctx, d, selected) {
 
     const equity = btSession ? btSession.equity : 0;
     const riskPct = btSession ? btSession.risk_pct : 1;
-    const riskUsd = equity * riskPct / 100;
+    const feeRatePct = btSession ? btSession.fee_rate_pct : 0;
+    const grossRiskUsd = equity * riskPct / 100;
     const stopDist = Math.abs(s.entry - s.stop_loss);
-    const size = stopDist > 0 ? riskUsd / stopDist : 0;
-    const rr = stopDist > 0 ? (Math.abs(s.take_profit - s.entry) / stopDist).toFixed(2) : '—';
+    const tpDist = Math.abs(s.take_profit - s.entry);
+    const size = stopDist > 0 ? grossRiskUsd / stopDist : 0;
+    const entryFee = (typeof btCalcFee === 'function') ? btCalcFee(size, s.entry, feeRatePct) : 0;
+    const exitFeeAtStop = (typeof btCalcFee === 'function') ? btCalcFee(size, s.stop_loss, feeRatePct) : 0;
+    const exitFeeAtTp = (typeof btCalcFee === 'function') ? btCalcFee(size, s.take_profit, feeRatePct) : 0;
+    const riskUsdNet = grossRiskUsd + entryFee + exitFeeAtStop;
+    const rewardUsdNet = tpDist * size - (entryFee + exitFeeAtTp);
+    const rr = stopDist > 0 ? (tpDist / stopDist).toFixed(2) : '—';
+    const stopPct = s.entry !== 0 ? (stopDist / Math.abs(s.entry) * 100).toFixed(2) : '0.00';
+    const tpPct = s.entry !== 0 ? (tpDist / Math.abs(s.entry) * 100).toFixed(2) : '0.00';
 
-    ctx.font = '11px monospace'; ctx.fillStyle = '#d1d4dc';
-    [
-        `Entry ${fmtPrice5(s.entry)}`,
-        `SL ${fmtPrice5(s.stop_loss)}  TP ${fmtPrice5(s.take_profit)}`,
-        `R:R ${rr}${s.rr_locked ? ' (locked)' : ''}`,
-        `Risk $${riskUsd.toFixed(2)} (${riskPct}%)`,
-        `Size ${size.toFixed(4)}`,
-    ].forEach((line2, i) => ctx.fillText(line2, right + 6, yEntry - 20 + i * 13));
+    // "Outside the box" — offset further away from entry than the level itself, on
+    // whichever side of entry that level already sits (works for both Long and Short
+    // without a direction branch: the sign of (yLevel - yEntry) already encodes which
+    // way is "away").
+    const stopPillY = yStop + Math.sign(yStop - yEntry || 1) * 16;
+    const tpPillY = yTp + Math.sign(yTp - yEntry || -1) * 16;
+    btDrawPill(ctx, cx, stopPillY, `Stop: ${fmtPrice5(s.stop_loss)}, ${stopDist.toFixed(2)} pts (${stopPct}%), Amount: $${riskUsdNet.toFixed(2)}`, '#ef5350');
+    btDrawPill(ctx, cx, tpPillY, `Target: ${fmtPrice5(s.take_profit)}, ${tpDist.toFixed(2)} pts (${tpPct}%), Amount: $${rewardUsdNet.toFixed(2)}`, '#26a69a');
+    // Centre pill: neutral grey until a real trade is linked (v3.22.3's
+    // linked_trade_id) — d._linkedTrade doesn't exist yet in this release, so this
+    // always takes the neutral branch today; the floating-P&L branch is wired in
+    // structurally now so v3.22.3 only has to set d._linkedTrade, not touch this
+    // function again.
+    const linked = d._linkedTrade || null;
+    const centreColor = !linked ? '#4b5563' : (linked.floating_pnl < 0 ? '#ef5350' : '#26a69a');
+    const centreLines = linked
+        ? [`Open P&L: ${linked.floating_pnl >= 0 ? '+' : ''}${fmt(linked.floating_pnl)}, Qty: ${linked.lot_size}`, `Entry: ${fmtPrice5(s.entry)}, RR 1:${rr}`]
+        : [`Entry: ${fmtPrice5(s.entry)}, RR 1:${rr}${s.rr_locked ? ' (locked)' : ''}`];
+    btDrawPill(ctx, cx, yEntry, centreLines, centreColor);
 
     if (selected) {
         btDrawHandle(ctx, left, yEntry, '#d1d4dc');
         btDrawHandle(ctx, left, yStop, '#ef5350');
         btDrawHandle(ctx, left, yTp, '#26a69a');
-        btDrawPlaceOrderButton(ctx, d, left, yEntry);
-    } else {
-        d._placeOrderBtnRect = null;
+        // x-axis time pills — the box's own start/end times, small blue pills, shown
+        // only while selected (per the spec's own "when the tool is selected").
+        // HH:MM is deliberately compact -- there's no room for a full date on the
+        // time axis, and the date itself is already visible via the chart's own
+        // crosshair/legend elsewhere.
+        const axisY = ctx.canvas.height - 10;
+        ctx.font = '10px monospace';
+        const fmtAxisTime = t => new Date(t * 1000).toISOString().slice(11, 16);
+        if (x1 !== null) btDrawPill(ctx, x1, axisY, fmtAxisTime(d.points[0].time), '#2962ff');
+        if (x2 !== null) btDrawPill(ctx, x2, axisY, fmtAxisTime(d.points[1].time), '#2962ff');
     }
-}
-function btDrawPlaceOrderButton(ctx, d, left, yEntry) {
-    const w = 90, h = 22, x = left + 4, y = yEntry + 10;
-    d._placeOrderBtnRect = { x, y, w, h };
-    ctx.fillStyle = d.tool === 'position_long' ? '#26a69a' : '#ef5350';
-    ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(d.tool === 'position_long' ? 'Place Long' : 'Place Short', x + w / 2, y + h / 2 + 4);
-    ctx.textAlign = 'left';
 }
 
 // ── SETTINGS POPOVER (right-click, or double-click, on a drawing) ──

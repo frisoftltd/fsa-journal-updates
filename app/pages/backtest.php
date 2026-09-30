@@ -193,6 +193,18 @@
       <div class="tv-chart-wrap">
         <div class="tv-legend" id="tv-legend"></div>
         <div id="tv-chart"></div>
+        <!-- v3.22.1 — order ticket, built entirely by js/backtest.js::btTicketHtml() /
+             btRenderTicket() on open, same "rebuild the inner HTML on each relevant
+             state change" convention js/backtest-drawings.js already uses for the
+             settings popover (btDrawSettingsHtml()). Lives inside .tv-chart-wrap
+             (position:relative) so it docks against the chart, not the page, and the
+             chart stays visible while it's open, per the briefing. -->
+        <div id="bt-ticket" class="bt-ticket" style="display:none"></div>
+        <!-- v3.22.1 — the floating selection toolbar (replaces the old canvas-drawn
+             "Place Long/Short" button). Positioned each redraw by
+             js/backtest-drawings.js::btPositionSelectionToolbar(), just above whichever
+             position-tool box is currently selected. -->
+        <div id="bt-pos-toolbar" class="bt-pos-toolbar" style="display:none"></div>
       </div>
 
       <div class="bt-side-panel">
@@ -210,7 +222,13 @@
         </div>
 
         <div class="bt-panel-block">
-          <div class="bt-panel-title">New Order</div>
+          <!-- v3.22.1 — this panel no longer submits an order directly. It's now a
+               quick prefill for the order ticket: "New Trade" opens the same docked
+               ticket panel the position tool's own "Place trade" button opens,
+               prefilled from whatever's filled in here. All real validation/submission
+               happens in the ticket (js/backtest.js::btOpenTicket()/btSubmitTicket()) --
+               this panel's own fields are never sent to the server directly anymore. -->
+          <div class="bt-panel-title">New Trade</div>
           <div class="form-group" style="margin-bottom:8px">
             <select id="bt-order-type"><option value="market">Market</option><option value="limit">Limit</option></select>
           </div>
@@ -221,7 +239,7 @@
           <div class="form-group" id="bt-limit-price-group" style="display:none;margin-bottom:8px"><label>Limit Price</label><input type="number" id="bt-order-limit" step="any"></div>
           <div class="form-group" style="margin-bottom:8px"><label>Stop Loss</label><input type="number" id="bt-order-sl" step="any"></div>
           <div class="form-group" style="margin-bottom:10px"><label>Take Profit (optional)</label><input type="number" id="bt-order-tp" step="any"></div>
-          <button class="btn btn-primary" style="width:100%" onclick="placeBtOrder()">Place Order</button>
+          <button class="btn btn-primary" style="width:100%" onclick="placeBtOrder()">Open Ticket</button>
           <div id="bt-order-error" style="color:var(--red);font-size:11px;margin-top:6px"></div>
         </div>
 

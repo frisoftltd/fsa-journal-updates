@@ -608,6 +608,15 @@ class BacktestController {
         if ($stopLoss <= 0) jsonError('Stop loss is required for every backtest order.');
         $takeProfit = (isset($d['take_profit']) && $d['take_profit'] !== '') ? num($d['take_profit']) : null;
 
+        // v3.22.1 — the order ticket lets both be edited per order; each falls back to
+        // the session's own default rather than rejecting the request when omitted or
+        // invalid, so the plain New Order sidebar panel (which may not send either) keeps
+        // working exactly as before this release.
+        $leverage = (int) ($d['leverage'] ?? $session['default_leverage']);
+        if (!in_array($leverage, self::ALLOWED_LEVERAGES, true)) $leverage = (int) $session['default_leverage'];
+        $riskPct = num($d['risk_pct'] ?? $session['risk_pct']);
+        if ($riskPct <= 0 || $riskPct > 100) $riskPct = (float) $session['risk_pct'];
+
         $state = $this->computeSessionState($session);
         $limits = $this->checkTradeLimits($session, $state, $session['replay_cursor_ms']);
         if ($limits['blocked']) jsonError($limits['reason']);
@@ -619,17 +628,19 @@ class BacktestController {
             $entryPrice = (float) $currentBar['close'];
             if ($direction === 'Long' && $stopLoss >= $entryPrice) jsonError('For a Long, stop loss must be below entry.');
             if ($direction === 'Short' && $stopLoss <= $entryPrice) jsonError('For a Short, stop loss must be above entry.');
-            $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $state['equity'], $currentBar['open_time']);
+            $this->checkMarginAndLiquidation($session, $direction, $entryPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
+            $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time']);
             jsonResponse(['success' => true, 'filled' => true, 'entry_price' => $entryPrice]);
         } else {
             $limitPrice = num($d['limit_price'] ?? 0);
             if ($limitPrice <= 0) jsonError('Limit price is required for a limit order.');
             if ($direction === 'Long' && $stopLoss >= $limitPrice) jsonError('For a Long, stop loss must be below the limit price.');
             if ($direction === 'Short' && $stopLoss <= $limitPrice) jsonError('For a Short, stop loss must be above the limit price.');
+            $this->checkMarginAndLiquidation($session, $direction, $limitPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
             $this->db->prepare(
-                "INSERT INTO backtest_pending_orders (session_id, direction, limit_price, stop_loss, take_profit, risk_pct, placed_at_bar_time)
-                 VALUES (?,?,?,?,?,?,?)"
-            )->execute([$session['id'], $direction, $limitPrice, $stopLoss, $takeProfit, $session['risk_pct'], $currentBar['open_time']]);
+                "INSERT INTO backtest_pending_orders (session_id, direction, limit_price, stop_loss, take_profit, risk_pct, leverage, placed_at_bar_time)
+                 VALUES (?,?,?,?,?,?,?,?)"
+            )->execute([$session['id'], $direction, $limitPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $currentBar['open_time']]);
             jsonResponse(['success' => true, 'filled' => false, 'pending_order_id' => (int) $this->db->lastInsertId()]);
         }
     }
@@ -744,9 +755,14 @@ class BacktestController {
             if (!$touched) continue;
 
             $state = $this->computeSessionState($session, $bar);
+            // v3.22.1 — the ORDER's own risk_pct/leverage (whatever was chosen in the
+            // ticket at placement time), never the session's current defaults — a
+            // limit order can sit pending for many bars, during which the session's own
+            // defaults could in principle be nothing this trade was ever sized against.
             $tradeId = $this->fillPosition(
                 $session, $order['direction'], (float) $order['limit_price'], (float) $order['stop_loss'],
-                $order['take_profit'] !== null ? (float) $order['take_profit'] : null, $state['equity'], $bar['open_time']
+                $order['take_profit'] !== null ? (float) $order['take_profit'] : null,
+                (float) $order['risk_pct'], (int) $order['leverage'], $state['equity'], $bar['open_time']
             );
             $this->db->prepare("UPDATE backtest_pending_orders SET status='filled', trade_id=? WHERE id=?")->execute([$tradeId, $order['id']]);
             $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'price' => (float) $order['limit_price']];
@@ -773,24 +789,65 @@ class BacktestController {
 
     /** Opens a new backtest position: sizes it from risk % of current equity against
      *  the stop distance, charges the entry-side fee, writes it into `trades` exactly
-     *  like a live import would (source='backtest' instead of 'import'/'manual'). */
-    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $equity, int $barTime): int {
-        $riskAmount = $equity * (float) $session['risk_pct'] / 100;
-        $lotSize = backtestPositionSize($equity, (float) $session['risk_pct'], $entryPrice, $stopLoss);
+     *  like a live import would (source='backtest' instead of 'import'/'manual').
+     *
+     *  v3.22.1 — riskPct/leverage are now explicit parameters, not always read from
+     *  $session: a market order uses whatever the ticket actually submitted (already
+     *  validated/defaulted by the caller), a limit order uses what was stored on the
+     *  pending order at placement time (see evaluateBar()'s own call site) — neither is
+     *  necessarily the session's CURRENT risk_pct/default_leverage by the time this
+     *  actually runs. leverage/planned_margin are stored so the ticket's own "margin
+     *  required" figure is reconstructable from the trade row afterward; planned_margin
+     *  is reused (not a new column) per the original v3.22.0 briefing's own "reuse
+     *  existing trades columns" instruction — see the migration's own doc comment. */
+    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime): int {
+        $riskAmount = $equity * $riskPct / 100;
+        $lotSize = backtestPositionSize($equity, $riskPct, $entryPrice, $stopLoss);
         $entryFee = round(backtestFee($lotSize, $entryPrice, (float) $session['fee_rate_pct']), 4);
+        $marginUsed = round(backtestMarginRequired($lotSize * $entryPrice, $leverage), 2);
         $tradeDate = gmdate('Y-m-d', (int) ($barTime / 1000));
         $timeIn = gmdate('Y-m-d H:i:s', (int) ($barTime / 1000));
 
         $this->db->prepare(
             "INSERT INTO trades
                 (user_id, challenge_id, trade_date, time_in, pair, direction, entry_price, stop_loss, take_profit,
-                 lot_size, fees, result, source, backtest_session_id, risk_amount)
-             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?)"
+                 lot_size, fees, result, source, backtest_session_id, risk_amount, leverage, planned_margin)
+             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?)"
         )->execute([
             $this->uid, $tradeDate, $timeIn, $session['symbol'], $direction, $entryPrice, $stopLoss, $takeProfit,
-            $lotSize, $entryFee, $session['id'], $riskAmount,
+            $lotSize, $entryFee, $session['id'], $riskAmount, $leverage, $marginUsed,
         ]);
         return (int) $this->db->lastInsertId();
+    }
+
+    /** v3.22.1 — the order ticket's own blocking rules, enforced server-side too (not
+     *  just a frontend convenience — every other real validation rule in this
+     *  controller already works this way, e.g. the side check just above this method's
+     *  call sites). Rejects with the exact reason the ticket is meant to show:
+     *  margin required exceeding available margin, or the estimated liquidation price
+     *  sitting between entry and the stop (the stop could never realistically be hit).
+     *  $entryPrice is the market fill price or the limit price, whichever the caller is
+     *  actually validating — both share this one check. */
+    private function checkMarginAndLiquidation(array $session, string $direction, float $entryPrice, float $stopLoss, float $riskPct, int $leverage, float $equity): void {
+        $lotSize = backtestPositionSize($equity, $riskPct, $entryPrice, $stopLoss);
+        $marginRequired = backtestMarginRequired($lotSize * $entryPrice, $leverage);
+        $availableMargin = $equity - $this->marginInUse($session['id']);
+        if ($marginRequired > $availableMargin) {
+            jsonError(sprintf('Margin required ($%s) exceeds available margin ($%s).', number_format($marginRequired, 2), number_format(max(0, $availableMargin), 2)));
+        }
+        $liqPrice = backtestLiquidationPrice($direction, $entryPrice, $leverage);
+        if (backtestLiquidationBeforeStop($direction, $liqPrice, $stopLoss)) {
+            jsonError(sprintf('At %dx leverage, the estimated liquidation price (%s) sits before your stop — the stop could never realistically be hit. Lower leverage or widen the stop.', $leverage, number_format($liqPrice, 5)));
+        }
+    }
+
+    /** Sum of planned_margin over this session's own currently-open backtest positions
+     *  — same convention CalculatorController::getRiskStatus()'s own margin_in_use
+     *  already uses for the live app (array_sum treats a NULL planned_margin as 0). */
+    private function marginInUse(int $sessionId): float {
+        $s = $this->db->prepare("SELECT planned_margin FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
+        $s->execute([$sessionId]);
+        return (float) array_sum(array_column($s->fetchAll(), 'planned_margin'));
     }
 
     /** Closes an open backtest position: applies the exit-side fee on top of whatever
@@ -856,6 +913,13 @@ class BacktestController {
                 'id' => (int) $t['id'], 'direction' => $t['direction'], 'entry_price' => (float) $t['entry_price'],
                 'stop_loss' => (float) $t['stop_loss'], 'take_profit' => $t['take_profit'] !== null ? (float) $t['take_profit'] : null,
                 'lot_size' => (float) $t['lot_size'], 'floating_pnl' => $floating, 'mark_price' => $mark,
+                // v3.22.1 — exposed so the order ticket can compute margin_in_use /
+                // available_margin client-side (sum of planned_margin across these,
+                // same convention CalculatorController::getRiskStatus() already uses
+                // for the live app) without a dedicated endpoint, and so the running
+                // trade display (v3.22.3) has fees-paid-so-far/leverage to show.
+                'fees_paid' => (float) $t['fees'], 'leverage' => $t['leverage'] !== null ? (int) $t['leverage'] : null,
+                'planned_margin' => $t['planned_margin'] !== null ? (float) $t['planned_margin'] : null,
             ];
         }
         if ($peak < $closedEquity + $floatingTotal) $peak = $closedEquity + $floatingTotal;

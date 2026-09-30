@@ -486,6 +486,66 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-draw-popover-template-row{display:flex;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #232733}
 .bt-draw-popover-template-row .btn{flex:1 1 auto}
 
+/* ── ORDER TICKET (v3.22.1) — floating selection toolbar + docked "New Trade" panel ──
+   Both are real DOM elements (not canvas-drawn, unlike the drawing tools themselves) so
+   they get genuine hover/focus/click targets instead of hand-rolled hit-testing — the
+   toolbar replaces what used to be a canvas-drawn "Place Long/Short" button
+   (btDrawPlaceOrderButton(), removed this release) for exactly that reason. Both sit
+   inside .tv-chart-wrap (position:relative, already established by the drawing-tool
+   overlay) so they position against the chart, not the page. */
+.bt-pos-toolbar{position:absolute;z-index:6;display:flex;align-items:center;gap:2px;background:#181c27;border:1px solid #2a2e39;border-radius:6px;padding:3px;box-shadow:0 4px 12px rgba(0,0,0,0.35)}
+.bt-pos-toolbar-handle{cursor:move;color:#5a6272;display:flex;align-items:center;padding:0 2px}
+.bt-pos-toolbar button{width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:5px;color:#8b93a7;cursor:pointer;padding:0}
+.bt-pos-toolbar button:hover{background:#1c2030;color:#d1d4dc}
+.bt-pos-toolbar button.active{background:rgba(41,98,255,0.18);color:#5b8dff}
+.bt-pos-toolbar svg{width:15px;height:15px;pointer-events:none}
+.bt-pos-toolbar input[type=color]{width:20px;height:20px;padding:0;border:1px solid #2a2e39;background:none;cursor:pointer}
+/* "Place trade" — the one primary action in this toolbar, so it's the one button that
+   looks like a button rather than an icon: green-outlined, per the briefing. */
+.bt-pos-toolbar-place{width:auto !important;padding:0 10px !important;font-size:11px;font-weight:600;color:#26a69a !important;border-color:#26a69a !important;white-space:nowrap}
+.bt-pos-toolbar-place:hover{background:rgba(38,166,154,0.15) !important}
+.bt-pos-toolbar-sep{width:1px;height:18px;background:#2a2e39;margin:0 2px}
+
+/* The ticket itself: docked at the LEFT of the chart, not a centred modal, so the chart
+   (and the lines/box it's editing) stay visible while it's open — the whole point of
+   docking it per the briefing. Sits above the drawing overlay (z-index:4) and the
+   selection toolbar (z-index:6) but below the settings popover (z-index:300), since the
+   two are never meaningfully open over each other in practice. */
+.bt-ticket{position:absolute;top:0;left:0;bottom:0;z-index:250;width:300px;max-width:92vw;background:#131722;border-right:1px solid #232733;box-shadow:4px 0 16px rgba(0,0,0,0.4);display:flex;flex-direction:column;color:#d1d4dc;font-size:12px}
+.bt-ticket-header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #232733;flex-shrink:0}
+.bt-ticket-header-title{font-family:var(--font-head);font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#8b93a7}
+.bt-ticket-close{background:transparent;border:none;color:#8b93a7;cursor:pointer;font-size:14px;padding:3px 6px;border-radius:4px}
+.bt-ticket-close:hover{background:#1c2030;color:#d1d4dc}
+.bt-ticket-body{padding:12px;overflow-y:auto;flex:1 1 auto}
+.bt-ticket-row{margin-bottom:12px}
+.bt-ticket-row label{display:block;font-size:10px;text-transform:uppercase;letter-spacing:0.4px;color:#6b7280;margin-bottom:5px}
+/* Segmented toggle — Long/Short, Market/Limit. Two equal-width buttons sharing one
+   pill-shaped track, the selected one filled; same interaction shape as
+   .bt-dir-btn.active-long/-short in the plain New Order panel, generalized into a
+   reusable two-option control since this ticket needs it twice. */
+.bt-ticket-seg{display:flex;border:1px solid #2a2e39;border-radius:6px;overflow:hidden}
+.bt-ticket-seg button{flex:1;background:#1c2030;color:#8b93a7;border:none;padding:7px 0;font-size:12px;font-weight:600;cursor:pointer}
+.bt-ticket-seg button.active[data-seg-val="Long"],.bt-ticket-seg button.active[data-seg-val="market"]{background:#26a69a;color:#fff}
+.bt-ticket-seg button.active[data-seg-val="Short"]{background:#ef5350;color:#fff}
+.bt-ticket-seg button.active[data-seg-val="limit"]{background:#f59e0b;color:#fff}
+.bt-ticket-hint{font-size:11px;color:#f59e0b;margin-top:5px}
+.bt-ticket-toggle-row{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.bt-ticket-toggle-row input[type=checkbox]{width:14px;height:14px;flex:0 0 auto;accent-color:#2962ff}
+.bt-ticket-field-row{display:flex;gap:6px;align-items:center}
+.bt-ticket-field-row input[type=number],.bt-ticket-field-row select{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;padding:6px 8px;font-size:12px;flex:1 1 auto}
+.bt-ticket-unit-badge{background:#232733;color:#8b93a7;font-size:10px;padding:5px 7px;border-radius:4px;white-space:nowrap;flex:0 0 auto}
+.bt-ticket-switch{display:flex;border:1px solid #2a2e39;border-radius:5px;overflow:hidden;flex:0 0 auto}
+.bt-ticket-switch button{background:#1c2030;color:#8b93a7;border:none;padding:6px 8px;font-size:11px;font-weight:600;cursor:pointer}
+.bt-ticket-switch button.active{background:#2962ff;color:#fff}
+.bt-ticket-computed{display:flex;justify-content:space-between;font-size:11px;color:#8b93a7;padding:4px 0}
+.bt-ticket-computed b{color:#d1d4dc;font-family:var(--font-mono,monospace)}
+.bt-ticket-note{font-size:10px;color:#6b7280;margin-top:4px}
+.bt-ticket-note.amber{color:#f59e0b}
+.bt-ticket-disabled-reason{font-size:11px;color:#ef5350;margin-top:8px;padding:8px;background:rgba(239,83,80,0.1);border-radius:6px}
+.bt-ticket-actions{display:flex;gap:8px;padding:12px;border-top:1px solid #232733;flex-shrink:0}
+.bt-ticket-actions .btn{flex:1}
+#bt-ticket-place-btn:disabled{opacity:0.4;cursor:not-allowed}
+
 /* ── BACKTESTING SETUP FORM (Screen A) — grouped sections, centred ── */
 .bt-form-wrap{max-width:640px;margin:0 auto}
 .bt-form-wrap .form-section{margin-bottom:16px}

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.22.0 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.1 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -3738,6 +3738,256 @@ running-trade chart display are all v3.22.1–v3.22.3. This release only adds th
 and the setup-form fields to capture the session-level configuration those later releases
 will read.
 
+### v3.22.1: Backtest Realism, Part 2 — Order Ticket, Draggable Lines, Position-Tool Pill Labels
+
+A follow-up briefing replaced §1 (order ticket) and §4 (running trade display) of the
+original v3.22.0 spec with a much more detailed interaction design, modelled on a
+commercial backtesting tool's screenshots the user supplied — built here in
+FundedControl's own dark style, no branding/wording copied beyond generic trading labels.
+§4 became "Part C," explicitly **v3.22.3**, not this release. The original v3.22.4
+(fees/funding engine) is gone entirely — funding was already dropped in v3.22.0; this
+release absorbs the one surviving piece, confirming the fee-charging math.
+
+**Order of work, as specified:** this release is Parts A and B (the ticket, the
+draggable lines, the fee-charging confirmation). v3.22.2 (risk-ladder engine) is
+unchanged in scope. Part C (the live open-trade display) is v3.22.3.
+
+#### Part A — position-tool pill labels
+
+`btDrawPosition()` (`js/backtest-drawings.js`) rewritten: the old plain monospace text
+block (Entry/SL TP/R:R/Risk/Size, stacked to the right of the box) is replaced by three
+pill labels via a new `btDrawPill()` primitive (rounded rect, filled, white text —
+manual `arcTo()`-based rounding rather than `ctx.roundRect()`, since this app makes no
+assumption about a minimum Chrome version elsewhere):
+- **Stop** (red, outside the box on the stop edge): `Stop: {price}, {dist} pts ({pct}%),
+  Amount: ${riskUsd}`.
+- **Centre** (on the entry line): `Entry: {price}, RR 1:{rr}` — neutral grey (`#4b5563`)
+  today; the code checks `d._linkedTrade` for a floating-P&L-coloured, two-line
+  "Open P&L.../Entry..." variant, but nothing sets that property yet since linking a
+  drawing to a live trade is v3.22.3's `linked_trade_id`. Wired in structurally now so
+  v3.22.3 only has to set one property, not touch this function again.
+- **Target** (teal, outside the box on the TP edge): `Target: {price}, {dist} pts
+  ({pct}%), Amount: ${rewardUsd}`.
+
+Both dollar Amounts are **net of the round-trip fee** — entry fee plus the exit fee AT
+THAT LEVEL'S OWN PRICE (the stop's own exit fee for the Stop pill, the target's own for
+the Target pill; these differ slightly since fee is charged on fill price, not one
+shared number) — the exact same formula `js/backtest.js::btComputeTicket()`'s own
+`riskUsdNet`/`rewardUsdNet` uses, so a drawing's preview pills and the eventual ticket
+can never disagree about what "Amount" means. Sizing still comes from the session's flat
+`risk_pct` (a plain drawing has no leverage/risk chosen yet — that only exists once
+"Place trade" opens the real ticket, which is free to size differently).
+
+**x-axis time pills** — small blue pills at the box's own start/end times, shown only
+while the tool is selected, positioned near the bottom of the overlay canvas (which
+covers the chart's own time axis, same as everywhere else this file positions things
+relative to the chart).
+
+**The red/teal fill colours needed no change** (confirmed, not assumed) — both already
+shared the same `0.18` alpha; nothing about "Amount" pills changes that.
+
+#### Part B1 — floating selection toolbar
+
+The old canvas-drawn "Place Order" button (`btDrawPlaceOrderButton()`, and its own
+`_placeOrderBtnRect` hit-test inside `btOnDrawMouseDown()`) is **removed entirely**,
+replaced by a real DOM element (`#bt-pos-toolbar`, `pages/backtest.php`) positioned each
+redraw by `btPositionSelectionToolbar()`. Real DOM means real hover/click targets
+instead of hand-rolled canvas hit-testing — six controls, left to right per the
+briefing: drag handle, colour (`<input type=color>`, reusing the settings popover's own
+pattern rather than a button+icon), settings (opens the existing popover), **Place
+trade** (primary, green-outlined — the one button styled like an actual button rather
+than an icon), R:R lock toggle, delete. Icons are original, hand-drawn (24×24 stroke
+paths matching this file's own existing v3.21.1 toolbar set) — no tracing of the
+reference tool's artwork.
+
+Only rebuilds its inner HTML when the **selected drawing** changes
+(`btToolbarBuiltForId`) — every other redraw is a cheap reposition-only pass. Hidden
+whenever nothing capturing-worthy is selected, or while a drag/ticket-line-drag is in
+progress (showing a clickable toolbar mid-drag would be a confusing, easy-to-mis-click
+target). The drag handle repositions the toolbar via `btToolbarOffset`, a same-session,
+non-persisted adjustment reset the moment a different drawing is selected — deliberately
+**not** given the settings popover's own remembered-position treatment (v3.21.4): a
+toolbar that only exists while one specific drawing is selected has nothing meaningful to
+remember the position *for* once that selection ends.
+
+#### Part B2 — the order ticket
+
+Clicking "Place trade," or the sidebar's own "New Trade" panel button (`placeBtOrder()`,
+renamed in spirit — the button's `onclick=` wasn't touched — from submitting directly to
+opening the ticket prefilled from its fields), opens `btOpenTicket()`
+(`js/backtest.js`), which renders `#bt-ticket` — a **docked** panel at the left of the
+chart (`position:absolute` inside `.tv-chart-wrap`, not a centred modal), so the chart
+stays visible while it's open, per the briefing.
+
+**Single source of truth: `btTicket` itself.** Both the panel's own number inputs and
+the on-chart entry/stop/TP lines (Part B3) are pure, derived renderings of this one plain
+object — typing in the panel or dragging a line both just mutate `btTicket` and call
+`btRenderTicket()`, which re-renders both. No separate "sync" step, no feedback-loop
+risk — the identical single-state-object pattern `btDrawings`/`d.settings` already uses
+throughout this file, applied to a second kind of state object.
+
+**Fields, exactly the nine rows specified:**
+1. Long/Short segmented toggle. Switching mirrors SL/TP across entry via the *existing*
+   `btNormalizePositionSides()` (v3.21.13) — applied to the ticket's own plain state via
+   a small translation object, not a second copy of the mirror logic.
+2. Market/Limit segmented toggle, defaulting per the 0.05%-of-close rule computed inside
+   `btOpenTicket()` itself. Limit shows the hint "Drag the orange entry line to set your
+   price." Switching to Market snaps `entry` to the current close immediately (not just
+   on the next render).
+3. Stop Loss: always on, disabled (required, per Phase 1b rules) — a checkbox rendered
+   `checked disabled` rather than omitted, so the row still visually communicates "this
+   is on" instead of just not existing.
+4. Take Profit: on/off checkbox, price input, and "Keep 3R" (checked by default) —
+   recalculates TP live from entry/SL via `btComputeTpFromRatio()` whenever either
+   changes while checked; unchecked the moment TP is dragged or typed directly, same
+   rule a drawing's own TP handle already follows (v3.21.0). No "+" for multiple
+   take-profits, per the briefing's own explicit "out of scope."
+5. Risk: a %/$ switch, a value field, and a live `= $X`. Prefilled from the session's
+   flat `risk_pct` always (per the briefing: "Until [v3.22.2] lands, use flat risk") —
+   the ladder tier is looked up **separately**, purely for comparison: `btLadderTierFor
+   EquityPct()` (mirrors `helpers.php::ladderTierForBalance()`'s own lower-inclusive/
+   upper-exclusive/null-means-and-above logic, verified against five boundary cases with
+   a standalone script) checks the entered risk against the session's own
+   `risk_ladder`, and shows an amber "Off-ladder" note when they differ — `risk_amount`
+   is recorded as planned either way, matching the live Size Integrity feature's own
+   convention (v3.15.0) of never hiding an off-plan value, just flagging it.
+6. Leverage dropdown (the session's own `default_leverage`, editable per order) with
+   live margin required / available margin / estimated liquidation price, and the note
+   "Leverage changes margin, not risk" — literally true by construction: leverage never
+   enters `btCalcPositionSize()`'s own formula at all, only `btCalcMarginRequired()`'s.
+7. Lot Size (computed) and a live RR badge.
+8. Est. entry fee + exit fee = total, at the session's `fee_rate_pct`.
+9. Cancel / Place Trade — disabled, with the reason shown, for: a wrong-side stop,
+   margin required exceeding available margin, an estimated liquidation price that would
+   trigger before the stop, or the session's own daily trade cap. (The cursor-not-at-
+   latest-bar rule has **no client-side equivalent check** — it's a fact about the
+   server's own replay cursor at submit time, not something to duplicate/guess
+   client-side; `BacktestController::placeOrder()` already re-validates every one of
+   these regardless, so nothing here is trusted blind.)
+
+**Market recalculation, verified by construction:** `btComputeTicket()` always reads
+`entry` from the live close for a Market ticket, never from `btTicket.entry` directly —
+so lot size/RR/TP-amount recompute on every render without any special-case "did the
+price change" branch. With Keep 3R checked, TP is recomputed from the *current* entry
+via `btComputeTpFromRatio(..., 3)` on every render too, so RR reads exactly `1:3.00`
+regardless of how far entry has moved; unchecked, TP stays wherever it was last set and
+RR reads whatever that produces against the new entry (the briefing's own "for example,
+3.09" example).
+
+#### Part B3 — full-width draggable price lines
+
+**Deliberately NOT `Lightweight Charts`' native `createPriceLine()`**, despite the
+briefing naming that API — the pinned chart version (v4.1.3, per this file's own v3.21.0
+architecture note) has **no drag support for a price line at all**; every other drawing
+tool in this file already made the identical call (canvas overlay, not primitives) for
+exactly this reason. `btDrawTicketLines()` draws all three lines on the *same* overlay
+canvas every drawing tool already renders on, reusing `btDrawPill()` (Part A) for the
+near-right-edge labels: orange dashed "Limit {price}" / blue solid "Entry {price}" (order
+type), red dashed "Stop Loss −${riskUsd}", green dashed "Take Profit +${rewardUsd}" — the
+dollar figures are the identical `riskUsdNet`/`rewardUsdNet` the ticket panel itself
+shows, computed once by `btComputeTicket()` and read by both renderers.
+
+**Hit-testing integrated into the existing capture-phase handlers** (`btOnDrawMouseDown/
+Move/Up`, v3.21.1's own architecture), not a parallel event-listener set: a new
+`btTicketLineHitTest()` is checked **first**, before the active-tool/cursor-mode logic,
+but returns `null` immediately whenever no ticket is open — every existing drawing-tool
+interaction path is unchanged when the ticket is closed, which is the overwhelming
+majority of the time. A hit sets `btTicketDragField` (a new, separate state var from
+`btDragState` — the ticket's lines aren't `backtest_drawings` rows, so they have no
+drawing id to look up through the existing drag machinery); mousemove converts the
+cursor's Y to a price via the existing `btYToPrice()` and calls `js/backtest.js::
+btTicketSetField(field, price)`, which applies the *exact same* v3.21.13
+`btPositionMinDist()`/`btClampPositionSide()` clamp a drawing's own stop/TP handles
+already use — a ticket's lines can no more cross entry than a drawing's can. The Entry
+line only hit-tests at all when `orderType === 'limit'`, per the briefing.
+
+#### Part B4 — fee charging, confirmed not changed
+
+Checked before writing anything: `fillPosition()` already charges `backtestFee(lotSize,
+entryPrice, feeRatePct)` on entry, `settleTrade()` already charges the same on exit, both
+added to `trades.fees`, and `net_pnl = pnl - fees` is what equity is actually derived
+from — this is **already exactly what the briefing asked for**, unchanged from when it
+first shipped (v3.20.0). Per the briefing's own instruction ("if it already does exactly
+this, add the standalone test and leave the code unchanged"), only a test was added:
+`backtest_engine.php`'s self-test now asserts the calibrated 0.04% round-trip
+(`6.4×780×0.0004×2`) and the real trade-123 shape from the v3.22.0 calibration
+(`entryFee + exitFee ≈ 3.9644`, matching CLAUDE.md's own hand-verified figure to four
+decimal places) — 44 assertions total, all passing.
+
+#### Schema (`2026_09_30_0002_add_backtest_order_leverage.sql`)
+
+Two columns, both via the guarded-ALTER pattern: `backtest_pending_orders.leverage`
+(`TINYINT UNSIGNED NOT NULL DEFAULT 5` — a Limit order remembers the leverage chosen at
+placement time until it fills, same reason that table already has its own `risk_pct`
+column separate from the session's), `trades.leverage` (nullable — only a backtest trade
+filled from this release forward ever sets it; every other row on this table has no
+leverage concept at all, so `NULL` correctly means "not applicable"). **Margin used is
+NOT a new column** — `trades.planned_margin` (v3.17.0) is reused, per the *original*
+v3.22.0 briefing's own "reuse existing trades columns wherever they already exist"
+instruction (§3, unchanged by this ticket) — a backtest trade populating the same column
+with the same meaning ("margin committed to this position") is a second writer, not a
+repurposing.
+
+#### Controller (`BacktestController.php`) and engine (`backtest_engine.php`)
+
+Two new pure functions: `backtestMarginRequired(notional, leverage)` (`notional ÷
+leverage`), and `backtestLiquidationPrice()`/`backtestLiquidationBeforeStop()` — a
+**deliberately simplified** "full allocated margin wiped out" liquidation estimate
+(`entry × (1 ∓ 1/leverage)`), ignoring maintenance-margin buffers, funding, and fees: this
+app tracks no real exchange's maintenance-margin schedule for any symbol, and modelling
+one without real data to calibrate against would be inventing precision this app can't
+back up — the identical reasoning that already kept `fee_rate_pct` a single flat number
+instead of a guessed maker/taker split that turned out not to exist either (v3.22.0). A
+real exchange liquidates earlier than this estimate, never later, so it's a conservative
+upper bound appropriate for the one thing it's used for: flagging, before an order is
+placed, that the stop can never realistically be reached.
+
+`placeOrder()`/`fillPosition()` now take `leverage`/`risk_pct` as explicit parameters
+(falling back to the session's own defaults when the request omits or invalidates
+either — same "sane default for an optional field" treatment `drawdown_type` already
+gets in `createSession()`), and a new `checkMarginAndLiquidation()` enforces both new
+blocking rules **server-side**, not just as a ticket-side convenience — this app's own
+standing practice (e.g. v3.17.2's whole point) is that a real validation rule is never
+client-only. The pending-order fill path (`evaluateBar()`) now passes through the
+**order's own** stored `risk_pct`/`leverage` at fill time, not the session's current
+defaults — a Limit order can sit pending for many bars, during which the session's
+defaults are no longer necessarily what it was sized against.
+
+**A subtlety the standalone verification below exists specifically to catch:** margin
+sufficiency and liquidation-before-stop are two *independent* failure modes — a highly
+leveraged order can have plenty of available margin (leverage lowers margin *required*)
+while still being structurally unsafe (leverage also moves the estimated liquidation
+price closer to entry). Verified directly: at 60× leverage on a $10,000/1%-risk/2-point-
+stop example, margin required is only $83 (comfortably within budget) while the
+estimated liquidation price (98.33) sits *inside* the stop distance — `checkMarginAndLiq
+uidation()` catches this via the *second*, separate check, not the margin one.
+
+#### Verification performed, and what still needs a real browser
+
+**Verified via standalone PHP/Node scripts** (no DB, no browser — this environment has
+neither): every new pure function (fee, margin, liquidation price, liquidation-before-
+stop) cross-checked between its PHP (`backtest_engine.php`) and JS (`js/backtest.js`)
+implementations, producing byte-identical numbers on both sides for the same inputs;
+`btLadderTierForEquityPct()` against five boundary cases (lower-inclusive, upper-
+exclusive, null-upper-is-and-above); `btNormalizePositionSides()` applied to a direction
+switch (Long→Short→Long round-trips losslessly back to the original stop/TP); the
+render→read shape every ticket field passes through. `php -l` on all three PHP files,
+`node --check` on both JS files, and `php includes/backtest_engine.php`'s full 44-
+assertion self-test all pass.
+
+**NOT verified — needs a real browser click-through, per the briefing's own eight-item
+list:** the ticket actually opening and rendering correctly from both entry points; the
+pill labels' on-screen position/legibility; the floating toolbar's positioning,
+drag-handle behavior, and six buttons' actual click targets; the ticket lines' real
+drag feel and the two-way sync's visual correctness; the Keep-3R checkbox's live
+recompute while dragging; the disabled-Place-Trade reason actually rendering
+legibly; and — critically — whether `checkMarginAndLiquidation()`'s new blocking rules
+ever produce a false positive against real session data once a real margin-in-use
+figure exists (untested against a live session with actual open positions, since this
+environment can't create one). Acrob still needs to run the eight-item verify list from
+the briefing against a live deploy before this is trusted the way the rest of this file's
+verified-in-a-real-browser sections are.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -4838,7 +5088,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.0
+Current Version: v3.22.1
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

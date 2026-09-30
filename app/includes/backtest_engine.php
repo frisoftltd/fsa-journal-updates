@@ -34,6 +34,45 @@ function backtestFee(float $lotSize, float $price, float $feeRatePct): float {
     return $lotSize * $price * $feeRatePct / 100;
 }
 
+/** v3.22.1 — margin required for a position: notional ÷ leverage. Returns the full
+ *  notional (leverage has no effect) when leverage is 0 or less, a defensive floor —
+ *  callers already validate leverage against a fixed allowed-values list before this is
+ *  ever called in practice, same as backtestPositionSize()'s own zero-stop-distance
+ *  floor above. */
+function backtestMarginRequired(float $notional, float $leverage): float {
+    return $leverage > 0 ? $notional / $leverage : $notional;
+}
+
+/**
+ * v3.22.1 — a deliberately simplified estimated liquidation price: the price at which
+ * the position's ENTIRE allocated margin is wiped out, ignoring maintenance-margin
+ * buffers, funding, and fees (this app tracks none of a real exchange's maintenance-
+ * margin schedule for any symbol, and modeling one without real data to calibrate
+ * against would be inventing precision this app can't back up — the same reasoning
+ * already applied to keeping fee_rate_pct a single flat number instead of guessing a
+ * maker/taker split that turned out not to exist on this account either, see the
+ * v3.22.0 calibration). A real exchange liquidates earlier than this estimate, never
+ * later — this number is a conservative UPPER bound on how much room the position
+ * actually has, appropriate for the one thing it's used for: flagging, before an order
+ * is placed, that the stop can never realistically be reached because liquidation would
+ * trigger first. Long: price has to FALL by 1/leverage of entry to wipe the margin.
+ * Short: price has to RISE by the same fraction.
+ */
+function backtestLiquidationPrice(string $direction, float $entryPrice, float $leverage): float {
+    if ($leverage <= 0) return $direction === 'Long' ? 0.0 : INF;
+    $frac = 1 / $leverage;
+    return $direction === 'Long' ? $entryPrice * (1 - $frac) : $entryPrice * (1 + $frac);
+}
+
+/** v3.22.1 — true when the estimated liquidation price sits BETWEEN entry and the stop,
+ *  meaning price would reach liquidation before ever reaching the stop -- the stop can
+ *  never realistically be hit. Long: both liquidation and stop are below entry;
+ *  liquidation is "in the way" when it's ABOVE (closer to entry than) the stop. Short:
+ *  both are above entry; liquidation is in the way when it's BELOW the stop. */
+function backtestLiquidationBeforeStop(string $direction, float $liquidationPrice, float $stopLoss): bool {
+    return $direction === 'Long' ? $liquidationPrice > $stopLoss : $liquidationPrice < $stopLoss;
+}
+
 /**
  * Whether a bar's high/low range touches this position's stop-loss and/or take-profit,
  * evaluated bar-by-bar exactly as the briefing specifies ("Fills evaluated bar by bar
@@ -131,6 +170,45 @@ function backtest_engine_self_test(): void {
 
     // Fees: 50 units at 100 price, 0.055% -> 50*100*0.055/100 = 2.75.
     $check('fee: 50 * 100 * 0.055%', backtestFee(50, 100, 0.055), 2.75);
+    // v3.22.1 — the calibrated 0.04% default (CLAUDE.md v3.22.0), round-trip. Verify
+    // item 7's own exact wording: qty * price * 0.04% * 2 (entry + exit, same price for
+    // both sides in this synthetic case). 6.4 units at 780 -> one side = 6.4*780*0.0004
+    // = 1.9968; round trip = 3.9936.
+    $entryFee = backtestFee(6.4, 780, 0.04);
+    $exitFee = backtestFee(6.4, 780, 0.04);
+    $check('fee: one side at calibrated 0.04%', $entryFee, 1.9968);
+    $check('fee: round trip = qty*price*0.04%*2 (both sides same price)', $entryFee + $exitFee, 6.4 * 780 * 0.0004 * 2);
+    // Real trade 123 shape from the live calibration (different entry/exit prices) —
+    // matches CLAUDE.md's own hand-verification: (6.4*782.51 + 6.4*766.07) * 0.0004.
+    $realEntryFee = backtestFee(6.4, 782.51, 0.04);
+    $realExitFee = backtestFee(6.4, 766.07, 0.04);
+    $check('fee: real trade 123 shape, entry+exit total ~= 3.9644 (matches CLAUDE.md)', $realEntryFee + $realExitFee, 3.9643648);
+
+    // v3.22.1 — margin required: notional / leverage.
+    $check('margin: 1000 notional / 5x = 200', backtestMarginRequired(1000, 5), 200.0);
+    $check('margin: 1000 notional / 1x = 1000 (no leverage effect)', backtestMarginRequired(1000, 1), 1000.0);
+    $check('margin: zero/negative leverage floors to full notional', backtestMarginRequired(1000, 0), 1000.0);
+
+    // v3.22.1 — estimated liquidation price (entry * (1 -/+ 1/leverage)).
+    $check('liq: Long 5x, entry 100 -> 100*(1-0.2)=80', backtestLiquidationPrice('Long', 100, 5), 80.0);
+    $check('liq: Short 5x, entry 100 -> 100*(1+0.2)=120', backtestLiquidationPrice('Short', 100, 5), 120.0);
+    $check('liq: Long 20x, entry 100 -> 100*(1-0.05)=95', backtestLiquidationPrice('Long', 100, 20), 95.0);
+    $check('liq: zero leverage floors to 0 for Long', backtestLiquidationPrice('Long', 100, 0), 0.0);
+    // INF vs INF: the shared $check() comparator subtracts the two values for its
+    // tolerance check, and INF - INF is NAN in PHP (any comparison against NAN is
+    // false) -- a direct identity check instead, not a $check()-through-tolerance one,
+    // since this is the one case in this whole self-test where an exact special float
+    // value, not an approximately-equal one, is actually what's being asserted.
+    $liqShortZeroLev = backtestLiquidationPrice('Short', 100, 0);
+    if ($liqShortZeroLev === INF) { $pass++; } else { $fail++; fwrite(STDERR, "FAIL: liq: zero leverage floors to INF for Short — got " . var_export($liqShortZeroLev, true) . "\n"); }
+
+    // v3.22.1 — liquidation-before-stop: Long 20x puts liq (95) ABOVE a wider stop (90)
+    // -> liquidation hits first, the stop could never realistically be reached. Long 5x
+    // puts liq (80) safely BELOW the same stop (90) -> stop is reachable first, fine.
+    $check('liq-before-stop: Long 20x, stop 90 (liq 95 > stop 90) -> blocked', backtestLiquidationBeforeStop('Long', 95, 90), true);
+    $check('liq-before-stop: Long 5x, stop 90 (liq 80 < stop 90) -> fine', backtestLiquidationBeforeStop('Long', 80, 90), false);
+    $check('liq-before-stop: Short 20x, stop 110 (liq 105 < stop 110) -> blocked', backtestLiquidationBeforeStop('Short', 105, 110), true);
+    $check('liq-before-stop: Short 5x, stop 110 (liq 120 > stop 110) -> fine', backtestLiquidationBeforeStop('Short', 120, 110), false);
 
     // SL/TP touch detection — every combination for both directions.
     $check('Long: neither touched', backtestCheckSlTp('Long', 105, 99, 95, 110), null);

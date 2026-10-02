@@ -31,15 +31,46 @@ function renderScopeCaption(elId, s){
     el.textContent = parts.join(' · ');
 }
 function pnlCls(n){return parseFloat(n)>=0?'pnl-pos':'pnl-neg';}
+/** v3.22.3 — consolidated here after a duplicate-name scan (tools/ui-harness's own
+ *  scan-duplicate-names.mjs, added the same release) found this ALSO independently
+ *  declared in both js/backtest.js and js/report-card.js. Every file in app/js/ is a
+ *  plain, non-module <script> tag sharing one global scope on every page (index.php's
+ *  own module list loads all of them unconditionally) -- two same-named top-level
+ *  functions in that scope isn't two independent implementations, it's the LAST one
+ *  loaded silently replacing the first with no error. report-card.js loaded after
+ *  backtest.js, so its own regex-based version (escapes &<>"', not just &<>) was the
+ *  only one ever actually running for EITHER file's call sites -- backtest.js's own
+ *  DOM-based version (textContent -> innerHTML, which doesn't reliably escape quotes at
+ *  all) had never executed in this app's history. Kept the more complete
+ *  implementation, moved here next to this file's other shared helpers (fmt/toast/
+ *  pnlCls), removed from both of its old homes -- same fix shape as v3.22.3's own
+ *  renderOpenPositions()/renderBtOpenPositions() rename, just "merge to one copy"
+ *  instead of "rename" since this one really is the same utility twice, not two
+ *  different things that happened to share a name. */
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 function resultBadge(r){
     if(!r) return '—';
     const m={Win:'win',Loss:'loss','Break Even':'be'};
     return `<span class="badge badge-${m[r]||''}">${r}</span>`;
 }
+// v3.22.3 — found while chasing an intermittent "no toast visible after a close" failure
+// in tools/ui-harness/drive-v3223.mjs (Verify 3): two toasts shown within 2.8s of each
+// other (e.g. the order-placed toast quickly followed by a trade-closed toast across a
+// couple of Next Bar clicks) raced their own hide timers -- the FIRST toast's setTimeout
+// was never cancelled, so it could fire AFTER the second toast had already reset
+// className to 'show', hiding the second toast's message early/at an unpredictable point
+// in its own 2.8s instead of after it. Same bug on live, not just in the harness: any
+// two real toasts fired close together have always been able to clip each other this
+// way. One pending hide timer at a time now -- a new toast() call cancels whatever hide
+// was already scheduled before arming its own.
+let toastTimer = null;
 function toast(msg,type='success'){
     const t=document.getElementById('toast');
     t.textContent=msg; t.className=`toast ${type} show`;
-    setTimeout(()=>t.className='toast',2800);
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=>t.className='toast',2800);
 }
 function destroyCharts(...keys){keys.forEach(k=>{if(charts[k]){charts[k].destroy();delete charts[k];}});}
 function chartOpts(extra={}){

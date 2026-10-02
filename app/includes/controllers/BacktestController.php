@@ -84,10 +84,22 @@ class BacktestController {
         if (!$id) jsonError('Invalid session id.');
         $session = $this->loadSession($id);
 
-        $state = $this->computeSessionState($session);
+        // v3.22.3 Fix D — mark open positions to the session's own current bar, not
+        // entry price. Passing no $markBar (the old behavior) makes computeSessionState()
+        // fall back to marking every open position at its OWN entry price, which zeroes
+        // out the gross side of floating P&L entirely -- what's left is just -fees,
+        // which is exactly the live mismatch reported ("-$6.83 floating" on two open
+        // longs = -(3.4137+3.4149), their combined entry fees and nothing else). Open
+        // Positions and the header's floating figure already come from the SAME
+        // $state['open_positions']/$state['floating_pnl'] either way (both built in one
+        // pass over the same $openRows query) -- the only thing a missing markBar broke
+        // was the price used to grade them, not which rows were included.
+        $currentBar = $this->currentBar($session);
+        $state = $this->computeSessionState($session, $currentBar);
         $out = $this->sessionSummary($session, $state);
         $out['open_positions'] = $state['open_positions'];
         $out['pending_orders'] = $this->getPendingOrders($id);
+        $out['closed_trades'] = $this->getRecentClosedTrades($id);
         jsonResponse($out);
     }
 
@@ -446,7 +458,25 @@ class BacktestController {
         $bar = $nextBar->fetch();
 
         if (!$bar) {
-            jsonResponse(['success' => true, 'advanced' => 0, 'session' => $this->sessionSummary($session, $this->computeSessionState($session)), 'step_timeframe' => $stepTf]);
+            // v3.22.3 Fix D — this branch used to omit open_positions/pending_orders
+            // entirely. js/backtest.js's own renderOpenPositions(res.open_positions ||
+            // []) treats a missing key exactly like an empty list, so the moment replay
+            // reached the end of available history (every subsequent Next Bar/Play tick
+            // after that point hits this branch), the Open Positions panel was silently
+            // wiped even though the session's own two open longs were still open -- this
+            // is the live report's actual root cause ("Open Positions says None" while
+            // equity still showed a floating figure from the session object, which THIS
+            // branch did keep correct). Now returns the exact same shape the normal
+            // branch below does, just with nothing new having happened.
+            $noAdvanceState = $this->computeSessionState($session, $this->currentBar($session));
+            jsonResponse([
+                'success' => true, 'advanced' => 0,
+                'session' => $this->sessionSummary($session, $noAdvanceState),
+                'open_positions' => $noAdvanceState['open_positions'],
+                'pending_orders' => $this->getPendingOrders($id),
+                'closed_trades' => $this->getRecentClosedTrades($id),
+                'step_timeframe' => $stepTf,
+            ]);
             return;
         }
         $bar['open_time'] = (int) $bar['open_time'];
@@ -474,6 +504,8 @@ class BacktestController {
             'events' => $events,
             'session' => $this->sessionSummary($session, $finalState),
             'open_positions' => $finalState['open_positions'],
+            'pending_orders' => $this->getPendingOrders($id),
+            'closed_trades' => $this->getRecentClosedTrades($id),
             'step_timeframe' => $stepTf,
         ]);
     }
@@ -574,12 +606,14 @@ class BacktestController {
         $this->db->prepare("UPDATE backtest_sessions SET replay_cursor_ms=?, cursor_step_tf=?, rewind_count = rewind_count + ? WHERE id=?")->execute([$realNewCursor, $stepTf, $affected, $id]);
 
         $session = $this->loadSession($id);
-        $state = $this->computeSessionState($session);
+        $state = $this->computeSessionState($session, $this->currentBar($session));
         jsonResponse([
             'success' => true,
             'trades_rewound' => $affected,
             'session' => $this->sessionSummary($session, $state),
             'open_positions' => $state['open_positions'],
+            'pending_orders' => $this->getPendingOrders($id),
+            'closed_trades' => $this->getRecentClosedTrades($id),
             'step_timeframe' => $stepTf,
         ]);
     }
@@ -604,9 +638,39 @@ class BacktestController {
         $direction = in_array($d['direction'] ?? '', ['Long', 'Short'], true) ? $d['direction'] : null;
         if (!$type || !$direction) jsonError('Order type and direction (Long/Short) are required.');
 
-        $stopLoss = num($d['stop_loss'] ?? 0);
+        // v3.22.3 Fix B — rounded server-side too (not just in the ticket's own display),
+        // so a raw-float value from an older/unpatched client, or any other caller of
+        // this endpoint, can never store an unrealistic 15-decimal price regardless of
+        // what the UI happened to send.
+        $stopLoss = backtestRoundPrice(num($d['stop_loss'] ?? 0));
         if ($stopLoss <= 0) jsonError('Stop loss is required for every backtest order.');
-        $takeProfit = (isset($d['take_profit']) && $d['take_profit'] !== '') ? num($d['take_profit']) : null;
+        $takeProfit = (isset($d['take_profit']) && $d['take_profit'] !== '') ? backtestRoundPrice(num($d['take_profit'])) : null;
+
+        // v3.22.3 Fix F — a double-click (or a slow first response retried by the
+        // browser) submitting the SAME ticket twice placed two identical market orders
+        // on live (trades 132/134: same direction, same SL/TP, same bar) -- the trader
+        // had no on-screen confirmation the first one had already gone through. Server-
+        // side is the actual enforcement (the client-side disable-on-click below is only
+        // the first line of defence, same "a real rule is never client-only" standing
+        // practice this controller already applies to margin/liquidation); "same bar"
+        // means this session's own current replay_cursor_ms (already confirmed to equal
+        // $clientBarTime above), "within 5 seconds" is wall-clock, against created_at.
+        $dupWindow = gmdate('Y-m-d H:i:s', time() - 5);
+        if ($type === 'market') {
+            $dup = $this->db->prepare(
+                "SELECT id FROM trades WHERE backtest_session_id=? AND source='backtest' AND direction=? AND stop_loss=?
+                   AND (take_profit <=> ?) AND created_at >= ? LIMIT 1"
+            );
+            $dup->execute([$id, $direction, $stopLoss, $takeProfit, $dupWindow]);
+        } else {
+            $limitPriceForDupCheck = backtestRoundPrice(num($d['limit_price'] ?? 0));
+            $dup = $this->db->prepare(
+                "SELECT id FROM backtest_pending_orders WHERE session_id=? AND direction=? AND limit_price=? AND stop_loss=?
+                   AND (take_profit <=> ?) AND created_at >= ? LIMIT 1"
+            );
+            $dup->execute([$id, $direction, $limitPriceForDupCheck, $stopLoss, $takeProfit, $dupWindow]);
+        }
+        if ($dup->fetch()) jsonError('Duplicate order ignored.');
 
         // v3.22.1 — the order ticket lets both be edited per order; each falls back to
         // the session's own default rather than rejecting the request when omitted or
@@ -629,10 +693,10 @@ class BacktestController {
             if ($direction === 'Long' && $stopLoss >= $entryPrice) jsonError('For a Long, stop loss must be below entry.');
             if ($direction === 'Short' && $stopLoss <= $entryPrice) jsonError('For a Short, stop loss must be above entry.');
             $this->checkMarginAndLiquidation($session, $direction, $entryPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
-            $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time']);
-            jsonResponse(['success' => true, 'filled' => true, 'entry_price' => $entryPrice]);
+            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time']);
+            jsonResponse(['success' => true, 'filled' => true, 'entry_price' => $entryPrice, 'lot_size' => $lotSize, 'direction' => $direction, 'trade_id' => $tradeId]);
         } else {
-            $limitPrice = num($d['limit_price'] ?? 0);
+            $limitPrice = backtestRoundPrice(num($d['limit_price'] ?? 0));
             if ($limitPrice <= 0) jsonError('Limit price is required for a limit order.');
             if ($direction === 'Long' && $stopLoss >= $limitPrice) jsonError('For a Long, stop loss must be below the limit price.');
             if ($direction === 'Short' && $stopLoss <= $limitPrice) jsonError('For a Short, stop loss must be above the limit price.');
@@ -685,8 +749,8 @@ class BacktestController {
         $currentBar = $this->currentBar($session);
         if (!$currentBar) jsonError('No candle data at the current replay position.');
 
-        $this->settleTrade($trade, (float) $currentBar['close'], 'Manual Closing', (float) $session['fee_rate_pct']);
-        jsonResponse(['success' => true]);
+        [$net, $rMultiple] = $this->settleTrade($trade, (float) $currentBar['close'], 'Manual Closing', (float) $session['fee_rate_pct'], $currentBar['open_time']);
+        jsonResponse(['success' => true, 'net_pnl' => $net, 'r_multiple' => $rMultiple]);
     }
 
     // ── INTERNALS ────────────────────────────────────────────
@@ -699,18 +763,22 @@ class BacktestController {
         return $row;
     }
 
-    /** The market-fill/close price at exactly the current cursor position. Always reads
-     *  the 15m candle at that exact timestamp (v3.20.11) rather than
-     *  $session['replay_timeframe'] or cursor_step_tf -- adaptive stepping means the
-     *  cursor can now sit at a resolution finer than the session's own nominal
-     *  replay_timeframe, and a query for e.g. a 1H candle at a 15m-aligned, non-hour
-     *  timestamp (14:15) would simply find nothing. 15m candles exist everywhere
-     *  coarser ones do and the cursor is always exactly on a real bar boundary of
-     *  whichever resolution the last step used -- since every one of this app's four
-     *  timeframes is a whole multiple of 15m, that boundary is always 15m-aligned too. */
+    /** The market-fill/close price at exactly the current cursor position.
+     *
+     *  v3.22.3 Fix D — reads the candle at `cursor_step_tf` (whichever resolution the
+     *  cursor's own last step actually moved at), not a hardcoded '15m'. Querying 15m
+     *  unconditionally was itself the root cause of a live mismatch: a Market order's
+     *  fill used the exact-cursor 15m sub-candle's close (e.g. 7140, the first 15
+     *  minutes of an hourly bar), while the ticket's own "entry" preview reads
+     *  chartState's last DISPLAYED candle's close (e.g. 7166, the full 1H bar) --
+     *  two different numbers for what the trader was told was "the current price," with
+     *  no way to predict which one a submitted order would actually use. cursor_step_tf
+     *  always has a real candle at exactly this timestamp (it's literally the bar
+     *  advance()/rewind() last moved the cursor to), so this query can never find
+     *  nothing the old 15m-everywhere assumption was written to guard against. */
     private function currentBar(array $session): ?array {
-        $s = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe='15m' AND open_time=?");
-        $s->execute([$session['symbol'], $session['replay_cursor_ms']]);
+        $s = $this->db->prepare("SELECT open_time, open, high, low, close, volume FROM candles WHERE symbol=? AND timeframe=? AND open_time=?");
+        $s->execute([$session['symbol'], $session['cursor_step_tf'], $session['replay_cursor_ms']]);
         $row = $s->fetch();
         if (!$row) return null;
         $row['open_time'] = (int) $row['open_time'];
@@ -722,6 +790,38 @@ class BacktestController {
         $s = $this->db->prepare("SELECT * FROM backtest_pending_orders WHERE session_id=? AND status='pending' ORDER BY placed_at_bar_time DESC");
         $s->execute([$sessionId]);
         return $s->fetchAll();
+    }
+
+    /** v3.22.3 Part C — the closed trades the chart draws a faint entry/exit-arrow +
+     *  R-multiple marker for. Capped at 50, most recent first: a long-running session's
+     *  full history has no bound otherwise, and the chart only ever needs markers for
+     *  whatever's within the currently-loaded candle window anyway. Excludes
+     *  backtest_rewound rows -- same exclusion every other query in this controller
+     *  already applies, and a rewound trade's marker shouldn't still be sitting on the
+     *  chart after the rewind that undid it. Relies on Fix E's corrected settleTrade()
+     *  for time_out to actually be the exit bar's own time, not wall-clock "now" -- a
+     *  pre-repair time_out would place every marker off at the literal edge of the chart. */
+    private function getRecentClosedTrades(int $sessionId): array {
+        $s = $this->db->prepare(
+            "SELECT id, direction, entry_price, exit_price, time_in, time_out, r_multiple, exit_reason, net_pnl
+             FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
+               AND result IN ('Win','Loss','Break Even')
+             ORDER BY time_out DESC LIMIT 50"
+        );
+        $s->execute([$sessionId]);
+        return array_map(function ($t) {
+            return [
+                'id' => (int) $t['id'],
+                'direction' => $t['direction'],
+                'entry_price' => (float) $t['entry_price'],
+                'exit_price' => (float) $t['exit_price'],
+                'time_in' => strtotime($t['time_in']) * 1000,
+                'time_out' => strtotime($t['time_out']) * 1000,
+                'r_multiple' => $t['r_multiple'] !== null ? (float) $t['r_multiple'] : null,
+                'exit_reason' => $t['exit_reason'],
+                'net_pnl' => (float) $t['net_pnl'],
+            ];
+        }, $s->fetchAll());
     }
 
     /**
@@ -759,13 +859,17 @@ class BacktestController {
             // ticket at placement time), never the session's current defaults — a
             // limit order can sit pending for many bars, during which the session's own
             // defaults could in principle be nothing this trade was ever sized against.
-            $tradeId = $this->fillPosition(
+            [$tradeId, $lotSize] = $this->fillPosition(
                 $session, $order['direction'], (float) $order['limit_price'], (float) $order['stop_loss'],
                 $order['take_profit'] !== null ? (float) $order['take_profit'] : null,
                 (float) $order['risk_pct'], (int) $order['leverage'], $state['equity'], $bar['open_time']
             );
             $this->db->prepare("UPDATE backtest_pending_orders SET status='filled', trade_id=? WHERE id=?")->execute([$tradeId, $order['id']]);
-            $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'price' => (float) $order['limit_price']];
+            // order_id (the PENDING order's own id, not the resulting trade's) lets the
+            // client (js/backtest.js::btAdvance()) find whichever drawing was linked to
+            // this order (linked_order_id) and flip it over to linked_trade_id now that
+            // it's actually filled -- see btLinkDrawingToOrder()'s own docblock.
+            $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => (int) $order['id'], 'price' => (float) $order['limit_price'], 'lot_size' => $lotSize, 'direction' => $order['direction']];
         }
 
         $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
@@ -776,11 +880,11 @@ class BacktestController {
 
             $touch = backtestCheckSlTp($trade['direction'], $bar['high'], $bar['low'], $stop, $target);
             if ($touch === 'stop_loss') {
-                $this->settleTrade($trade, $stop, 'Stop Loss', (float) $session['fee_rate_pct']);
-                $events[] = ['type' => 'stop_loss', 'trade_id' => (int) $trade['id'], 'price' => $stop];
+                [$net, $rMultiple] = $this->settleTrade($trade, $stop, 'Stop Loss', (float) $session['fee_rate_pct'], $bar['open_time']);
+                $events[] = ['type' => 'stop_loss', 'trade_id' => (int) $trade['id'], 'price' => $stop, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
             } elseif ($touch === 'take_profit') {
-                $this->settleTrade($trade, $target, 'Take Profit', (float) $session['fee_rate_pct']);
-                $events[] = ['type' => 'take_profit', 'trade_id' => (int) $trade['id'], 'price' => $target];
+                [$net, $rMultiple] = $this->settleTrade($trade, $target, 'Take Profit', (float) $session['fee_rate_pct'], $bar['open_time']);
+                $events[] = ['type' => 'take_profit', 'trade_id' => (int) $trade['id'], 'price' => $target, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
             }
         }
 
@@ -800,7 +904,10 @@ class BacktestController {
      *  required" figure is reconstructable from the trade row afterward; planned_margin
      *  is reused (not a new column) per the original v3.22.0 briefing's own "reuse
      *  existing trades columns" instruction — see the migration's own doc comment. */
-    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime): int {
+    /** @return array{0:int,1:float} [tradeId, lotSize] -- lotSize is returned (not just
+     *  the id) so callers can report a real fill confirmation ("Long 0.87 BTC filled @
+     *  7140", v3.22.3 Fix F) without a second query or re-deriving the sizing math. */
+    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime): array {
         $riskAmount = $equity * $riskPct / 100;
         $lotSize = backtestPositionSize($equity, $riskPct, $entryPrice, $stopLoss);
         $entryFee = round(backtestFee($lotSize, $entryPrice, (float) $session['fee_rate_pct']), 4);
@@ -817,7 +924,7 @@ class BacktestController {
             $this->uid, $tradeDate, $timeIn, $session['symbol'], $direction, $entryPrice, $stopLoss, $takeProfit,
             $lotSize, $entryFee, $session['id'], $riskAmount, $leverage, $marginUsed,
         ]);
-        return (int) $this->db->lastInsertId();
+        return [(int) $this->db->lastInsertId(), $lotSize];
     }
 
     /** v3.22.1 — the order ticket's own blocking rules, enforced server-side too (not
@@ -853,8 +960,25 @@ class BacktestController {
     /** Closes an open backtest position: applies the exit-side fee on top of whatever
      *  entry fee was already charged at fill time, computes gross/net P&L, and writes
      *  the resolved result — same net_pnl = pnl - fees formula this codebase already
-     *  settled on for every other trade source (CLAUDE.md v3.18.1). */
-    private function settleTrade(array $trade, float $exitPrice, string $exitReason, float $feeRatePct): void {
+     *  settled on for every other trade source (CLAUDE.md v3.18.1).
+     *
+     *  v3.22.3 Fix E — $exitBarTimeMs is the REPLAY bar's own open_time (UTC ms) that
+     *  actually closed this trade, NOT wall-clock "now." The previous version wrote
+     *  gmdate('Y-m-d H:i:s') here -- the real date this code happened to run, 2026-09-30
+     *  for every trade closed that day regardless of which 2020 bar the SL/TP touch
+     *  actually happened on. That broke rewind() outright: it reopens trades WHERE
+     *  time_in <= cursor AND time_out > cursor, and with every closed trade's time_out
+     *  stuck in the same wall-clock instant, ANY rewind to a cursor before "now" (i.e.
+     *  every rewind, ever) satisfied time_out > cursor for EVERY already-closed trade
+     *  opened before the new cursor, not just the ones actually closed after it --
+     *  silently reopening the trader's entire closed trade history on the first rewind.
+     *  Every caller now passes the exit bar's own time: the bar that triggered the SL/TP
+     *  touch (evaluateBar()), the current replay cursor's bar for a manual close
+     *  (closePosition()), or the failing bar for a forced close (failSession()). Returns
+     *  [pnl, rMultiple] so callers that need to report a close (evaluateBar()'s own
+     *  event list, for the "Trade closed: {+/-$} ({R})" toast) don't have to
+     *  re-derive them from the now-stale $trade array afterward. */
+    private function settleTrade(array $trade, float $exitPrice, string $exitReason, float $feeRatePct, int $exitBarTimeMs): array {
         $entry = (float) $trade['entry_price'];
         $lot = (float) $trade['lot_size'];
         $long = $trade['direction'] === 'Long';
@@ -869,8 +993,9 @@ class BacktestController {
         $this->db->prepare(
             "UPDATE trades SET time_out=?, exit_price=?, fees=?, pnl=?, net_pnl=?, result=?, exit_reason=?, r_multiple=?, r_multiple_source='recorded' WHERE id=?"
         )->execute([
-            gmdate('Y-m-d H:i:s'), $exitPrice, $totalFees, $pnl, $net, $result, $exitReason, $rMultiple, $trade['id'],
+            gmdate('Y-m-d H:i:s', (int) ($exitBarTimeMs / 1000)), $exitPrice, $totalFees, $pnl, $net, $result, $exitReason, $rMultiple, $trade['id'],
         ]);
+        return [$net, $rMultiple];
     }
 
     /**
@@ -920,6 +1045,10 @@ class BacktestController {
                 // trade display (v3.22.3) has fees-paid-so-far/leverage to show.
                 'fees_paid' => (float) $t['fees'], 'leverage' => $t['leverage'] !== null ? (int) $t['leverage'] : null,
                 'planned_margin' => $t['planned_margin'] !== null ? (float) $t['planned_margin'] : null,
+                // v3.22.3 Part C — the fill bar's own time (UTC ms), so the running
+                // trade display can draw its box from the actual fill bar to the
+                // current cursor, not just a price/pnl snapshot with no left edge.
+                'time_in' => strtotime($t['time_in']) * 1000,
             ];
         }
         if ($peak < $closedEquity + $floatingTotal) $peak = $closedEquity + $floatingTotal;
@@ -1020,7 +1149,7 @@ class BacktestController {
         $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
         $open->execute([$session['id']]);
         foreach ($open->fetchAll() as $trade) {
-            $this->settleTrade($trade, (float) $bar['close'], 'Manual Closing', (float) $session['fee_rate_pct']);
+            $this->settleTrade($trade, (float) $bar['close'], 'Manual Closing', (float) $session['fee_rate_pct'], $bar['open_time']);
         }
         $this->db->prepare(
             "UPDATE backtest_sessions SET status='failed', fail_reason=?, fail_bar_time=?, fail_equity=? WHERE id=?"

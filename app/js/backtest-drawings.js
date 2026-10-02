@@ -438,6 +438,26 @@ async function btUpdateDrawing(id, patch) {
     btDrawingSaveQueue[id] = thisSave;
     await thisSave;
 }
+/** v3.22.3 Part C — links a drawing to the trade/order its own "Place trade" just
+ *  produced, called once from js/backtest.js::btSubmitTicket() on a successful submit.
+ *  Deliberately separate from btUpdateDrawing() above: that function always re-sends the
+ *  CURRENT points+settings on every call (by design, so a burst of rapid drag edits
+ *  collapses correctly), which would silently overwrite this with whatever points/
+ *  settings happened to be in memory at the same moment -- a real risk here since this
+ *  call and a settings/points save could both be in flight around the same Place Trade
+ *  click. Exactly one of trade_id/order_id is ever passed (a filled market order links a
+ *  trade; a resting limit order links a pending order) -- the other is sent as null
+ *  explicitly, not omitted, so a drawing never ends up with both set from two separate
+ *  calls (a limit order's own later fill calls this again with {trade_id}, which must
+ *  clear the now-stale linked_order_id in the same request, not leave it dangling). */
+async function btLinkDrawingToOrder(id, { trade_id = null, order_id = null } = {}) {
+    const d = btDrawings.find(x => x.id === id);
+    if (d) { d.linked_trade_id = trade_id; d.linked_order_id = order_id; }
+    const res = await btApi('update_backtest_drawing', 'POST', { id, linked_trade_id: trade_id, linked_order_id: order_id });
+    if (res && res.error) toast('Could not link drawing to the order — ' + res.error, 'error');
+    btUpdateNoDrawingHint();
+    btScheduleRedraw();
+}
 async function btDeleteDrawing(id) {
     const res = await btApi('delete_backtest_drawing', 'POST', { id });
     if (res && res.error) { toast('Could not delete — ' + res.error, 'error'); return; }
@@ -958,6 +978,201 @@ function btDrawTicketLines(ctx) {
     }
 }
 
+/** Shared by btDrawLiveTrades() for both pending orders and open positions -- a plain
+ *  full-width line at `price`, same shape as btDrawTicketLines()'s own local helper
+ *  (not factored into one shared function across both files' worth of call sites, since
+ *  each already closes over its own ctx/w -- the duplication is four lines, not logic
+ *  worth a parameter-heavy extraction). */
+function btDrawFullWidthLine(ctx, w, price, color, dashed) {
+    const y = btPriceToY(price);
+    if (y === null) return null;
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.setLineDash(dashed ? [6, 4] : []);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.setLineDash([]);
+    return y;
+}
+
+// v3.22.3 Part C — screen position of each pending order's Limit pill, refreshed every
+// draw call just below and read back by btSyncPendingCancelButtons() right after
+// btRenderDrawings() calls both in the same frame -- a real DOM "✕" button needs a
+// pixel position to sit at, and canvas drawing is the only thing that knows it.
+let btPendingOrderPillPos = {}; // order id -> {x, y}
+
+/**
+ * v3.22.3 Part C — the running trade display. MANDATORY per the briefing: every line
+ * here is drawn from btSession.pending_orders / btSession.open_positions (the session
+ * response's own fields), never from btTicket -- these are real, already-placed orders
+ * and fills, not a ticket being configured. Called unconditionally on every render
+ * (btRenderDrawings()), unlike btDrawTicketLines() above (which only draws while
+ * btTicket is open) -- this is exactly the fix for "after Place Trade, every line
+ * disappears," which depended entirely on nothing here ever touching btTicket.
+ */
+function btDrawLiveTrades(ctx) {
+    if (!btSession || !btDrawOverlay) return;
+    // v3.22.3 — refreshBtSession() schedules a redraw as soon as session data arrives
+    // (so pending/open lines appear immediately after Place Trade with no candle
+    // reload), which can land BEFORE btLoadCandleWindow() has had its own chance to set
+    // chartState.timezone (that await is still in flight) -- toDisplaySeconds() below
+    // would otherwise throw "Invalid time zone specified: null" on this one early frame.
+    // Self-corrects on the very next redraw once the timezone is known, so skipping this
+    // single frame's worth of open/pending lines costs nothing visible in practice.
+    if (!chartState || !chartState.timezone) return;
+    const w = btDrawOverlay.width;
+    const pillX = Math.max(60, w - 70);
+    const feeRatePct = btSession.fee_rate_pct || 0;
+    btPendingOrderPillPos = {};
+
+    // ── Pending limit orders: orange Limit / red SL / green TP, per the briefing ──
+    (btSession.pending_orders || []).forEach(o => {
+        const limitPrice = parseFloat(o.limit_price), stopLoss = parseFloat(o.stop_loss);
+        const takeProfit = o.take_profit !== null ? parseFloat(o.take_profit) : null;
+        // Estimate lot size the same way the ticket's own preview already did when this
+        // order was placed (btCalcPositionSize, shared with js/backtest.js) -- real
+        // sizing happens at fill time from the ORDER's own stored risk_pct/leverage
+        // (BacktestController::fillPosition()), which can differ from the session's
+        // CURRENT equity by the time this renders; this is a display estimate only, same
+        // caveat the ticket's own preview numbers already carry before a fill.
+        const lotSize = btCalcPositionSize(btSession.equity, parseFloat(o.risk_pct), limitPrice, stopLoss);
+        const entryFee = btCalcFee(lotSize, limitPrice, feeRatePct);
+        const exitFeeAtStop = btCalcFee(lotSize, stopLoss, feeRatePct);
+        const riskUsd = Math.abs(limitPrice - stopLoss) * lotSize + entryFee + exitFeeAtStop;
+
+        const yLimit = btDrawFullWidthLine(ctx, w, limitPrice, '#f59e0b', true);
+        if (yLimit !== null) {
+            btDrawPill(ctx, pillX, yLimit, `Limit ${fmtPrice5(limitPrice)}`, '#f59e0b');
+            btPendingOrderPillPos[o.id] = { x: pillX, y: yLimit };
+        }
+        const yStop = btDrawFullWidthLine(ctx, w, stopLoss, '#ef5350', true);
+        if (yStop !== null) btDrawPill(ctx, pillX, yStop, `Stop Loss −$${riskUsd.toFixed(2)}`, '#ef5350');
+        if (takeProfit !== null) {
+            const exitFeeAtTp = btCalcFee(lotSize, takeProfit, feeRatePct);
+            const rewardUsd = Math.abs(takeProfit - limitPrice) * lotSize - (entryFee + exitFeeAtTp);
+            const yTp = btDrawFullWidthLine(ctx, w, takeProfit, '#26a69a', true);
+            if (yTp !== null) btDrawPill(ctx, pillX, yTp, `Take Profit +$${rewardUsd.toFixed(2)}`, '#26a69a');
+        }
+    });
+
+    // ── Open positions: solid blue Entry / red SL / green TP + a fill-to-cursor box ──
+    (btSession.open_positions || []).forEach(p => {
+        const isLong = p.direction === 'Long';
+        const entry = parseFloat(p.entry_price), stopLoss = parseFloat(p.stop_loss);
+        const takeProfit = p.take_profit !== null ? parseFloat(p.take_profit) : null;
+        const lotSize = parseFloat(p.lot_size);
+        const mark = parseFloat(p.mark_price);
+        const stopDist = Math.abs(entry - stopLoss);
+
+        // Box from the fill bar to the current replay cursor, red for SL<->entry, teal
+        // for entry<->TP -- same two-zone fill btDrawPosition() (Part A) already uses
+        // for a plain, not-yet-placed drawing, just anchored at REAL fill/now times
+        // instead of the drawing's own two arbitrary anchor points.
+        const xFill = btTimeToX(toDisplaySeconds(p.time_in, chartState.timezone));
+        const xNow = btTimeToX(toDisplaySeconds(btSession.replay_cursor_ms, chartState.timezone));
+        const yEntry = btPriceToY(entry), yStop = btPriceToY(stopLoss);
+        const yTp = takeProfit !== null ? btPriceToY(takeProfit) : null;
+        if (xFill !== null && xNow !== null && yEntry !== null && yStop !== null) {
+            const left = Math.min(xFill, xNow), right = Math.max(xFill, xNow);
+            ctx.fillStyle = 'rgba(239,83,80,0.18)';
+            ctx.fillRect(left, Math.min(yEntry, yStop), right - left, Math.abs(yStop - yEntry));
+            if (yTp !== null) {
+                ctx.fillStyle = 'rgba(38,166,154,0.18)';
+                ctx.fillRect(left, Math.min(yEntry, yTp), right - left, Math.abs(yTp - yEntry));
+            }
+        }
+
+        const yE = btDrawFullWidthLine(ctx, w, entry, '#2962ff', false);
+        if (yE !== null) btDrawPill(ctx, pillX, yE, `Entry ${fmtPrice5(entry)}`, '#2962ff');
+        const yS = btDrawFullWidthLine(ctx, w, stopLoss, '#ef5350', true);
+        if (yS !== null) {
+            // fees_paid already includes the entry fee (computeSessionState()'s own
+            // comment); the exit-at-stop fee isn't charged yet, so it's added here the
+            // same way the ticket's own riskUsdNet does for a not-yet-filled order.
+            const exitFeeAtStop = btCalcFee(lotSize, stopLoss, feeRatePct);
+            const riskUsd = stopDist * lotSize + p.fees_paid + exitFeeAtStop;
+            btDrawPill(ctx, pillX, yS, `Stop Loss −$${riskUsd.toFixed(2)}`, '#ef5350');
+        }
+        if (yTp !== null) {
+            const exitFeeAtTp = btCalcFee(lotSize, takeProfit, feeRatePct);
+            const rewardUsd = Math.abs(takeProfit - entry) * lotSize - (p.fees_paid + exitFeeAtTp);
+            btDrawPill(ctx, pillX, yTp, `Take Profit +$${rewardUsd.toFixed(2)}`, '#26a69a');
+        }
+
+        // Centre pill: Open P&L net of the entry fee already paid (p.floating_pnl,
+        // computeSessionState()'s own figure -- never re-derived here, so this can never
+        // disagree with the header/Open Positions panel showing the exact same number),
+        // plus the R-multiple the current mark represents.
+        if (xFill !== null && xNow !== null && yEntry !== null) {
+            const moveDist = isLong ? (mark - entry) : (entry - mark);
+            const rMultiple = stopDist > 0 ? moveDist / stopDist : null;
+            const rTxt = rMultiple !== null ? `${rMultiple >= 0 ? '+' : ''}${rMultiple.toFixed(2)}R` : '—';
+            const pnlColor = p.floating_pnl < 0 ? '#ef5350' : '#26a69a';
+            btDrawPill(ctx, (Math.min(xFill, xNow) + Math.max(xFill, xNow)) / 2, yEntry,
+                `Open P&L: ${fmt(p.floating_pnl)} (${rTxt}) · Qty ${lotSize.toFixed(4)}`, pnlColor);
+        }
+    });
+
+    btDrawClosedTradeMarkers(ctx);
+}
+
+/** v3.22.3 Part C "On close" — a faint, permanent marker for each recently-closed trade
+ *  (btSession.closed_trades, BacktestController::getRecentClosedTrades()): a small
+ *  triangle at the entry bar, another at the exit bar, and a pill with the R-multiple and
+ *  exit reason ("+3.00R TP", "−1.00R SL"). Relies on Fix E's corrected settleTrade() for
+ *  time_out to be the real exit bar's time, not wall-clock "now" -- a pre-repair
+ *  time_out would place the exit arrow off at whatever the chart's current real-world
+ *  date happens to be, nowhere near the actual close. */
+function btDrawClosedTradeMarkers(ctx) {
+    const reasonAbbrev = { 'Stop Loss': 'SL', 'Take Profit': 'TP', 'Manual Closing': 'Manual' };
+    (btSession.closed_trades || []).forEach(t => {
+        const isLong = t.direction === 'Long';
+        const xIn = btTimeToX(toDisplaySeconds(t.time_in, chartState.timezone));
+        const xOut = btTimeToX(toDisplaySeconds(t.time_out, chartState.timezone));
+        const yIn = btPriceToY(t.entry_price);
+        const yOut = btPriceToY(t.exit_price);
+        const tri = (x, y, up, color) => {
+            if (x === null || y === null) return;
+            const s = 5;
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            if (up) { ctx.moveTo(x, y - s); ctx.lineTo(x - s, y + s); ctx.lineTo(x + s, y + s); }
+            else { ctx.moveTo(x, y + s); ctx.lineTo(x - s, y - s); ctx.lineTo(x + s, y - s); }
+            ctx.closePath(); ctx.fill();
+        };
+        tri(xIn, yIn, isLong, '#6b7280');
+        tri(xOut, yOut, !isLong, '#6b7280');
+        if (xOut !== null && yOut !== null) {
+            const rTxt = t.r_multiple !== null ? `${t.r_multiple >= 0 ? '+' : ''}${t.r_multiple.toFixed(2)}R` : '—';
+            const label = `${rTxt} ${reasonAbbrev[t.exit_reason] || t.exit_reason || ''}`.trim();
+            btDrawPill(ctx, xOut, yOut + (isLong ? 18 : -18), label, t.net_pnl >= 0 ? '#26a69a' : '#ef5350');
+        }
+    });
+}
+
+/** v3.22.3 Part C — positions one real "✕" <button> per pending order directly on top
+ *  of its own canvas-drawn Limit pill (btPendingOrderPillPos, just set by
+ *  btDrawLiveTrades() in this same render pass), same "real DOM over hand-rolled canvas
+ *  hit-testing" convention the selection toolbar (v3.22.1 Part B1) already established.
+ *  Rebuilds the button set from scratch every call -- there are never more than a
+ *  handful of pending orders at once, so this is cheap, and it trivially handles an
+ *  order being cancelled/filled between renders without a separate diff/reconcile step. */
+function btSyncPendingCancelButtons() {
+    const container = document.getElementById('bt-pending-cancel-buttons');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const order of (btSession && btSession.pending_orders) || []) {
+        const pos = btPendingOrderPillPos[order.id];
+        if (!pos) continue;
+        const btn = document.createElement('button');
+        btn.className = 'bt-pending-cancel-btn';
+        btn.textContent = '✕';
+        btn.title = 'Cancel this order';
+        btn.style.left = (pos.x - 26) + 'px';
+        btn.style.top = (pos.y - 8) + 'px';
+        btn.onclick = () => cancelBtOrder(order.id);
+        container.appendChild(btn);
+    }
+}
+
 // v3.22.1 Part B1 — the floating selection toolbar's own state. btToolbarOffset is a
 // lightweight, non-persisted manual-drag adjustment (see btWirePositionToolbar()'s own
 // doc comment for why this doesn't need the settings popover's remembered-position
@@ -1067,7 +1282,15 @@ function btWirePositionToolbar(d) {
     const settingsBtn = document.getElementById('bt-pos-toolbar-settings');
     if (settingsBtn) settingsBtn.onclick = (e) => btShowDrawSettingsPopover(d, e.clientX, e.clientY);
     const placeBtn = document.getElementById('bt-pos-toolbar-place');
-    if (placeBtn) placeBtn.onclick = () => btOpenTicketFromDrawing(d);
+    if (placeBtn) {
+        placeBtn.onclick = () => btOpenTicketFromDrawing(d);
+        // v3.22.3 Fix C — stays CLICKABLE even at the daily cap ("the ticket can still
+        // open from a position tool for planning") -- only a tooltip here; the ticket
+        // itself shows the cap reason as a banner at its own top once opened, and
+        // disables its own Place Trade submit button (btComputeTicket()'s capReached).
+        const capped = typeof btSession !== 'undefined' && btSession && btSession.max_trades_per_day && btSession.trades_today >= btSession.max_trades_per_day;
+        placeBtn.title = capped ? `Daily cap reached (${btSession.trades_today}/${btSession.max_trades_per_day}) -- opens for planning only` : '';
+    }
     const lockBtn = document.getElementById('bt-pos-toolbar-lock');
     if (lockBtn) lockBtn.onclick = () => {
         d.settings.rr_locked = !d.settings.rr_locked;
@@ -1123,6 +1346,13 @@ function btDistToSegment(px, py, x1, y1, x2, y2) {
 }
 function btHitTest(x, y) {
     for (let i = btDrawings.length - 1; i >= 0; i--) {
+        // v3.22.3 Part C — a drawing that actually placed an order is superseded by the
+        // running trade display (drawn from btSession's own open_positions/
+        // pending_orders); its own box is never rendered any more (btRenderDrawings()),
+        // so it must never be hit-testable either -- a leftover toolbar for a drawing
+        // the trader can no longer even see would be a worse bug than the duplicate box
+        // this whole feature exists to remove.
+        if (btDrawings[i].linked_trade_id || btDrawings[i].linked_order_id) continue;
         const handleIndex = btHitTestOne(btDrawings[i], x, y);
         if (handleIndex !== null) return { drawing: btDrawings[i], handleIndex };
     }
@@ -1175,6 +1405,11 @@ function btRenderDrawings() {
     // ticket panel/lines can never show two different trades at once. btTicketRenderValues()
     // (js/backtest.js) is null whenever no ticket is open or this isn't the linked drawing.
     for (const d of btDrawings) {
+        // v3.22.3 Part C — a drawing that placed a real order is superseded by the
+        // running trade display drawn below (btDrawLiveTrades(), from btSession's own
+        // open_positions/pending_orders) -- never render its own box too, or the chart
+        // shows the same trade twice.
+        if (d.linked_trade_id || d.linked_order_id) continue;
         const override = (typeof btTicket !== 'undefined' && btTicket && btTicket.sourceDrawingId === d.id) ? btTicketRenderValues() : null;
         btDrawOne(ctx, d, d.id === btSelectedDrawingId, false, override);
     }
@@ -1241,7 +1476,13 @@ function btRenderDrawings() {
     // btSelectedDrawingId) is empty, so neither changes anything when the ticket is
     // closed and nothing is selected — the overwhelming common case.
     btDrawTicketLines(ctx);
+    // v3.22.3 Part C — the running trade display: unlike btDrawTicketLines() just above,
+    // this draws from btSession's own open_positions/pending_orders, so it renders
+    // whether or not a ticket is open at all (the fix for "after Place Trade, every line
+    // disappears").
+    btDrawLiveTrades(ctx);
     btPositionSelectionToolbar();
+    btSyncPendingCancelButtons();
 }
 function btDrawOne(ctx, d, selected, isPreview, override) {
     ctx.save();

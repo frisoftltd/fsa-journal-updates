@@ -145,6 +145,16 @@
         <span id="bt-step-label" style="color:#6b7280;font-size:11px;align-self:center" title="What one click of Next Bar/Prev Bar actually advances by"></span>
       </div>
       <div id="bt-replay-status" style="color:#8b93a7;font-size:11px"></div>
+      <!-- v3.22.3 Part C — "header strip, always visible on the replay screen": these
+           three read straight off sessionSummary()'s own fields (renderBtHeaderStrip(),
+           js/backtest.js), the same figures the sidebar's Challenge panel already shows
+           -- this is a second, more prominent place for them, not a second source of
+           truth for what they say. -->
+      <div class="tf-group" id="bt-header-strip" style="gap:12px">
+        <span style="color:#6b7280;font-size:11px">Equity <b id="bt-strip-equity" style="color:#d1d4dc"></b></span>
+        <span style="color:#6b7280;font-size:11px">Target <b id="bt-strip-target" style="color:#d1d4dc"></b></span>
+        <span style="color:#6b7280;font-size:11px">Loss <b id="bt-strip-loss" style="color:#d1d4dc"></b></span>
+      </div>
       <div id="bt-replay-note" style="margin-left:auto;font-size:11px;color:#6b7280">Bybit data — indicative vs. live BitFunded fills</div>
     </div>
 
@@ -205,6 +215,12 @@
              js/backtest-drawings.js::btPositionSelectionToolbar(), just above whichever
              position-tool box is currently selected. -->
         <div id="bt-pos-toolbar" class="bt-pos-toolbar" style="display:none"></div>
+        <!-- v3.22.3 Part C — one small real "✕" button per pending limit order,
+             positioned over its own Limit pill by js/backtest-drawings.js::
+             btSyncPendingCancelButtons() every redraw -- a real DOM click target over a
+             canvas-drawn pill, same "real DOM over hand-rolled canvas hit-testing"
+             convention the selection toolbar (v3.22.1 Part B1) already established. -->
+        <div id="bt-pending-cancel-buttons"></div>
       </div>
 
       <div class="bt-side-panel">
@@ -235,7 +251,7 @@
             <button class="btn btn-sm bt-dir-btn" id="bt-dir-long" onclick="setBtDirection('Long')">Long</button>
             <button class="btn btn-sm bt-dir-btn" id="bt-dir-short" onclick="setBtDirection('Short')">Short</button>
           </div>
-          <button class="btn btn-primary" style="width:100%" onclick="btNewTradeClick()">New Trade</button>
+          <button class="btn btn-primary" style="width:100%" id="bt-new-trade-btn" onclick="btNewTradeClick()">New Trade</button>
         </div>
 
         <div class="bt-panel-block">

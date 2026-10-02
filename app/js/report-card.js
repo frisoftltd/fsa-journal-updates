@@ -12,9 +12,9 @@ let rcCard = null;
 let rcCurrentDate = null;
 let rcTemplates = [];
 
-function escapeHtml(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
+// escapeHtml() moved to js/app.js (v3.22.3) -- was independently duplicated here and in
+// js/backtest.js; see app.js's own comment for why that's a real bug in a shared global
+// scope, not two harmless coincidences.
 function rcToday() {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

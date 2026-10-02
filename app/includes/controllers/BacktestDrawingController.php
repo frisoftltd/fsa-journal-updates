@@ -64,7 +64,7 @@ class BacktestDrawingController {
         if (!$sessionId) jsonError('Invalid session id.');
         $this->assertOwnedSession($sessionId);
 
-        $s = $this->db->prepare("SELECT id, tool, points, settings FROM backtest_drawings WHERE session_id=? ORDER BY id ASC");
+        $s = $this->db->prepare("SELECT id, tool, points, settings, linked_trade_id, linked_order_id FROM backtest_drawings WHERE session_id=? ORDER BY id ASC");
         $s->execute([$sessionId]);
         jsonResponse(array_map(function ($r) {
             return [
@@ -72,6 +72,12 @@ class BacktestDrawingController {
                 'tool' => $r['tool'],
                 'points' => json_decode($r['points'], true) ?? [],
                 'settings' => json_decode($r['settings'], true) ?? [],
+                // v3.22.3 Part C — js/backtest-drawings.js suppresses this drawing's own
+                // box/pills whenever either is set: the running trade display (drawn
+                // from the session's own open_positions/pending_orders) is the one
+                // on-chart representation of a drawing that actually placed an order.
+                'linked_trade_id' => $r['linked_trade_id'] !== null ? (int) $r['linked_trade_id'] : null,
+                'linked_order_id' => $r['linked_order_id'] !== null ? (int) $r['linked_order_id'] : null,
             ];
         }, $s->fetchAll()));
     }
@@ -118,6 +124,20 @@ class BacktestDrawingController {
             if (!is_array($d['settings'])) jsonError('Invalid settings.');
             $sets[] = 'settings=?';
             $params[] = json_encode($d['settings']);
+        }
+        // v3.22.3 Part C — set once in the Place Trade path (js/backtest.js::
+        // btLinkDrawingToOrder()), never cleared back to null again by this endpoint;
+        // array_key_exists (not isset) so an explicit `null` -- the limit-order-fills-
+        // into-a-trade case, which clears linked_order_id while setting linked_trade_id
+        // in the SAME call -- is still honoured, not silently skipped the way isset()
+        // would treat it.
+        if (array_key_exists('linked_trade_id', $d)) {
+            $sets[] = 'linked_trade_id=?';
+            $params[] = $d['linked_trade_id'] !== null ? validId($d['linked_trade_id']) : null;
+        }
+        if (array_key_exists('linked_order_id', $d)) {
+            $sets[] = 'linked_order_id=?';
+            $params[] = $d['linked_order_id'] !== null ? validId($d['linked_order_id']) : null;
         }
         if (!$sets) jsonError('Nothing to update.');
         $params[] = $id;

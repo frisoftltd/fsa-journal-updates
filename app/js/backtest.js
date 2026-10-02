@@ -148,11 +148,9 @@ function btStatusBadge(status) {
     const label = { active: 'running', passed: 'passed', failed: 'failed' }[status] || status;
     return `<span class="badge ${map[status] || ''}">${label}</span>`;
 }
-function escapeHtml(s) {
-    const d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
-}
+// escapeHtml() moved to js/app.js (v3.22.3) -- was independently duplicated here and in
+// js/report-card.js (whose own regex-based version, the more complete of the two, was
+// the only one ever actually running for either file -- see app.js's own comment).
 
 // ── SETUP FORM (Screen A) ────────────────────────────────
 // v3.22.0 — risk ladder default, mirroring BacktestController::DEFAULT_RISK_LADDER
@@ -596,10 +594,13 @@ async function refreshBtSession() {
     renderBtHeader(s);
     setActiveBtDisplayTfButton();
     renderChallengePanel(s);
-    renderOpenPositions(s.open_positions || []);
+    renderBtOpenPositions(s.open_positions || []);
     renderPendingOrders(s.pending_orders || []);
     renderBtOutcome(s);
+    renderBtHeaderStrip(s);
+    btUpdateNewTradeCapUI();
     document.getElementById('bt-replay-status').textContent = s.status === 'active' ? '' : `Session ${s.status}`;
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw(); // v3.22.3 Part C -- pending/open lines come from btSession, not the ticket
     return true;
 }
 
@@ -646,6 +647,42 @@ function renderChallengePanel(s) {
     document.getElementById('bt-val-equity').textContent = fmt(s.equity) + (s.floating_pnl ? ` (${s.floating_pnl >= 0 ? '+' : ''}${fmt(s.floating_pnl)} floating)` : '');
 }
 
+/** v3.22.3 Part C — the controls-bar header strip, always visible on the replay screen
+ *  (unlike the sidebar's Challenge panel, which a trader could in principle scroll past).
+ *  Same three sessionSummary() fields the sidebar panel already reads -- never a second
+ *  computation of any of them. */
+function renderBtHeaderStrip(s) {
+    const eqEl = document.getElementById('bt-strip-equity');
+    if (!eqEl) return; // not on this screen yet (e.g. called before showBacktestScreen('window'))
+    eqEl.textContent = fmt(s.equity);
+    document.getElementById('bt-strip-target').textContent = `${s.progress_to_target_pct ?? '—'}% / ${s.profit_target_pct}%`;
+    document.getElementById('bt-strip-loss').textContent = `${s.max_drawdown_used_pct ?? 0}% / ${s.max_drawdown_pct}%`;
+}
+
+/** v3.22.3 Fix C — "the sidebar New Trade button and the toolbar Place trade button are
+ *  disabled... The ticket can still open from a position tool for planning": the sidebar
+ *  button is this release's main one-click entry point and is fully disabled (with the
+ *  cap reason as its own label) once the cap is hit -- there's nothing to plan from a
+ *  blank ticket a session-level gate already refuses to submit. The toolbar's own "Place
+ *  trade" (opened from an already-drawn position tool, i.e. a plan the trader already
+ *  built) stays clickable per that explicit carve-out -- it only gets a tooltip here;
+ *  disabling the ticket's actual submit button once it's open is btComputeTicket()'s own
+ *  capReached/capReason (shown as a banner at the TOP of the ticket, not buried at the
+ *  bottom with every other reason, per this same fix). Called from every place btSession
+ *  changes (js/backtest-drawings.js's btPositionSelectionToolbar() reads the same two
+ *  fields directly when it (re)builds the toolbar, so a selection made after the cap was
+ *  already reached starts correctly labelled without this function needing to reach into
+ *  that file's own DOM). */
+function btUpdateNewTradeCapUI() {
+    if (!btSession) return;
+    const capped = !!(btSession.max_trades_per_day && btSession.trades_today >= btSession.max_trades_per_day);
+    const btn = document.getElementById('bt-new-trade-btn');
+    if (btn) {
+        btn.disabled = capped;
+        btn.textContent = capped ? `Daily cap reached (${btSession.trades_today}/${btSession.max_trades_per_day}): advance to the next day` : 'New Trade';
+    }
+}
+
 function renderBtOutcome(s) {
     const el = document.getElementById('bt-outcome-banner');
     if (s.status === 'passed') {
@@ -659,16 +696,46 @@ function renderBtOutcome(s) {
     }
 }
 
-function renderOpenPositions(positions) {
+// v3.22.3 Fix D (re-opened) — RENAMED from renderOpenPositions(), found while verifying
+// Fix D in the browser harness, not by inspection: js/calculator.js ALSO declares a
+// global function named renderOpenPositions(positions) (a completely different feature
+// -- the Auto Risk Calculator's own open-margin-positions list, targeting
+// #calc-open-positions). Both files load as plain global <script> tags in the SAME
+// scope, and calculator.js loads AFTER this file in index.php's own module list -- a
+// later plain `function` declaration in the same global scope silently REPLACES an
+// earlier one of the same name, with no error, no warning. The practical effect: every
+// call to renderOpenPositions() anywhere in this app -- including every one of THIS
+// file's own three call sites -- was actually running calculator.js's version, which
+// writes into a DIFFERENT element and never touches #bt-open-positions at all. That left
+// this panel's own original static "None" markup (pages/backtest.php) on screen FOREVER,
+// regardless of what open_positions data the server returned -- compounding, and
+// possibly the dominant cause of, the exact "Open Positions says None" symptom Fix D's
+// own investigation (the advance()-no-bar-branch missing key, and the null-markBar fee-
+// only floating figure) was chasing. Renamed instead of touching calculator.js, which
+// has every right to its own name for its own unrelated feature -- this file was the one
+// with an avoidable collision (every other render function in this file is already
+// prefixed renderBt*; this one, alone, wasn't).
+//
+// v3.22.3 Fix A — every text node in these two rows now also has an EXPLICIT dark-theme
+// colour (#d1d4dc primary, #8b93a7 muted), not one inherited from a parent class/style.
+// The live report: the Pending Orders row showed only its "Cancel" button -- the <span>
+// next to it had no colour of its own at all, so it fell through to this light-themed
+// app's own default body text colour, unreadable against the dark sidebar panel
+// (.bt-side-panel). This function's own spans happened to inherit a correct colour from
+// their parent elements (.bt-panel-row's own CSS, and the second row's own inline
+// color:#8b93a7) and were never actually broken on screen for THAT reason -- made
+// explicit here anyway, per the fix's own instruction, so neither row's readability
+// depends on a parent element keeping a color rule it doesn't visibly need for itself.
+function renderBtOpenPositions(positions) {
     const el = document.getElementById('bt-open-positions');
     if (!positions.length) { el.innerHTML = '<div style="color:#6b7280;font-size:12px">None</div>'; return; }
     el.innerHTML = positions.map(p => `
         <div class="bt-panel-row" style="border-bottom:1px solid #232733;padding-bottom:6px;margin-bottom:6px">
-            <span>${p.direction} @ ${fmtPrice5(p.entry_price)}</span>
+            <span style="color:#d1d4dc">${p.direction} @ ${fmtPrice5(p.entry_price)}</span>
             <span class="${pnlCls(p.floating_pnl)}">${fmt(p.floating_pnl)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:11px;color:#8b93a7;margin-bottom:6px">
-            <span>SL ${fmtPrice5(p.stop_loss)}${p.take_profit ? ' / TP ' + fmtPrice5(p.take_profit) : ''}</span>
+            <span style="color:#8b93a7">SL ${fmtPrice5(p.stop_loss)}${p.take_profit ? ' / TP ' + fmtPrice5(p.take_profit) : ''}</span>
             <button class="btn btn-ghost btn-sm" onclick="closeBtPosition(${p.id})">Close</button>
         </div>`).join('');
 }
@@ -676,12 +743,28 @@ function renderPendingOrders(orders) {
     const el = document.getElementById('bt-pending-orders');
     if (!orders.length) { el.innerHTML = '<div style="color:#6b7280;font-size:12px">None</div>'; return; }
     el.innerHTML = orders.map(o => `
-        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px">
-            <span>${o.direction} limit @ ${fmtPrice5(o.limit_price)}</span>
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px;color:#d1d4dc">
+            <span style="color:#d1d4dc">${o.direction} limit @ ${fmtPrice5(o.limit_price)}</span>
             <button class="btn btn-ghost btn-sm" onclick="cancelBtOrder(${o.id})">Cancel</button>
         </div>`).join('');
 }
 function fmtPrice5(v) { const n = parseFloat(v); return isNaN(n) ? '—' : n.toFixed(Math.abs(n) >= 100 ? 2 : (Math.abs(n) >= 1 ? 4 : 6)); }
+/** v3.22.3 Fix B — the NUMBER counterpart to fmtPrice5() above (same bucketed decimal
+ *  rule: >=100 -> 2dp, >=1 -> 4dp, else 6dp), for the two places a rounded STRING isn't
+ *  enough: the ticket's own number inputs (value=...) and the submitted payload, both of
+ *  which need a real rounded number, not display text. Mirrors
+ *  backtest_engine.php::backtestRoundPrice() exactly -- kept as two copies, not one
+ *  network round trip, same "duplicate the pure math for live, no-round-trip preview"
+ *  convention every other engine function in this file already follows. btTicket's own
+ *  stored entry/stopLoss/takeProfit are NEVER rounded through this -- only a rendered
+ *  input value or the final payload is, so RR/sizing math upstream of either still runs
+ *  against full precision. */
+function btRoundPrice(v) {
+    const n = parseFloat(v);
+    if (isNaN(n)) return n;
+    const decimals = Math.abs(n) >= 100 ? 2 : (Math.abs(n) >= 1 ? 4 : 6);
+    return parseFloat(n.toFixed(decimals));
+}
 
 // ── ADVANCE ──────────────────────────────────────────────
 /**
@@ -696,19 +779,40 @@ async function btAdvance() {
     const res = await btApi('backtest_advance', 'POST', { session_id: btActiveSessionId, display_timeframe: btDisplayTimeframe });
     if (!res || res.error) { toast('Advance failed — ' + (res ? res.error : 'unknown error'), 'error'); stopBtAutoplay(); return; }
 
+    // v3.22.3 Part C — a stop_loss/take_profit event is a CLOSE: "Trade closed:
+    // {+/-$} ({R})", per the briefing, using the exact net_pnl/r_multiple settleTrade()
+    // itself just computed (BacktestController::evaluateBar()'s own event payload), not
+    // a client-side re-derivation. A limit fill isn't a close, so it keeps its own
+    // simpler "filled @ price" wording.
     (res.events || []).forEach(ev => {
-        const label = { limit_filled: 'Limit order filled', stop_loss: 'Stop loss hit', take_profit: 'Take profit hit' }[ev.type] || ev.type;
-        toast(`${label} @ ${fmtPrice5(ev.price)}`);
+        if (ev.type === 'stop_loss' || ev.type === 'take_profit') {
+            const rTxt = ev.r_multiple !== null && ev.r_multiple !== undefined ? ` (${ev.r_multiple >= 0 ? '+' : ''}${ev.r_multiple.toFixed(2)}R)` : '';
+            toast(`Trade closed: ${fmt(ev.net_pnl)}${rTxt}`, ev.net_pnl >= 0 ? 'success' : 'error');
+        } else if (ev.type === 'limit_filled') {
+            toast(`${ev.direction} ${ev.lot_size.toFixed(4)} ${btBaseAsset(btSession.symbol)} filled @ ${fmtPrice5(ev.price)}`);
+            // v3.22.3 Part C — a drawing linked to this pending order (linked_order_id)
+            // now has a real trade instead: flip the link over so btDrawLiveTrades()
+            // keeps suppressing this drawing's own box under the open-position lines,
+            // not back under the (now filled, no longer pending) order's old lines.
+            const linkedDrawing = typeof btDrawings !== 'undefined' ? btDrawings.find(d => d.linked_order_id === ev.order_id) : null;
+            if (linkedDrawing) btLinkDrawingToOrder(linkedDrawing.id, { trade_id: ev.trade_id });
+        }
     });
 
     btSession = res.session;
+    btSession.open_positions = res.open_positions || [];
+    btSession.pending_orders = res.pending_orders || [];
+    btSession.closed_trades = res.closed_trades || [];
     renderBtHeader(btSession);
     renderChallengePanel(btSession);
-    renderOpenPositions(res.open_positions || []);
+    renderBtOpenPositions(btSession.open_positions);
+    renderPendingOrders(btSession.pending_orders);
     renderBtOutcome(btSession);
+    renderBtHeaderStrip(btSession);
+    btUpdateNewTradeCapUI();
     if (btSession.status !== 'active') { stopBtAutoplay(); document.getElementById('bt-replay-status').textContent = `Session ${btSession.status}`; }
 
-    await btLoadCandleWindow();
+    await btLoadCandleWindow(); // already schedules its own redraw
 }
 
 /**
@@ -737,10 +841,16 @@ async function btRewind() {
     if (res.trades_rewound > 0) toast(`Rewound — ${res.trades_rewound} trade${res.trades_rewound === 1 ? '' : 's'} undone`);
 
     btSession = res.session;
+    btSession.open_positions = res.open_positions || [];
+    btSession.pending_orders = res.pending_orders || [];
+    btSession.closed_trades = res.closed_trades || [];
     renderBtHeader(btSession);
     renderChallengePanel(btSession);
-    renderOpenPositions(res.open_positions || []);
+    renderBtOpenPositions(btSession.open_positions);
+    renderPendingOrders(btSession.pending_orders);
     renderBtOutcome(btSession);
+    renderBtHeaderStrip(btSession);
+    btUpdateNewTradeCapUI();
     document.getElementById('bt-replay-status').textContent = btSession.status === 'active' ? '' : `Session ${btSession.status}`;
 
     await btLoadCandleWindow();
@@ -1002,23 +1112,34 @@ function btComputeTicket() {
     // here (it's a server-side-only fact about the replay cursor at submit time) and is
     // therefore never blocked client-side — same reasoning BacktestController.php
     // itself already has to re-check it at submit regardless.
-    let blockReason = null;
+    // v3.22.3 Fix C — the daily trade cap is checked FIRST, not last: a trader who's
+    // already at the cap can't place a trade no matter how the rest of the ticket is
+    // filled in, so this is the one blockReason that also gets its own banner at the TOP
+    // of the ticket (btTicketHtml()) instead of only the shared reason line at the
+    // bottom -- the live report was someone building out an entire ticket (SL, TP,
+    // risk, leverage) only to find out at the very end, after clicking Place Trade, that
+    // none of it mattered. The ticket still OPENS for planning either way (per the
+    // briefing) -- this only ever disables the submit button, never the ticket itself.
+    const capReached = !!(btSession.max_trades_per_day && btSession.trades_today >= btSession.max_trades_per_day);
+    const capReason = capReached ? `Daily cap reached (${btSession.trades_today}/${btSession.max_trades_per_day}): advance to the next day.` : null;
+
+    let blockReason = capReason;
     // v3.22.2 Fix 2 — a New Trade ticket opened with no source drawing starts with
     // stopLoss 0 (rendered as an empty field, per the briefing's "SL empty" default),
     // which the side-of-entry checks below don't actually catch (0 is a valid "below
-    // entry" value for a Long). Checked first, and explicitly, so the disabled reason
-    // reads "Enter a stop loss" rather than silently letting a zero-stop ticket through.
-    if (!t.stopLoss) blockReason = 'Enter a stop loss.';
-    else if (t.direction === 'Long' && t.stopLoss >= entry) blockReason = 'For a Long, stop loss must be below entry.';
-    else if (t.direction === 'Short' && t.stopLoss <= entry) blockReason = 'For a Short, stop loss must be above entry.';
-    else if (marginRequired > availableMargin) blockReason = `Margin required (${fmt(marginRequired)}) exceeds available margin (${fmt(Math.max(0, availableMargin))}).`;
-    else if (liquidationBeforeStop) blockReason = `At ${t.leverage}x leverage, liquidation (~${fmtPrice5(liquidationPrice)}) would hit before your stop.`;
-    else if (btSession.max_trades_per_day && btSession.trades_today >= btSession.max_trades_per_day) blockReason = 'Daily trade cap reached for this session.';
+    // entry" value for a Long). Checked first (after the cap), and explicitly, so the
+    // disabled reason reads "Enter a stop loss" rather than silently letting a
+    // zero-stop ticket through.
+    if (!blockReason && !t.stopLoss) blockReason = 'Enter a stop loss.';
+    else if (!blockReason && t.direction === 'Long' && t.stopLoss >= entry) blockReason = 'For a Long, stop loss must be below entry.';
+    else if (!blockReason && t.direction === 'Short' && t.stopLoss <= entry) blockReason = 'For a Short, stop loss must be above entry.';
+    else if (!blockReason && marginRequired > availableMargin) blockReason = `Margin required (${fmt(marginRequired)}) exceeds available margin (${fmt(Math.max(0, availableMargin))}).`;
+    else if (!blockReason && liquidationBeforeStop) blockReason = `At ${t.leverage}x leverage, liquidation (~${fmtPrice5(liquidationPrice)}) would hit before your stop.`;
 
     return {
         entry, lotSize, notional, marginRequired, availableMargin, liquidationPrice, liquidationBeforeStop,
         entryFee, exitFee, totalFees, rr, riskUsdInput, riskUsdNet, rewardUsdNet, riskPctEffective,
-        ladderTier, offLadder, blockReason,
+        ladderTier, offLadder, blockReason, capReached, capReason,
     };
 }
 
@@ -1063,6 +1184,7 @@ function btTicketHtml(t, c) {
             <button type="button" class="bt-ticket-close" id="bt-ticket-close-x" title="Cancel">✕</button>
         </div>
         <div class="bt-ticket-body">
+            ${c.capReached ? `<div class="bt-ticket-disabled-reason" style="margin-bottom:10px">${escapeHtml(c.capReason)}</div>` : ''}
             <div class="bt-ticket-row">
                 <div class="bt-ticket-seg" data-seg-group="direction">
                     ${segBtn('direction', 'Long', 'Long')}${segBtn('direction', 'Short', 'Short')}
@@ -1077,14 +1199,14 @@ function btTicketHtml(t, c) {
             <div class="bt-ticket-row">
                 <div class="bt-ticket-toggle-row"><input type="checkbox" checked disabled><label style="margin:0;text-transform:none;font-size:12px;color:#d1d4dc">Stop Loss (required)</label></div>
                 <div class="bt-ticket-field-row">
-                    <input type="number" id="bt-ticket-sl" step="any" value="${t.stopLoss || ''}">
+                    <input type="number" id="bt-ticket-sl" step="any" value="${t.stopLoss ? btRoundPrice(t.stopLoss) : ''}">
                     <span class="bt-ticket-unit-badge">PRICE</span>
                 </div>
             </div>
             <div class="bt-ticket-row">
                 <div class="bt-ticket-toggle-row"><input type="checkbox" id="bt-ticket-tp-on" ${t.takeProfit !== null ? 'checked' : ''}><label style="margin:0;text-transform:none;font-size:12px;color:#d1d4dc">Take Profit</label></div>
                 <div class="bt-ticket-field-row" style="margin-bottom:6px">
-                    <input type="number" id="bt-ticket-tp" step="any" value="${t.takeProfit !== null ? t.takeProfit : ''}" ${t.takeProfit === null ? 'disabled' : ''}>
+                    <input type="number" id="bt-ticket-tp" step="any" value="${t.takeProfit !== null ? btRoundPrice(t.takeProfit) : ''}" ${t.takeProfit === null ? 'disabled' : ''}>
                     <span class="bt-ticket-unit-badge">PRICE</span>
                 </div>
                 <div class="bt-ticket-toggle-row"><input type="checkbox" id="bt-ticket-keep3r" ${t.keep3R ? 'checked' : ''}><label style="margin:0;text-transform:none;font-size:12px;color:#d1d4dc">Keep 3R (gate 5)</label></div>
@@ -1120,7 +1242,7 @@ function btTicketHtml(t, c) {
                 <div class="bt-ticket-computed"><span>Est. exit fee</span><b>${fmt(c.exitFee)}</b></div>
                 <div class="bt-ticket-computed"><span>Total fees</span><b>${fmt(c.totalFees)}</b></div>
             </div>
-            ${c.blockReason ? `<div class="bt-ticket-disabled-reason">${escapeHtml(c.blockReason)}</div>` : ''}
+            ${(c.blockReason && !c.capReached) ? `<div class="bt-ticket-disabled-reason">${escapeHtml(c.blockReason)}</div>` : ''}
         </div>
         <div class="bt-ticket-actions">
             <button type="button" class="btn btn-ghost" id="bt-ticket-cancel-btn">Cancel</button>
@@ -1192,31 +1314,68 @@ function btWireTicket(c) {
     document.getElementById('bt-ticket-place-btn').onclick = btSubmitTicket;
 }
 
+/** Strips the quote asset off a Bybit linear-perp symbol for a plain "0.87 BTC"-style
+ *  toast (v3.22.3 Fix F) -- a small, fixed list rather than a real instrument-metadata
+ *  lookup (this app has none), same "don't invent precision/data this app can't back up"
+ *  reasoning already applied to fee_rate_pct/liquidation elsewhere in this file. Falls
+ *  back to the symbol as-is if none of these match. */
+function btBaseAsset(symbol) {
+    const s = String(symbol || '');
+    for (const quote of ['USDT', 'USDC', 'BUSD', 'USD']) {
+        if (s.endsWith(quote) && s.length > quote.length) return s.slice(0, -quote.length);
+    }
+    return s;
+}
+
 async function btSubmitTicket() {
     if (!btTicket || !btSession) return;
     const c = btComputeTicket();
     if (c.blockReason) return; // button is disabled for this, but guard directly too
+    // v3.22.3 Fix F — disabled for the whole round trip, not just visually blocked by
+    // c.blockReason: a double-click (or a slow first response the browser silently
+    // retries) submitted the SAME ticket twice on live with nothing on screen to say the
+    // first one had already gone through, placing two identical market orders on one
+    // bar. Re-enabled only on an error response -- a success closes the ticket outright,
+    // so there is no longer a button to re-enable.
+    const placeBtn = document.getElementById('bt-ticket-place-btn');
+    if (placeBtn) placeBtn.disabled = true;
+    // v3.22.3 Fix B — rounded here too (not just the server's own defensive round in
+    // placeOrder()), so what actually gets SUBMITTED already matches what the ticket's
+    // own inputs just showed -- btTicket.stopLoss/takeProfit themselves stay full
+    // precision (the RR/sizing math above, c, already ran against them), only the
+    // payload's own copies are rounded.
     const payload = {
         session_id: btActiveSessionId,
         client_bar_time: btSession.replay_cursor_ms,
         type: btTicket.orderType,
         direction: btTicket.direction,
-        stop_loss: btTicket.stopLoss,
-        take_profit: btTicket.takeProfit,
+        stop_loss: btRoundPrice(btTicket.stopLoss),
+        take_profit: btTicket.takeProfit !== null ? btRoundPrice(btTicket.takeProfit) : null,
         leverage: btTicket.leverage,
         risk_pct: c.riskPctEffective,
     };
-    if (btTicket.orderType === 'limit') payload.limit_price = btTicket.entry;
+    if (btTicket.orderType === 'limit') payload.limit_price = btRoundPrice(btTicket.entry);
     const res = await btApi('backtest_place_order', 'POST', payload);
-    if (res && res.error) { toast(res.error, 'error'); return; }
-    toast(res.filled ? `Filled @ ${fmtPrice5(res.entry_price)}` : 'Limit order placed');
+    if (res && res.error) { toast(res.error, 'error'); if (placeBtn) placeBtn.disabled = false; return; }
+    // v3.22.3 Fix F — "Long 0.87 BTC filled @ 7140" / "Limit order placed @ x", per the
+    // briefing, using the server's own lot_size (res.lot_size) rather than re-deriving it
+    // client-side -- the ticket's own preview lot size (c.lotSize) is computed against
+    // THIS render's equity/risk snapshot, which is not necessarily byte-identical to
+    // whatever the server actually sized the fill against a moment later.
+    toast(res.filled
+        ? `${res.direction} ${res.lot_size.toFixed(4)} ${btBaseAsset(btSession.symbol)} filled @ ${fmtPrice5(res.entry_price)}`
+        : `Limit order placed @ ${fmtPrice5(payload.limit_price)}`);
     // v3.22.2 Fix 3 — the source drawing (if any) is saved with the ticket's own final
     // values before closing, so what's left on the chart after Place Trade matches what
     // was actually submitted, not whatever the drawing happened to say before the ticket
-    // was opened. Linking it to the resulting trade / hiding it while the position is
-    // open is still Part C (linked_trade_id, v3.22.3), not this release.
+    // was opened.
     if (btTicket.sourceDrawingId) {
         await btUpdateDrawing(btTicket.sourceDrawingId, { settings: { entry: c.entry, stop_loss: btTicket.stopLoss, take_profit: btTicket.takeProfit } });
+        // v3.22.3 Part C — links the drawing to whatever this order became, so the live
+        // server-state lines (btSession.open_positions/pending_orders) take over as the
+        // one on-chart representation of this trade and the original drawing's own box
+        // never shows a second, duplicate one alongside it.
+        await btLinkDrawingToOrder(btTicket.sourceDrawingId, res.filled ? { trade_id: res.trade_id } : { order_id: res.pending_order_id });
     }
     btCloseTicket();
     await refreshBtSession();

@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.22.2 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.3 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -4104,6 +4104,291 @@ Trade; zero toolbar/pill overlap for both Long and Short; the discoverability hi
 appearing/disappearing with drawing count. `php -l` and `node --check` clean on every
 changed file.
 
+### v3.22.3: Live Trade Display (Part C) + Fixes From Live Testing
+
+**Renumbering:** Part C of the original v3.22.1 briefing (the running-trade chart
+display) is now **v3.22.3**, not v3.22.3-later-in-sequence as earlier planned — moved
+forward because the trader literally can't backtest without it (placing a trade and
+having every line vanish makes the tool unusable, not just rough). The risk-ladder engine
+moves to **v3.22.4**.
+
+This release is two things at once: Part C itself (new scope, finally built), and six
+fixes (A–F) from the trader's own first real session on v3.22.2, several of which turned
+out to be more interesting than they first looked.
+
+#### Part C — the running trade display
+
+**Pending limit order** (from submit until fill or cancel): full-width orange dashed
+`Limit {price}`, red dashed `Stop Loss −${risk}`, green dashed `Take Profit +${reward}`,
+each with a pill — same visual language the order ticket's own lines already used
+(v3.22.1 Part B3), just drawn from a different data source (see "mandatory" below). A
+real DOM "✕" button (`#bt-pending-cancel-buttons`, `btSyncPendingCancelButtons()`) sits
+over the Limit pill, positioned every redraw — same "real DOM over hand-rolled canvas
+hit-testing" convention the floating selection toolbar established in v3.22.1 Part B1.
+Clicking it calls the existing `cancelBtOrder()`. Not draggable once submitted — modifying
+a resting order is explicitly out of scope.
+
+**Open position** (from fill until close): solid blue `Entry {fill price}`, red dashed
+SL, green dashed TP, each with its own $ pill; a position box from the fill bar to the
+current replay cursor (red for SL↔entry, teal for entry↔TP), redrawn every advance since
+its right edge always tracks "now"; a centre pill, `Open P&L: {±$} ({±R}) · Qty {size}`,
+net of the entry fee already paid (`floating_pnl`, never re-derived — the exact figure
+`computeSessionState()` already produces for the header/Open Positions panel), red below
+zero, teal otherwise.
+
+**Hiding the linked drawing:** `backtest_drawings.linked_trade_id`/`linked_order_id`
+(new, migration `2026_10_01_0002`, both nullable, both `ON DELETE SET NULL` so deleting
+the trade/order a drawing produced never cascades into deleting the annotation itself) —
+set once, in the Place Trade path (`js/backtest.js::btSubmitTicket()` →
+`btLinkDrawingToOrder()`, `js/backtest-drawings.js`), never cleared back to null. A
+linked drawing's own box/pills are never rendered (`btRenderDrawings()`'s main loop) and
+never hit-testable (`btHitTest()`) again — superseded permanently by the running trade
+display, not just hidden while the order/position is active. A limit order that later
+fills flips its drawing from `linked_order_id` to `linked_trade_id`
+(`btAdvance()`'s own `limit_filled` event handler, which now carries the pending order's
+own id specifically for this lookup).
+
+**Mandatory, verified by construction:** every one of these lines is drawn from
+`btSession.open_positions`/`btSession.pending_orders` (`btDrawLiveTrades()`,
+`js/backtest-drawings.js`), **never from `btTicket`** — called unconditionally on every
+`btRenderDrawings()` pass, unlike `btDrawTicketLines()` (which only draws while a ticket
+is open). This is the literal fix for "after Place Trade, every line disappears": the
+old ticket-lines-only rendering had nothing to show once the ticket closed. Because the
+source is session state, not ticket state, the lines correctly reappear after a page
+reload/session reopen (`refreshBtSession()`), after Next Bar/Play (`btAdvance()`), and
+after a rewind (`btRewind()`) with no special-case code for any of the three — all three
+now also carry `pending_orders`/`closed_trades` alongside `open_positions`, which they
+didn't fully before this release (see Fix D below).
+
+**On close:** lines are removed automatically (the position/order no longer appears in
+session state). A faint, permanent marker is left instead
+(`btDrawClosedTradeMarkers()`, reading a new `btSession.closed_trades` field, server-side
+`BacktestController::getRecentClosedTrades()`, capped at 50 most recent, excluding
+rewound rows): a small triangle at the entry bar, another at the exit bar, and a pill —
+`+3.00R TP` / `−1.00R SL` / `{R} Manual`. A toast fires on the same event:
+`Trade closed: {+/−$} ({R})` (`btAdvance()`'s own `stop_loss`/`take_profit` event
+branch, using `net_pnl`/`r_multiple` `settleTrade()` itself just computed — not a
+client-side re-derivation). This marker rendering is **only as correct as its
+`time_out`**, which is exactly what Fix E below repairs.
+
+**Header strip** (`.tv-chart-wrap`'s own controls bar, always visible on the replay
+screen, not just the sidebar's Challenge panel): `Equity $x` / `Target {progress}% /
+{target}%` / `Loss {max_dd_used}% / {max_drawdown_pct}%`, all three straight off
+`sessionSummary()`'s own fields (`renderBtHeaderStrip()`) — never a second computation.
+
+**Rewind:** no special-case code needed — `open_positions`/`pending_orders`/
+`closed_trades` are recomputed fresh from the trades table on every `getSession()`/
+`advance()`/`rewind()` call, the same "derive, don't store" rule this whole controller
+already lives by, so a rewound session's response is automatically correct and the
+running trade display just reflects whatever comes back.
+
+#### Fix A — panel text colour
+
+Every text node in the Open Positions and Pending Orders rows now has an explicit
+dark-theme colour (`#d1d4dc` primary, `#8b93a7` muted) instead of relying on inherited
+colour from a parent class/style. The live report: the Pending Orders row showed only
+its "Cancel" button, because its own `<span>` had no colour at all and fell through to
+this (light-themed, by default) app's own body text colour against the dark sidebar
+panel.
+
+#### Fix D (re-opened) — the real story, found in two layers
+
+The briefing asked to investigate first and wait for live data before fixing. The
+trader's own paste (session 6, trades 132/134, pending order #4) confirmed the hypothesis
+exactly: `−$6.83 = −(3.4137 + 3.4149)`, the two positions' entry fees with nothing else —
+proof `computeSessionState()` was marking each open position to its OWN entry price
+(zero gross P&L) instead of the current bar's close. Root cause:
+
+1. **`getSession()` never passed a `$markBar`** to `computeSessionState()`, so every
+   open position priced itself at entry (`$mark = $markBar ? ... : $t['entry_price']`)
+   — fixed by passing `$this->currentBar($session)`.
+2. **`currentBar()` hardcoded `timeframe='15m'`** for the fill/mark/close price,
+   regardless of what resolution the cursor had actually last moved at
+   (`cursor_step_tf`) — this is *also* why the live fill price (7140) matched neither
+   the ticket's displayed entry (7166, the last 1H close) nor anything the trader
+   actually saw: the market order filled against the exact-cursor **15-minute**
+   sub-candle's close, not the 1-hour bar the chart/ticket were both showing. Fixed by
+   querying `cursor_step_tf` instead of a hardcoded finer resolution — now the fill
+   price and the ticket's own "entry = current close" preview can never disagree, so no
+   "Fills at next bar open (est. X)" label was needed; the mismatch is gone at the root,
+   not just relabelled.
+3. **`advance()`'s own "no more bars to replay" branch omitted `open_positions`/
+   `pending_orders` from its response entirely.** `renderBtOpenPositions(res.open_positions
+   || [])` on the client treats a missing key exactly like an empty list — once replay
+   reached the end of available history (every subsequent Next Bar/Play tick after that
+   hits this branch), the Open Positions panel was silently wiped even though the
+   session's own two open longs were still open. This is the live report's literal
+   symptom reproduced exactly: equity's own floating figure stayed correct (computed
+   inside the `session` object this same branch DID return), while the separate
+   `open_positions` key the panel reads from was simply absent.
+4. **A fourth, previously-unknown layer, found only by the browser harness itself, not
+   by inspection:** `js/calculator.js` *also* declares a global function named
+   `renderOpenPositions(positions)` — the Auto Risk Calculator's own open-margin-
+   positions list (v3.17.1 §3), writing into a completely different element
+   (`#calc-open-positions`). Both files load as plain global `<script>` tags in the same
+   scope, and `calculator.js` loads *after* `js/backtest.js` in `index.php`'s own module
+   list — a later plain `function` declaration of the same name in the same global scope
+   silently **replaces** an earlier one, no error, no warning. Every call to
+   `renderOpenPositions()` anywhere in the app — including all three of this file's own
+   call sites — was actually running `calculator.js`'s version the entire time, which
+   never touched `#bt-open-positions` at all. That left the panel's own static "None"
+   markup (`pages/backtest.php`) on screen *regardless of what the server returned*,
+   compounding (and quite possibly dominating) issues #1–3 above. Fixed by renaming this
+   file's own function to `renderBtOpenPositions()` — every other render function in
+   this file already carried a `renderBt*` prefix; this one, alone, didn't, which is
+   exactly how it collided. `calculator.js` is untouched — it has every right to its own
+   name for its own unrelated feature.
+
+With all four fixed, `open_positions` and `floating_pnl` were *already* guaranteed to
+agree (both built in one pass over the same `$openRows` query in
+`computeSessionState()` — there was never a second, divergent row set, only a wrong mark
+price and, separately, a client-side rendering collision that had nothing to do with
+which rows were included).
+
+#### Fix B — price rounding
+
+Every user-entered price is now rounded to a believable number of decimals (`>=100` →
+2dp, `>=1` → 4dp, else 6dp — the exact bucketing `fmtPrice5()` already used for display
+text, now also applied as a real number via a new `btRoundPrice()`/`backtestRoundPrice()`
+pair) before it's shown in a ticket input, used in a pill, or submitted — not a per-
+symbol tick size (this app tracks none), same "don't invent precision this app can't
+back up" reasoning already applied to `fee_rate_pct`/liquidation elsewhere in this file.
+Applied server-side too (`placeOrder()`), defensively, so an older/unpatched client (or
+any other caller) can't store a raw 15-decimal price regardless of what the UI sends.
+`btTicket.stopLoss`/`.takeProfit`/`.entry` themselves are never rounded — only a
+rendered input's `value` and the final submitted payload are, so RR/sizing math upstream
+still runs against full precision.
+
+#### Fix C — trade cap shown up front
+
+The sidebar's **New Trade** button is fully disabled at the cap, its own label replaced
+with `Daily cap reached (2/2): advance to the next day.` The toolbar's **Place trade**
+stays clickable — "the ticket can still open from a position tool for planning" is an
+explicit carve-out in the briefing — getting only a tooltip explaining why submission
+will still be blocked. The ticket itself shows the cap reason as its own banner at the
+**top** of the ticket body (not mixed in with every other blocking reason at the
+bottom), and the cap check now runs *first* in `btComputeTicket()`'s own blockReason
+chain — a trader already at the cap finds out before building anything, not after.
+
+#### Fix F — double submit
+
+Two identical market orders went in on the same bar because nothing on screen confirmed
+the first one had already gone through. **Place Trade is now disabled for the whole
+round trip** (re-enabled only on an error — success closes the ticket outright). On
+success: `Long 0.87 BTC filled @ 7140` / `Limit order placed @ x`
+(`fillPosition()`/`evaluateBar()` now return/carry `lot_size` specifically for this).
+**Server-side**, the actual enforcement: a second order with identical direction,
+stop-loss, take-profit, and session, placed within 5 wall-clock seconds
+(`created_at`), is rejected outright with "Duplicate order ignored." — the client-side
+disable is only the first line of defence, same standing practice this controller
+already applies to margin/liquidation.
+
+#### Fix E (critical) — wall-clock `time_out`
+
+`settleTrade()` wrote `gmdate('Y-m-d H:i:s')` — literally "now," 2026-09-30, for *every*
+backtest trade ever closed — instead of the replay bar that actually closed it (2020-
+era, for this account's own sessions). Consequence: `rewind()` reopens trades `WHERE
+time_in <= cursor AND time_out > cursor` — with every closed trade's `time_out` stuck in
+2026, **any rewind reopened the trader's entire closed-trade history** opened before the
+new cursor, not just the ones actually closed after it. Fixed two ways:
+
+1. `settleTrade()` now takes the exit bar's own time as an explicit parameter (and
+   returns `[net_pnl, r_multiple]`, used by Fix F's toast and Part C's marker) — the
+   touching bar for an SL/TP fill (`evaluateBar()`), the current cursor's bar for a
+   manual close (`closePosition()`), the failing bar for a forced close
+   (`failSession()`). All three call sites updated.
+2. **Data-repair migration** (`2026_10_01_0001`) for existing rows (`source='backtest'
+   AND time_out > NOW() - INTERVAL 1 YEAR`): sets `time_out` to the earliest candle, at
+   the trade's own session's `replay_timeframe`, on/after `time_in` whose `[low,high]`
+   range actually contains the recorded `exit_price` — the same touch condition
+   `backtestCheckSlTp()` uses live, run backward against history instead of forward
+   during replay. Falls back to `time_in` itself when no such candle is found. Logged to
+   a new permanent `backtest_exit_time_repairs_log` table (trade id, old/new `time_out`,
+   timestamp) — not a `TEMPORARY` one, since the whole point is a durable record of
+   exactly what changed, same "never silently discard a fact" reasoning behind
+   `backtest_rewound` existing as a flag instead of a `DELETE` in the first place.
+
+#### `tools/ui-harness/` — extended, not rebuilt
+
+**Now stateful** for three new session ids (20/21/22 — session 6 and v3.22.2's own
+`drive.mjs` are completely untouched, still running against the original inert mock):
+`backtest_advance`/`backtest_rewind`/`backtest_place_order`/`backtest_cancel_order`/
+`backtest_close_position` all read and mutate a small JSON state file written inside the
+harness's own temp copy of `app/` (fresh every run). Candle generation switched, for
+these sessions only, from the legacy mock's per-request random walk (which reseeded on
+every single call and could describe the same bar differently depending on what window
+asked for it — fine when nothing needed two requests to agree, not fine once `advance()`
+and `get_backtest_candles()` both have to describe the identical bar) to a smooth,
+deterministic, O(1) sine composite (`mockPriceAtIndex()`) — any bar's price is a pure
+function of its own absolute index, inspectable via `php stubs/api.php <from> <to>` to
+hand-pick SL/TP values a specific future bar is guaranteed to touch, rather than guessed.
+A real history floor was added (`-500` bars) so `js/chart.js::loadOlderCandles()` can
+actually exhaust and stop paging — the legacy mock's infinite-both-directions candle
+supply, combined with this release's own "load more, schedule a redraw" pattern, was
+enough to keep a `.bt-pending-cancel-btn` click target perpetually rebuilding under
+Playwright for 30 seconds before this fix.
+
+New driver `drive-v3223.mjs` (21 assertions, all passing): the acceptance criterion
+exactly (open a pre-seeded session, two open longs + one pending order show their lines
+immediately, no action needed); Fix A's panel colours; Fix B's rounded ticket input;
+Fix C's cap banner/button states, both sidebar and ticket; and the full Verify 1–4 flow
+end to end against the real client code — place a Limit order, see its lines, cancel it
+via the real "✕" button; place a Market order, see Entry/SL/TP lines + box + a live
+Open P&L pill that updates across Next Bar; advance until the pre-computed TP bar hits,
+see the lines clear and a `+0.47R TP` marker plus a `Trade closed: $36.71 (+0.47R)`
+toast; rewind past the close and see the position come back. `php -l`, `node --check`,
+and `backtest_engine.php`'s self-test (48 assertions, 4 new for `backtestRoundPrice()`)
+all clean.
+
+#### Pre-release audit: a duplicate-name scan across all of `app/js/`
+
+Before releasing, asked explicitly: list every function/global variable declared at the
+top level in more than one `app/js/*.js` file, the same bug shape as Fix D's own
+`renderOpenPositions()` collision — every one of these 18 files is a plain, non-module
+`<script>` tag sharing ONE global scope on every page (`index.php`'s own module list
+loads all of them unconditionally; this is a single-page app, not per-page bundles), so
+two same-named top-level declarations is never two independent things that happen to
+share a name — it's the LAST `<script>` tag's version silently replacing the first, no
+error, no warning.
+
+New `tools/ui-harness/scan-duplicate-names.mjs`: parses every file with a real AST
+(`acorn`, not a regex guess) and walks only each `Program`'s top-level body — a name
+declared inside a function/block/IIFE never touches the shared scope and isn't flagged.
+Found exactly one more: **`escapeHtml(s)`**, independently declared in both
+`js/backtest.js` (a DOM `textContent`→`innerHTML` trick, which doesn't reliably escape
+quotes) and `js/report-card.js` (an explicit `&<>"'` regex replace — the more complete of
+the two). `report-card.js` loads after `backtest.js`, so its version was the only one
+ever actually running for *either* file's own call sites — `backtest.js`'s own
+implementation had never executed in this app's history. Fixed the same way as
+`renderOpenPositions()`/`renderBtOpenPositions()`, just "merge to one copy" instead of
+"rename," since this really is the same utility twice, not two different things that
+happened to collide: moved the more complete implementation to `js/app.js` (this file's
+existing home for shared helpers — `fmt()`, `toast()`, `pnlCls()`), removed from both old
+homes. The scan now runs as the **first** assertion in both harness drivers
+(`drive.mjs`, `drive-v3223.mjs`) — a future collision anywhere in `app/js/` fails loudly
+before the browser even launches, not by accident during an unrelated test months later.
+
+**A second real bug found while re-verifying after the `escapeHtml` fix, not by
+inspection:** `js/app.js::toast()` never cancelled its own previous hide timer —
+`tools/ui-harness/drive-v3223.mjs`'s own Verify 3 (toast after a TP close) started
+failing intermittently, roughly one run in three. Root cause: two toasts shown within
+2.8 seconds of each other (e.g. an order-placed toast quickly followed by a trade-closed
+toast across a couple of Next Bar clicks) raced their own `setTimeout`s — the first
+toast's hide timer was never cleared, so it could fire *after* a second toast had already
+reset `className` to `show`, hiding the second toast's message early at an unpredictable
+point in its own lifetime instead of after it. This is a real bug on live too, not just
+in the harness — any two real toasts fired close together have always been able to clip
+each other this way. Fixed with one `let toastTimer` + a `clearTimeout()` before arming a
+new one, so only the most recent toast's own hide is ever pending.
+
+**Known boundary, stated plainly:** the harness's `mockRewind()` is a deliberately
+simplified one-step undo (sufficient to verify the *client* renders a rewind correctly,
+which is this harness's actual job) — it does not re-implement
+`BacktestController::rewind()`'s own multi-step, multi-case undo logic, and the "rewind
+to after its exit, it stays closed" half of Fix E's own acceptance criterion is verified
+by code review of the real `rewind()`/`settleTrade()` fix, not by this harness (same "no
+DB in this environment" limitation that applies throughout this project's history).
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -5204,7 +5489,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.2
+Current Version: v3.22.3
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

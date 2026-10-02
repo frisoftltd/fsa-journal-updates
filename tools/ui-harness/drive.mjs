@@ -11,6 +11,7 @@
  */
 import { chromium } from 'playwright';
 import { setupHarness } from './setup.js';
+import { scan as scanDuplicateNames } from './scan-duplicate-names.mjs';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -48,6 +49,24 @@ async function dragPositionTool(page, tool, dy) {
 }
 
 async function main() {
+    // v3.22.3 — added after js/calculator.js was found to silently shadow js/backtest.js's
+    // own renderOpenPositions() (same global scope, later <script> tag wins, no error).
+    // Runs here too (not just drive-v3223.mjs) so either driver alone still catches a
+    // future collision. See scan-duplicate-names.mjs's own docblock for why this matters
+    // for every file in app/js/, not just this release's own files.
+    console.log('[Static] duplicate-name scan across app/js/');
+    const { duplicates, parseErrors } = scanDuplicateNames();
+    for (const e of parseErrors) { console.log(`  FAIL: ${e.file} failed to parse: ${e.error}`); failures.push(`duplicate-name scan: ${e.file} failed to parse`); }
+    if (duplicates.length === 0) {
+        console.log('  PASS: no cross-file top-level name duplicates in app/js/');
+    } else {
+        for (const { name, occurrences } of duplicates) {
+            const where = occurrences.map(o => `${o.file}:${o.line}`).join(', ');
+            console.log(`  FAIL: "${name}" declared at top level in more than one file (${where})`);
+            failures.push(`duplicate-name scan: "${name}" declared in ${occurrences.length} files (${where})`);
+        }
+    }
+
     const harness = await setupHarness({ port: 8765 });
     console.log(`Harness up at ${harness.baseUrl} (temp copy: ${harness.tmpDir})`);
 
@@ -204,7 +223,10 @@ async function main() {
         await page.evaluate(() => {
             window.__origBtApi = btApi;
             btApi = async (action, method, data) => {
-                if (action === 'backtest_place_order') return { filled: true, entry_price: btComputeTicket().entry };
+                // v3.22.3 Fix F enriched the success response (lot_size/direction/
+                // trade_id, for the "Long 0.87 BTC filled @ x" toast) -- matched here so
+                // this monkey-patch still looks like a real server response.
+                if (action === 'backtest_place_order') return { filled: true, entry_price: btComputeTicket().entry, lot_size: btComputeTicket().lotSize, direction: btTicket.direction, trade_id: 999 };
                 return window.__origBtApi(action, method, data);
             };
         });

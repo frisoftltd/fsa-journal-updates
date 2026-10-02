@@ -34,6 +34,20 @@ function backtestFee(float $lotSize, float $price, float $feeRatePct): float {
     return $lotSize * $price * $feeRatePct / 100;
 }
 
+/** v3.22.3 Fix B — rounds a price to a believable number of decimals before it's stored
+ *  or shown, same bucketed rule js/backtest.js::fmtPrice5() already uses for DISPLAY
+ *  text (>=100 -> 2dp, >=1 -> 4dp, else 6dp) -- not a real per-symbol tick size (this app
+ *  tracks none), same "don't invent precision this app can't back up" reasoning already
+ *  applied to fee_rate_pct/liquidation elsewhere in this file. Applied to every
+ *  user-entered price before it's written to backtest_pending_orders/trades (stop_loss,
+ *  take_profit, limit_price) -- never to a market fill's entry_price, which already comes
+ *  straight off a real candle's own close and needs no rounding of its own. */
+function backtestRoundPrice(float $price): float {
+    $abs = abs($price);
+    $decimals = $abs >= 100 ? 2 : ($abs >= 1 ? 4 : 6);
+    return round($price, $decimals);
+}
+
 /** v3.22.1 — margin required for a position: notional ÷ leverage. Returns the full
  *  notional (leverage has no effect) when leverage is 0 or less, a defensive floor —
  *  callers already validate leverage against a fixed allowed-values list before this is
@@ -245,6 +259,13 @@ function backtest_engine_self_test(): void {
     $check('aggregate: volume = sum across all bars', $agg['volume'], 45.0);
     $oneBar = backtestAggregateCandles([['open_time' => 5000, 'open' => 50, 'high' => 55, 'low' => 48, 'close' => 52, 'volume' => 5]]);
     $check('aggregate: a single bar aggregates to itself', $oneBar, ['open_time' => 5000, 'open' => 50.0, 'high' => 55.0, 'low' => 48.0, 'close' => 52.0, 'volume' => 5.0]);
+
+    // v3.22.3 Fix B — same bucketed rounding js/backtest.js::fmtPrice5()/btRoundPrice()
+    // use: >=100 -> 2dp, >=1 -> 4dp, else 6dp. The exact live report's own raw values.
+    $check('round price: >=100 -> 2dp (live report\'s own raw SL)', backtestRoundPrice(7418.579327320573), 7418.58);
+    $check('round price: >=1 -> 4dp', backtestRoundPrice(6.283185307), 6.2832);
+    $check('round price: <1 -> 6dp', backtestRoundPrice(0.0044123456), 0.004412);
+    $check('round price: exactly 100 uses the >=100 bucket (2dp)', backtestRoundPrice(100.456), 100.46);
 
     fwrite(STDOUT, "backtest_engine.php self-test: $pass passed, $fail failed\n");
     if ($fail > 0) exit(1);

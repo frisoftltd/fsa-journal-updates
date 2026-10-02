@@ -111,6 +111,89 @@ function backtestCheckSlTp(string $direction, float $barHigh, float $barLow, flo
 }
 
 /**
+ * v3.22.4 — a resting limit order can become MARKETABLE before it ever fills: it was
+ * below the market (Long) when placed, which BacktestController::placeOrder() already
+ * rejects if it isn't, but price can still gap straight through it before the next bar
+ * even opens. The old behaviour ("touched = low <= limit, then fill at limit_price
+ * verbatim") filled at whatever the limit SAID, confirmed on live: a Long limit at
+ * 6902.39 touched by a bar that only ever traded 6591.5-6666 filled at 6902.39 -- the
+ * trader paid (simulated) far more than the market ever actually was. A real exchange
+ * fills a marketable order at the best available price, not the stale limit: for a Long,
+ * that's whichever is LOWER (better) of the limit itself or the bar's own open (the
+ * first price the market actually offered this bar); for a Short, whichever is HIGHER.
+ * When the order was genuinely only touched by an intrabar dip/spike (not marketable at
+ * the open), $barOpen sits on the correct side of $limitPrice and this returns
+ * $limitPrice unchanged -- a real limit fills at its own price when the market comes to
+ * it normally, this function only overrides the fill when the open itself already beat
+ * the limit.
+ */
+function backtestLimitFillPrice(string $direction, float $limitPrice, float $barOpen): float {
+    return $direction === 'Long' ? min($limitPrice, $barOpen) : max($limitPrice, $barOpen);
+}
+
+/**
+ * v3.22.4 — "fill and stop on the same bar": a pending order that fills mid-bar (via
+ * backtestLimitFillPrice() above, or a gap-driven market fill) opens a position AT SOME
+ * POINT during that bar, not for its entire duration — backtestCheckSlTp()'s own
+ * full-bar-range check implicitly assumes the position was already open when the bar
+ * started, which is false for a same-bar fill and can close a trade against a level it
+ * was never actually exposed to.
+ *
+ * Chosen rule (documented here, not just in code, per the instruction to state it
+ * explicitly): a level (stop or target) is only eligible to be "also hit this bar" when
+ * it sits BEYOND the fill price in its own direction -- adverse (further from entry)
+ * for the stop, favourable (further from entry) for the target. This matters because
+ * backtestLimitFillPrice() can legitimately fill WORSE than the limit that was placed
+ * (a gap through the limit fills at the bar's open instead), which can push the fill
+ * price past a stop that was only ever calibrated against the ORIGINAL limit -- e.g. a
+ * stop placed as "100 points below my 6902 limit" (6802) is no longer below a fill that
+ * actually happened at 6650 (the gapped-through open): 6802 > 6650 is not "beyond" a
+ * Long's fill price at all, it's on the wrong side of it entirely.
+ *
+ * v3.22.4 (revised before release) — a WRONG-SIDE stop is not left open for later
+ * evaluation. The first version of this function did exactly that (skip the check,
+ * defer to next bar), and it was wrong: left alone, the stale stop price is still
+ * sitting there waiting to be "touched" by some LATER bar via the normal, unrestricted
+ * backtestCheckSlTp() path, which has no idea the stop is nonsensical relative to this
+ * trade's actual entry — it just sees a price level and a bar range. Concretely (the
+ * case that was caught before release): Long limit 100, stop 95, gap open 90 -> fills at
+ * 90 (backtestLimitFillPrice()), stop 95 is ABOVE that fill, not beyond it. Left open,
+ * the very next bar's low reaching 95 "hits the stop" at 95 -- a +5 GAIN recorded with
+ * exit_reason='Stop Loss', because nothing ever re-examined whether 95 still meant
+ * anything once the trade actually opened at 90. A stop that ends up on the wrong side
+ * of the fill price isn't "not yet reached," it's **already breached the instant the
+ * position opened** -- the position is immediately closed, on the fill bar, AT THE FILL
+ * PRICE itself (not the stale stop price, which has no directional meaning to exit at):
+ * exit_reason='Stop Loss', R approximately 0 before fees. A level that IS correctly
+ * beyond the fill price is checked exactly like backtestCheckSlTp() would: stop wins if
+ * both the stop and target are reachable and touched in the same bar, same conservative
+ * "assume the worse outcome" reasoning that function already documents. A target on the
+ * wrong side of the fill is NOT force-closed the same way -- an unreachable take-profit
+ * just means the trade continues normally (there is no "already breached" fact for a
+ * target the way there is for a stop; missing out on a profit level isn't a loss event
+ * to force), so that half of the original rule is unchanged.
+ *
+ * @return array{0:string,1:float}|null [exitReason, exitPrice], or null if nothing hit.
+ */
+function backtestCheckSameBarFillTouch(string $direction, float $barHigh, float $barLow, float $fillPrice, float $stopLoss, ?float $takeProfit): ?array {
+    $long = $direction === 'Long';
+    $stopBeyondFill = $long ? ($stopLoss < $fillPrice) : ($stopLoss > $fillPrice);
+    if (!$stopBeyondFill) {
+        return ['stop_loss', $fillPrice];
+    }
+    $slHit = $long ? $barLow <= $stopLoss : $barHigh >= $stopLoss;
+    if ($slHit) return ['stop_loss', $stopLoss];
+    if ($takeProfit !== null) {
+        $tpBeyondFill = $long ? ($takeProfit > $fillPrice) : ($takeProfit < $fillPrice);
+        if ($tpBeyondFill) {
+            $tpHit = $long ? $barHigh >= $takeProfit : $barLow <= $takeProfit;
+            if ($tpHit) return ['take_profit', $takeProfit];
+        }
+    }
+    return null;
+}
+
+/**
  * Distance currently used against the max-drawdown allowance — 'static' measures from
  * starting_balance (matches how most real prop firms, and this codebase's own
  * staticDrawdownPct(), judge a Maximum Loss rule); 'trailing' measures from the
@@ -236,6 +319,38 @@ function backtest_engine_self_test(): void {
     $check('Short: SL only (high pierces stop)', backtestCheckSlTp('Short', 106, 99, 105, 90), 'stop_loss');
     $check('Short: TP only (low pierces target)', backtestCheckSlTp('Short', 101, 89, 105, 90), 'take_profit');
     $check('Short: BOTH touched in one bar -> stop-loss wins', backtestCheckSlTp('Short', 106, 89, 105, 90), 'stop_loss');
+
+    // v3.22.4 — marketable-limit fill price: fills at the BETTER of limit/bar-open, never
+    // the stale limit a gap has already blown through. The live report's own numbers:
+    // Long limit 6902.39, bar opened well below it -> fills at the open, not 6902.39.
+    $check('fill price: Long limit marketable (gap below) -> fills at the open, not the limit', backtestLimitFillPrice('Long', 6902.39, 6650.0), 6650.0);
+    $check('fill price: Long limit NOT marketable (open above limit) -> fills at the limit, unchanged', backtestLimitFillPrice('Long', 95.0, 100.0), 95.0);
+    $check('fill price: Short limit marketable (gap above) -> fills at the open, not the limit', backtestLimitFillPrice('Short', 100.0, 108.0), 108.0);
+    $check('fill price: Short limit NOT marketable (open below limit) -> fills at the limit, unchanged', backtestLimitFillPrice('Short', 100.0, 95.0), 100.0);
+
+    // v3.22.4 — fill-and-stop-same-bar: a level only counts as "also hit this bar" when
+    // it's beyond the ACTUAL fill price in its own direction, not just anywhere in the
+    // bar's full range (backtestCheckSlTp()'s own assumption, valid for a position
+    // already open before the bar started, not one that just filled mid-bar).
+    $check('same-bar: Long fills at 100, stop 95 (beyond fill) touched by low 90 -> [stop_loss, 95]', backtestCheckSameBarFillTouch('Long', 105, 90, 100.0, 95.0, 110.0), ['stop_loss', 95.0]);
+    $check('same-bar: Long fills at 100, target 110 (beyond fill) touched by high 112 -> [take_profit, 110]', backtestCheckSameBarFillTouch('Long', 112, 98, 100.0, 95.0, 110.0), ['take_profit', 110.0]);
+    $check('same-bar: Long fills at 100, neither level reached -> null', backtestCheckSameBarFillTouch('Long', 105, 98, 100.0, 95.0, 110.0), null);
+    // v3.22.4 (revised before release) — the exact case caught before release: a
+    // gap-driven fill (backtestLimitFillPrice()) landed WORSE than the stop that was
+    // calibrated against the original limit (Long limit 100, stop 95, gap open 90 ->
+    // fills at 90) -- stop 95 is no longer below the actual fill (90) at all, it's on
+    // the WRONG SIDE. The first version of this function left that open for next bar,
+    // which actually turned a stop-loss into a recorded +5 GAIN once some later bar's
+    // low reached the now-meaningless 95 level. Correct behaviour: close immediately, on
+    // THIS bar, at the fill price itself (90) -- R approximately 0 before fees, never a
+    // profit from a trade that opened already past its own stop.
+    $check('same-bar: stop on the WRONG SIDE of the fill -> immediate stop_loss AT THE FILL PRICE, not the stale stop', backtestCheckSameBarFillTouch('Long', 92.0, 88.0, 90.0, 95.0, 110.0), ['stop_loss', 90.0]);
+    $check('same-bar: Short fills at 100, stop 105 (beyond fill) touched by high 108 -> [stop_loss, 105]', backtestCheckSameBarFillTouch('Short', 108, 95, 100.0, 105.0, 90.0), ['stop_loss', 105.0]);
+    $check('same-bar: Short target NOT beyond fill (gap put it on the wrong side), stop beyond but not touched -> not hit', backtestCheckSameBarFillTouch('Short', 108, 95, 100.0, 110.0, 101.0), null);
+    $check('same-bar: both stop and target beyond fill and both touched -> stop_loss wins (conservative)', backtestCheckSameBarFillTouch('Long', 112, 90, 100.0, 95.0, 110.0), ['stop_loss', 95.0]);
+    // Mirror of the wrong-side case for a Short: stop ends up BELOW the fill (should be
+    // above) -- same immediate close at the fill price.
+    $check('same-bar: Short stop on the WRONG SIDE of the fill -> immediate stop_loss AT THE FILL PRICE', backtestCheckSameBarFillTouch('Short', 112.0, 108.0, 110.0, 105.0, 90.0), ['stop_loss', 110.0]);
 
     // Drawdown distance — static vs trailing.
     $check('static distance: starting 10000, equity 9500 -> 500 used', backtestDrawdownDistance('static', 10000, 10800, 9500), 500.0);

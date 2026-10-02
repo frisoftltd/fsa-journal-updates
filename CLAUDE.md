@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.22.3 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.4 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -4300,13 +4300,45 @@ new cursor, not just the ones actually closed after it. Fixed two ways:
 2. **Data-repair migration** (`2026_10_01_0001`) for existing rows (`source='backtest'
    AND time_out > NOW() - INTERVAL 1 YEAR`): sets `time_out` to the earliest candle, at
    the trade's own session's `replay_timeframe`, on/after `time_in` whose `[low,high]`
-   range actually contains the recorded `exit_price` — the same touch condition
-   `backtestCheckSlTp()` uses live, run backward against history instead of forward
-   during replay. Falls back to `time_in` itself when no such candle is found. Logged to
-   a new permanent `backtest_exit_time_repairs_log` table (trade id, old/new `time_out`,
-   timestamp) — not a `TEMPORARY` one, since the whole point is a durable record of
-   exactly what changed, same "never silently discard a fact" reasoning behind
-   `backtest_rewound` existing as a flag instead of a `DELETE` in the first place.
+   range actually contains the recorded `exit_price`. Falls back to `time_in` itself when
+   no such candle is found. Logged to a new permanent `backtest_exit_time_repairs_log`
+   table (trade id, old/new `time_out`, timestamp) — not a `TEMPORARY` one, since the
+   whole point is a durable record of exactly what changed, same "never silently discard
+   a fact" reasoning behind `backtest_rewound` existing as a flag instead of a `DELETE`
+   in the first place.
+
+   **Repair-logic correction (found on live, v3.22.4):** this migration's own match
+   condition (`c.low <= exit_price AND c.high >= exit_price` — a plain RANGE check, "is
+   exit_price anywhere between this candle's low and high") is **not** the same rule
+   `backtestCheckSlTp()` actually uses live, despite this section originally claiming
+   so. The real engine triggers **directionally**: a Long's stop-loss is hit by
+   `low <= stop` (only the low matters), its take-profit by `high >= target` (only the
+   high matters) — mirrored for a Short (`high >= stop`, `low <= target`). A plain range
+   check is a strictly WEAKER condition that a candle can satisfy without ever actually
+   triggering either exit in the direction that matters — e.g. a candle whose low sits
+   below a Long's stop-loss price purely by coincidence, with the close back above it and
+   nothing about this candle being the real touch, still passes `low <= exit <= high` and
+   gets selected as "the" repair candle. **Trade #126 was repaired to the wrong candle by
+   this migration and was corrected by hand on live** (to 2020-03-27 17:00) after the
+   discrepancy was found. Because migration files are checksum-locked once applied
+   (§3A), `2026_10_01_0001` itself is not edited — this note exists so it's never copied
+   as a working example. **Any future repair of this shape must match directionally**,
+   not by range: for a trade whose `exit_reason` is known, test only the side that
+   reason implies (`'Stop Loss'` → the stop's own low/high rule above; `'Take Profit'` →
+   the target's own rule); for a manual close, fall back to the plain range check only
+   as a last resort, since a manual close has no "which side touched" fact to test
+   directionally at all.
+
+   **Audited on live, 2026-10-02 (v3.22.4):** every row `2026_10_01_0001` actually
+   touched was re-checked against the directional rule above. Only three rows matched
+   the migration's own scope at all — **#126, #130, #131**. #130 and #131 give the
+   *same* repaired `time_out` under the directional rule as the original range-based
+   one, because price moved continuously through the exit level on the candle the range
+   check happened to pick — there was no ambiguous/coincidental low-or-high in either
+   case for the range check to have gotten wrong. **#126 is the only one that actually
+   differed**, already corrected by hand (above) before this audit confirmed it was the
+   only one. Nothing else is outstanding — `backtest_exit_time_repairs_log` is trusted
+   as-is for this account; no follow-up repair migration is needed.
 
 #### `tools/ui-harness/` — extended, not rebuilt
 
@@ -4388,6 +4420,74 @@ which is this harness's actual job) — it does not re-implement
 to after its exit, it stays closed" half of Fix E's own acceptance criterion is verified
 by code review of the real `rewind()`/`settleTrade()` fix, not by this harness (same "no
 DB in this environment" limitation that applies throughout this project's history).
+
+### v3.22.4: Marketable-Limit Fill Bug (Found on Live)
+
+**Renumbering:** the risk-ladder engine, previously slated as v3.22.4, is now
+**v3.22.5**. No schema change this release — `db_migrations` empty, deploy is Update Now
++ a hard refresh, nothing else.
+
+Confirmed on live: a resting limit order that becomes **marketable** (price moves
+through it before it's ever touched normally) filled at its own stale limit price
+instead of at the market. Trade #126 / order #1, session 6, BTCUSDT 1H: a Long limit at
+6902.39 sat pending while the market was well below it; the 2020-03-27 16:00–17:00 bar
+traded 6591.5–6666 — `evaluateBar()`'s own touch check (`low <= limit_price`) is `true`
+the instant price rises through the limit from below, regardless of how far below the
+limit the bar's own range actually was, and `fillPosition()` filled at the limit
+verbatim (6902.39) rather than anywhere near where the market actually traded.
+
+**Fix 1 — rejected at placement.** `placeOrder()`: a Long limit at or above the current
+close, or a Short at or below it, is rejected outright — `"A Long limit above the market
+fills immediately. Use Market."` (mirrored for Short). Mirrored exactly in
+`btComputeTicket()`'s own blockReason chain, so the ticket shows the same reason and
+disables Place Trade before the trader ever submits. Wiring this client-side mirror
+surfaced a real UX regression before release: switching the ticket's own Market→Limit
+toggle left `entry` sitting exactly at the current close (wherever it already was while
+Market) — which is *always* "marketable" by the new `>=`/`<=` rule, meaning the
+rejection would have shown on every single Market→Limit switch, not just when the
+trader actually dragged the limit through the market. Fixed at the root: the toggle now
+offsets the limit a small distance to the correct side of the market when switching to
+Limit (same 0.05% threshold `btOpenTicket()`'s own Market/Limit auto-detect already
+uses for "near the market"), rather than loosening the new validation.
+
+**Fix 2 — engine safety net, `backtestLimitFillPrice()`.** This placement-time check
+can't catch every case: an order that was genuinely below the market when placed can
+still have the market gap straight through it (and the limit) before the next bar even
+opens. For that case, the fill price is now whichever is BETTER for the trader of the
+limit or the bar's own open — `min(limit, open)` for a Long, `max(limit, open)` for a
+Short — matching how a real exchange fills a marketable order at the best available
+price, not a stale number. 4 new self-test cases (marketable and not, both directions).
+
+**Fix 3 — fill-and-stop on the same bar, `backtestCheckSameBarFillTouch()`.** A position
+that fills mid-bar (via the safety net above) didn't exist for that bar's entire
+duration, so naively reusing `backtestCheckSlTp()`'s full-bar-range check against it can
+close a trade against a level it was never actually exposed to before it opened.
+**Revised once before release** after a self-review caught a serious flaw in the first
+version: a stop that ends up on the WRONG SIDE of a gap-driven fill (stop no longer
+below entry for a Long — e.g. limit 100 / stop 95, fills at 90 after a gap) was simply
+left unchecked for that bar, deferred to normal evaluation later. That's wrong, not
+just incomplete: left alone, the next bar's low reaching the now-meaningless 95 "hits
+the stop" there, recording a **+5 gain** with `exit_reason='Stop Loss'` — turning a
+stop-loss into a profit purely because nothing ever re-examined whether the stored stop
+price still meant anything once the trade actually opened on the wrong side of it.
+**Corrected rule:** a wrong-side stop is not deferred — it triggers *immediately*, on
+the fill bar, **at the fill price itself** (not the stale stop price, which has no
+directional meaning to exit at): `exit_reason='Stop Loss'`, R approximately 0 before
+fees, never carried to a later bar. A target on the wrong side of a gap-driven fill is
+*not* force-closed the same way — there's no "already breached" fact for a target the
+way there is for a stop, so a trade just continues normally toward it. The function's
+own return shape changed from a plain reason string to `[reason, exitPrice]` specifically
+so the wrong-side-stop case can report an exit price that's neither the stored stop nor
+target. 8 self-test cases, including the exact caught-before-release scenario by its own
+numbers. **`backtest_engine.php`'s self-test: 60 assertions, all passing.**
+
+**Harness:** one new browser assertion (`drive-v3223.mjs`) — the ticket shows the exact
+marketable-limit rejection text and disables Place Trade, driven via
+`btTicketSetField('entry', ...)` directly (the ticket has no plain number input for a
+limit price; this exercises the same blockReason computation a real drag would). The
+engine-level fill-price and same-bar-touch rules are PHP self-test coverage, not browser
+coverage — there's no UI surface for "fill price computation" in isolation to drive
+through a page.
 
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
@@ -5489,7 +5589,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.3
+Current Version: v3.22.4
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

@@ -698,6 +698,28 @@ class BacktestController {
         } else {
             $limitPrice = backtestRoundPrice(num($d['limit_price'] ?? 0));
             if ($limitPrice <= 0) jsonError('Limit price is required for a limit order.');
+            // v3.22.4 — a marketable limit: a Long limit placed AT OR ABOVE the current
+            // close (or a Short at/below it) is already through the market the instant
+            // it's placed, and a real exchange fills it immediately at the market, not at
+            // the stated limit price. Confirmed on live (session 6, order #1/trade #126):
+            // a Long limit at 6902.39 placed against a bar that went on to trade
+            // 6591.5-6666 filled at 6902.39 once touched -- backtestCheckSlTp()'s own
+            // touched = low <= limit doesn't care WHY it was touched, so a limit sitting
+            // far above the whole bar's range still "touched" the moment price rose
+            // through it, and filled at the stale, far-too-high limit price instead of
+            // wherever the market actually was. Rejected here, at placement, rather than
+            // silently reinterpreted as a market order -- the trader typed a specific
+            // number expecting it to mean something; silently ignoring it would be its
+            // own surprise. backtestLimitFillPrice() below is the separate safety net for
+            // an order that was NOT marketable when placed but becomes so later (price
+            // gaps through it before the next bar touches it) -- this check can only ever
+            // catch the at-placement case.
+            if ($direction === 'Long' && $limitPrice >= $currentBar['close']) {
+                jsonError('A Long limit above the market fills immediately. Use Market.');
+            }
+            if ($direction === 'Short' && $limitPrice <= $currentBar['close']) {
+                jsonError('A Short limit below the market fills immediately. Use Market.');
+            }
             if ($direction === 'Long' && $stopLoss >= $limitPrice) jsonError('For a Long, stop loss must be below the limit price.');
             if ($direction === 'Short' && $stopLoss <= $limitPrice) jsonError('For a Short, stop loss must be above the limit price.');
             $this->checkMarginAndLiquidation($session, $direction, $limitPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
@@ -846,13 +868,26 @@ class BacktestController {
         $bar['close'] = (float) $bar['close'];
 
         $events = [];
+        // v3.22.4 — trade id -> fill price for every position that fills on THIS bar
+        // (below), so the open-positions loop further down can apply
+        // backtestCheckSameBarFillTouch()'s own "beyond the fill price" rule to exactly
+        // these trades instead of backtestCheckSlTp()'s full-bar-range assumption, which
+        // is only valid for a position that was already open before this bar started.
+        $filledThisBar = [];
 
         $pending = $this->getPendingOrders($session['id']);
         foreach ($pending as $order) {
-            $touched = $order['direction'] === 'Long'
-                ? $bar['low'] <= (float) $order['limit_price']
-                : $bar['high'] >= (float) $order['limit_price'];
+            $limitPrice = (float) $order['limit_price'];
+            $touched = $order['direction'] === 'Long' ? $bar['low'] <= $limitPrice : $bar['high'] >= $limitPrice;
             if (!$touched) continue;
+
+            // v3.22.4 — fills at the better of the limit or this bar's own open, not the
+            // limit verbatim: a limit that's become marketable (price gapped through it
+            // before this bar even opened) fills at the market, exactly like a real
+            // exchange -- see backtestLimitFillPrice()'s own docblock for the live bug
+            // this replaces (a Long limit filling at a stale price far above the bar's
+            // entire traded range).
+            $fillPrice = backtestLimitFillPrice($order['direction'], $limitPrice, $bar['open']);
 
             $state = $this->computeSessionState($session, $bar);
             // v3.22.1 — the ORDER's own risk_pct/leverage (whatever was chosen in the
@@ -860,31 +895,52 @@ class BacktestController {
             // limit order can sit pending for many bars, during which the session's own
             // defaults could in principle be nothing this trade was ever sized against.
             [$tradeId, $lotSize] = $this->fillPosition(
-                $session, $order['direction'], (float) $order['limit_price'], (float) $order['stop_loss'],
+                $session, $order['direction'], $fillPrice, (float) $order['stop_loss'],
                 $order['take_profit'] !== null ? (float) $order['take_profit'] : null,
                 (float) $order['risk_pct'], (int) $order['leverage'], $state['equity'], $bar['open_time']
             );
             $this->db->prepare("UPDATE backtest_pending_orders SET status='filled', trade_id=? WHERE id=?")->execute([$tradeId, $order['id']]);
+            $filledThisBar[$tradeId] = $fillPrice;
             // order_id (the PENDING order's own id, not the resulting trade's) lets the
             // client (js/backtest.js::btAdvance()) find whichever drawing was linked to
             // this order (linked_order_id) and flip it over to linked_trade_id now that
             // it's actually filled -- see btLinkDrawingToOrder()'s own docblock.
-            $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => (int) $order['id'], 'price' => (float) $order['limit_price'], 'lot_size' => $lotSize, 'direction' => $order['direction']];
+            $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => (int) $order['id'], 'price' => $fillPrice, 'lot_size' => $lotSize, 'direction' => $order['direction']];
         }
 
         $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
         $open->execute([$session['id']]);
         foreach ($open->fetchAll() as $trade) {
+            $tradeId = (int) $trade['id'];
             $stop = (float) $trade['stop_loss'];
             $target = $trade['take_profit'] !== null ? (float) $trade['take_profit'] : null;
 
-            $touch = backtestCheckSlTp($trade['direction'], $bar['high'], $bar['low'], $stop, $target);
-            if ($touch === 'stop_loss') {
-                [$net, $rMultiple] = $this->settleTrade($trade, $stop, 'Stop Loss', (float) $session['fee_rate_pct'], $bar['open_time']);
-                $events[] = ['type' => 'stop_loss', 'trade_id' => (int) $trade['id'], 'price' => $stop, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
-            } elseif ($touch === 'take_profit') {
-                [$net, $rMultiple] = $this->settleTrade($trade, $target, 'Take Profit', (float) $session['fee_rate_pct'], $bar['open_time']);
-                $events[] = ['type' => 'take_profit', 'trade_id' => (int) $trade['id'], 'price' => $target, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
+            // v3.22.4 — a position that just filled THIS bar (above) uses the same-bar
+            // rule instead of the normal full-bar-range check; every other open position
+            // (filled on a prior bar, genuinely open for this bar's entire duration)
+            // keeps the existing, unrestricted backtestCheckSlTp(). The two return
+            // different shapes ([reason, exitPrice] vs a plain reason string) because
+            // the same-bar path can exit at a price that's neither the stop nor the
+            // target (the wrong-side-stop case closes AT THE FILL PRICE) -- handled as
+            // two separate branches rather than normalizing both into one shape, so
+            // neither path has to fake a value the other one doesn't actually have.
+            if (isset($filledThisBar[$tradeId])) {
+                $result = backtestCheckSameBarFillTouch($trade['direction'], $bar['high'], $bar['low'], $filledThisBar[$tradeId], $stop, $target);
+                if ($result !== null) {
+                    [$reason, $exitPrice] = $result;
+                    $label = $reason === 'stop_loss' ? 'Stop Loss' : 'Take Profit';
+                    [$net, $rMultiple] = $this->settleTrade($trade, $exitPrice, $label, (float) $session['fee_rate_pct'], $bar['open_time']);
+                    $events[] = ['type' => $reason, 'trade_id' => $tradeId, 'price' => $exitPrice, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
+                }
+            } else {
+                $touch = backtestCheckSlTp($trade['direction'], $bar['high'], $bar['low'], $stop, $target);
+                if ($touch === 'stop_loss') {
+                    [$net, $rMultiple] = $this->settleTrade($trade, $stop, 'Stop Loss', (float) $session['fee_rate_pct'], $bar['open_time']);
+                    $events[] = ['type' => 'stop_loss', 'trade_id' => $tradeId, 'price' => $stop, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
+                } elseif ($touch === 'take_profit') {
+                    [$net, $rMultiple] = $this->settleTrade($trade, $target, 'Take Profit', (float) $session['fee_rate_pct'], $bar['open_time']);
+                    $events[] = ['type' => 'take_profit', 'trade_id' => $tradeId, 'price' => $target, 'net_pnl' => $net, 'r_multiple' => $rMultiple];
+                }
             }
         }
 

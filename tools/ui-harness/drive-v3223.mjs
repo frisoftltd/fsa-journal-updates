@@ -177,6 +177,36 @@ async function main() {
         await page.click('#bt-ticket-close-x');
 
         // ════════════════════════════════════════════════════════════════
+        // v3.22.4 — a marketable Long limit (at/above the current close) is rejected,
+        // both in the ticket's own disabled-reason and (BacktestController::placeOrder(),
+        // not exercised by this DB-free harness -- see this file's own code review) on
+        // the server. Confirmed on live: a Long limit at 6902.39 placed against a bar
+        // that only ever traded 6591.5-6666 filled at the stale 6902.39 once touched,
+        // instead of at the market.
+        // ════════════════════════════════════════════════════════════════
+        console.log('\n[Fix: marketable limit] a Long limit at/above market is rejected');
+        await page.click('button[onclick="btNewTradeClick()"]');
+        await page.waitForSelector('#bt-ticket', { state: 'visible' });
+        await page.click('[data-seg-group="orderType"] [data-seg-val="limit"]');
+        const closeBeforeDrag = await page.evaluate(() => chartState.candles[chartState.candles.length - 1].close);
+        // btTicketSetField() is the same function a real drag of the orange entry line
+        // calls (js/backtest-drawings.js's own ticket-line hit-test) -- driven directly
+        // here since the ticket has no plain number input for the limit price (per its
+        // own "Drag the orange entry line to set your price" hint), and a pixel-perfect
+        // drag to an exact target price is needlessly fragile for what this is actually
+        // testing (the blockReason computation, not the drag mechanics themselves).
+        await page.evaluate((price) => btTicketSetField('entry', price), closeBeforeDrag + 50);
+        const marketableState = await page.evaluate(() => {
+            const c = btComputeTicket();
+            const btn = document.getElementById('bt-ticket-place-btn');
+            return { blockReason: c.blockReason, placeDisabled: btn.disabled };
+        });
+        assert(marketableState.blockReason === 'A Long limit above the market fills immediately. Use Market.', `Fix: ticket shows the exact marketable-limit reason (got "${marketableState.blockReason}")`);
+        assert(marketableState.placeDisabled, 'Fix: Place Trade is disabled for a marketable limit');
+        await shot(page, 'fix-marketable-limit-rejected');
+        await page.click('#bt-ticket-close-x');
+
+        // ════════════════════════════════════════════════════════════════
         // Verify items 1-4: Limit order lines+cancel, Market fill lines+box+P&L,
         // TP hit clears lines and leaves a marker+toast, rewind undoes it.
         // (continuing on session 20, fresh, cursor at index 400)

@@ -1130,7 +1130,18 @@ function btComputeTicket() {
     // entry" value for a Long). Checked first (after the cap), and explicitly, so the
     // disabled reason reads "Enter a stop loss" rather than silently letting a
     // zero-stop ticket through.
-    if (!blockReason && !t.stopLoss) blockReason = 'Enter a stop loss.';
+    // v3.22.4 — mirrors BacktestController::placeOrder()'s own new marketable-limit
+    // rejection exactly (same wording), so the ticket shows the same reason and disables
+    // Place Trade instead of letting the trader submit and find out from a server error.
+    // Compares the TYPED/DRAGGED limit price (t.entry) against the live close
+    // (lastCandle.close) -- NOT against `entry` above, which for a Limit order already
+    // IS t.entry (comparing a limit price against itself would never trip).
+    const marketableLimit = t.orderType === 'limit' && lastCandle && (
+        (t.direction === 'Long' && t.entry >= lastCandle.close) ||
+        (t.direction === 'Short' && t.entry <= lastCandle.close)
+    );
+    if (!blockReason && marketableLimit) blockReason = t.direction === 'Long' ? 'A Long limit above the market fills immediately. Use Market.' : 'A Short limit below the market fills immediately. Use Market.';
+    else if (!blockReason && !t.stopLoss) blockReason = 'Enter a stop loss.';
     else if (!blockReason && t.direction === 'Long' && t.stopLoss >= entry) blockReason = 'For a Long, stop loss must be below entry.';
     else if (!blockReason && t.direction === 'Short' && t.stopLoss <= entry) blockReason = 'For a Short, stop loss must be above entry.';
     else if (!blockReason && marginRequired > availableMargin) blockReason = `Margin required (${fmt(marginRequired)}) exceeds available margin (${fmt(Math.max(0, availableMargin))}).`;
@@ -1269,7 +1280,23 @@ function btWireTicket(c) {
                     if (btTicket.takeProfit !== null) btTicket.takeProfit = fakeSettings.take_profit;
                 } else if (group === 'orderType') {
                     btTicket.orderType = val;
-                    if (val === 'market') btTicket.entry = c.entry; // snaps to current price immediately, not just on next render
+                    if (val === 'market') {
+                        btTicket.entry = c.entry; // snaps to current price immediately, not just on next render
+                    } else {
+                        // v3.22.4 — switching TO Limit must not leave entry sitting
+                        // exactly at the current close (c.entry, where it already was
+                        // while Market): that's marketable by construction (the new
+                        // "at or above/below the market" rejection uses >=/<=), which
+                        // would show the rejection reason on every single Market->Limit
+                        // switch instead of only when the trader actually drags the
+                        // limit through the market. Starts the limit a small, clearly
+                        // on-the-right-side offset away instead -- the same 0.05%
+                        // threshold btOpenTicket()'s own Market/Limit auto-detect
+                        // already uses for "near the market," so this doesn't invent a
+                        // second meaning for that number.
+                        const offset = c.entry * 0.0005;
+                        btTicket.entry = btTicket.direction === 'Long' ? c.entry - offset : c.entry + offset;
+                    }
                 } else {
                     btTicket[group] = val;
                 }

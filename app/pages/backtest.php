@@ -155,6 +155,9 @@
            suppressed here on purpose, see refreshNewTradeGate()'s own comment. -->
       <div class="tf-group" id="bt-header-strip" style="gap:12px">
         <span style="color:#6b7280;font-size:11px">Equity <b id="bt-strip-equity" style="color:#d1d4dc"></b></span>
+        <!-- v3.22.10 — only shown for a session with an active (non-flat) risk ladder,
+             toggled by renderBtHeaderStrip() from sessionSummary()'s own ladder_risk_pct. -->
+        <span id="bt-strip-tier-wrap" style="color:#6b7280;font-size:11px;display:none">Tier <b id="bt-strip-tier" style="color:#d1d4dc"></b></span>
         <span style="color:#6b7280;font-size:11px">Target <b id="bt-strip-target" style="color:#d1d4dc"></b></span>
         <span style="color:#6b7280;font-size:11px">Loss <b id="bt-strip-loss" style="color:#d1d4dc"></b></span>
         <span style="color:#6b7280;font-size:11px">Trades <b id="bt-strip-trades" style="color:#d1d4dc"></b></span>

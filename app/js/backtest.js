@@ -813,6 +813,14 @@ function renderBtHeaderStrip(s) {
     const eqEl = document.getElementById('bt-strip-equity');
     if (!eqEl) return; // not on this screen yet (e.g. called before showBacktestScreen('window'))
     eqEl.textContent = fmt(s.equity);
+    // v3.22.10 — only shown when this session's ladder is actually active; a flat-risk
+    // session (including session 6) shows no tier and no change in behaviour.
+    const tierWrap = document.getElementById('bt-strip-tier-wrap');
+    if (tierWrap) {
+        const ladderActive = !s.use_flat_risk && s.ladder_risk_pct !== null && s.ladder_risk_pct !== undefined;
+        tierWrap.style.display = ladderActive ? '' : 'none';
+        if (ladderActive) document.getElementById('bt-strip-tier').textContent = `${s.ladder_risk_pct}%`;
+    }
     document.getElementById('bt-strip-target').textContent = `${s.progress_to_target_pct ?? '—'}% / ${s.profit_target_pct}%`;
     document.getElementById('bt-strip-loss').textContent = `${s.max_drawdown_used_pct ?? 0}% / ${s.max_drawdown_pct}%`;
     // v3.22.5 Fix D — this session's own trade-count limit, the only trade-limit figure
@@ -1125,19 +1133,6 @@ function btCalcLiquidationPrice(direction, entry, leverage) {
 function btCalcLiquidationBeforeStop(direction, liqPrice, stop) {
     return direction === 'Long' ? liqPrice > stop : liqPrice < stop;
 }
-/** Mirrors helpers.php::ladderTierForBalance() — lower-inclusive, upper-exclusive, a
- *  null upper_pct means "and above." Operates on % of starting balance (the session's
- *  own risk_ladder shape, v3.22.0), not absolute dollars. Returns null if no tier
- *  matches (shouldn't happen with a well-formed 3-tier ladder covering 0-100+, but this
- *  is preview-only math, not something to let throw). */
-function btLadderTierForEquityPct(session, equityPct) {
-    const tiers = Array.isArray(session.risk_ladder) ? session.risk_ladder : [];
-    for (const t of tiers) {
-        if (equityPct >= t.lower_pct && (t.upper_pct === null || t.upper_pct === undefined || equityPct < t.upper_pct)) return t;
-    }
-    return null;
-}
-
 /** sourceDrawingId: the backtest_drawings.id this ticket was opened from (position tool
  *  "Place trade"), or null when opened from the sidebar panel. init: {direction,
  *  orderType, entry, stopLoss, takeProfit} — entry is only meaningful for orderType
@@ -1169,10 +1164,12 @@ function btOpenTicket(init) {
         takeProfit: (init.takeProfit !== undefined && init.takeProfit !== null) ? init.takeProfit : null,
         keep3R: true,
         riskMode: '%',
-        // Prefilled from the session's flat risk_pct always, per the briefing ("Until
-        // [v3.22.2] lands, use flat risk") -- the ladder tier is looked up separately,
-        // for the off-ladder comparison only, not as the prefilled value.
-        riskValue: btSession.risk_pct,
+        // v3.22.10 — when the ladder is active, risk now prefills from the server's own
+        // start-of-day-equity-based ladder_risk_pct (sessionSummary()'s own field), not
+        // the flat risk_pct -- the trader can still type a different % (that's what makes
+        // a trade "off-ladder", shown by the amber note in btComputeTicket()/btTicketHtml()
+        // below, not a block).
+        riskValue: (!btSession.use_flat_risk && btSession.ladder_risk_pct !== null) ? btSession.ladder_risk_pct : btSession.risk_pct,
         leverage: btSession.default_leverage,
     };
     btTicketApplyKeep3R(); // ticket-open is one of the five Keep-3R recompute paths (v3.22.2 Fix 1)
@@ -1277,8 +1274,15 @@ function btComputeTicket() {
     const riskUsdNet = riskUsdInput + entryFee + exitFeeAtStop;
     const rewardUsdNet = t.takeProfit !== null ? Math.abs(t.takeProfit - entry) * lotSize - (entryFee + exitFee) : null;
 
-    const ladderTier = !btSession.use_flat_risk ? btLadderTierForEquityPct(btSession, equity / btSession.starting_balance * 100) : null;
-    const offLadder = ladderTier !== null && Math.abs(riskPctEffective - ladderTier.risk_pct) > 0.001;
+    // v3.22.10 — authoritative from the server now (sessionSummary()'s own
+    // ladder_risk_pct/start_of_day_equity, derived from start-of-day closed equity, not
+    // this instant's possibly-mid-day equity the old client-only approximation used).
+    // Never blocks anything -- off-ladder is shown, not prevented, per the briefing.
+    const ladderActive = !btSession.use_flat_risk && btSession.ladder_risk_pct !== null && btSession.ladder_risk_pct !== undefined;
+    const ladderRiskPct = ladderActive ? btSession.ladder_risk_pct : null;
+    const startOfDayEquity = btSession.start_of_day_equity;
+    const startOfDayEquityPct = (startOfDayEquity !== undefined && btSession.starting_balance > 0) ? (startOfDayEquity / btSession.starting_balance * 100) : null;
+    const offLadder = ladderRiskPct !== null && Math.abs(riskPctEffective - ladderRiskPct) > 0.001;
 
     // Blocking rules — mirrors BacktestController::placeOrder()'s own checks so the
     // ticket's disabled reason is never a surprise once "Place Trade" is actually
@@ -1324,7 +1328,7 @@ function btComputeTicket() {
     return {
         entry, lotSize, notional, marginRequired, availableMargin, liquidationPrice, liquidationBeforeStop,
         entryFee, exitFee, totalFees, rr, riskUsdInput, riskUsdNet, rewardUsdNet, riskPctEffective,
-        ladderTier, offLadder, blockReason, capReached, capReason,
+        ladderActive, ladderRiskPct, startOfDayEquity, startOfDayEquityPct, offLadder, blockReason, capReached, capReason,
     };
 }
 
@@ -1406,7 +1410,8 @@ function btTicketHtml(t, c) {
                     <input type="number" id="bt-ticket-risk-value" step="any" value="${t.riskValue}">
                     <span class="bt-ticket-unit-badge">= ${fmt(c.riskUsdInput)}</span>
                 </div>
-                ${c.offLadder ? `<div class="bt-ticket-note amber">⚠ Off-ladder — ladder tier is ${c.ladderTier.risk_pct}% here, you're at ${c.riskPctEffective.toFixed(2)}%. Recorded as planned_risk_pct either way.</div>` : ''}
+                ${c.ladderActive ? `<div class="bt-ticket-note">Tier ${c.ladderRiskPct}% · start-of-day equity ${fmt(c.startOfDayEquity)} (${c.startOfDayEquityPct.toFixed(1)}%)</div>` : ''}
+                ${c.offLadder ? `<div class="bt-ticket-note amber">⚠ Off-ladder — ladder tier is ${c.ladderRiskPct}% here, you're at ${c.riskPctEffective.toFixed(2)}%. Recorded as planned_risk_pct either way.</div>` : ''}
             </div>
             <div class="bt-ticket-row">
                 <label>Leverage</label>

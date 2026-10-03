@@ -365,6 +365,29 @@ function backtestEquityCurve(array $trades, float $startingBalance): array {
 }
 
 /**
+ * v3.22.10 — looks up which ladder tier $startOfDayEquity falls into, as a % of
+ * $startingBalance. Lower-inclusive, upper-exclusive; a null upper_pct is open-ended —
+ * same convention helpers.php::ladderTierForBalance() already uses for the live
+ * challenge ladder, just on a % basis instead of absolute dollars (this session's own
+ * risk_ladder_json shape, v3.22.0). Unlike that live helper, this never returns null:
+ * a backtest order always needs a real risk % to size against, so a malformed/gapped
+ * ladder (shouldn't happen — validateRiskLadder() already enforces a well-formed
+ * 3-tier shape at save time) falls back to the tier with the highest lower_pct rather
+ * than leaving a trade unsized.
+ */
+function backtestLadderTier(array $tiers, float $startOfDayEquity, float $startingBalance): float {
+    $pct = $startingBalance > 0 ? ($startOfDayEquity / $startingBalance * 100) : 0.0;
+    foreach ($tiers as $tier) {
+        $lower = (float) $tier['lower_pct'];
+        $upper = $tier['upper_pct'] !== null ? (float) $tier['upper_pct'] : null;
+        if ($pct >= $lower && ($upper === null || $pct < $upper)) return (float) $tier['risk_pct'];
+    }
+    if (empty($tiers)) return 0.0;
+    usort($tiers, fn($a, $b) => $b['lower_pct'] <=> $a['lower_pct']);
+    return (float) $tiers[0]['risk_pct'];
+}
+
+/**
  * v3.22.8 — the full Backtest Results payload's metrics: overall / Long-only / Short-only
  * blocks (identical shape, see backtestMetricsBlock()'s own doc comment for why) plus the
  * overall equity curve. BacktestController::getResults() builds the trade-list rows
@@ -629,6 +652,23 @@ function backtest_engine_self_test(): void {
     $check('equity curve: point 3 equity = 10200+150-101', $curve[2]['equity_usd'], 10249.0);
     $check('equity curve: point 3 cumulative R = 2.0+1.5-1.0', $curve[2]['cumulative_r'], 2.5);
     $check('equity curve: time_out carried through opaquely, unmodified', $curve[2]['time_out'], 3000);
+
+    // v3.22.10 — risk ladder tier lookup. Default ladder: 0-92.5% -> 0.25%,
+    // 92.5-95% -> 0.5%, >=95% -> 1.0%, lower-inclusive/upper-exclusive, on a $10,000
+    // starting balance (so equity $ == pct for easy reading).
+    $ladder = [
+        ['lower_pct' => 0,    'upper_pct' => 92.5, 'risk_pct' => 0.25],
+        ['lower_pct' => 92.5, 'upper_pct' => 95,   'risk_pct' => 0.5],
+        ['lower_pct' => 95,   'upper_pct' => null, 'risk_pct' => 1.0],
+    ];
+    $check('ladder tier: 100% equity -> top tier 1.0%', backtestLadderTier($ladder, 10000, 10000), 1.0);
+    $check('ladder tier: exactly 95.0% -> top tier (lower-inclusive)', backtestLadderTier($ladder, 9500, 10000), 1.0);
+    $check('ladder tier: 94.99% -> middle tier 0.5% (just under the 95% boundary)', backtestLadderTier($ladder, 9499, 10000), 0.5);
+    $check('ladder tier: exactly 92.5% -> middle tier (lower-inclusive)', backtestLadderTier($ladder, 9250, 10000), 0.5);
+    $check('ladder tier: 90% -> bottom tier 0.25%', backtestLadderTier($ladder, 9000, 10000), 0.25);
+    // A malformed/gapped ladder still returns a real number (the highest-lower tier),
+    // never null -- a backtest order always needs something to size against.
+    $check('ladder tier: empty ladder falls back to 0.0, not null/error', backtestLadderTier([], 10000, 10000), 0.0);
 
     fwrite(STDOUT, "backtest_engine.php self-test: $pass passed, $fail failed\n");
     if ($fail > 0) exit(1);

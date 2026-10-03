@@ -100,6 +100,13 @@ if (isset($_GET['action'])) {
             file_put_contents(LOCAL_VERSION_FILE, json_encode($remote, JSON_PRETTY_PRINT));
             $results[] = ['status' => 'ok', 'msg' => "✅ Version updated to v{$remote['current_version']}"];
 
+            // 5. v3.22.10 — retention: keep only the newest 20 backups after a successful
+            // update (there are ~106 on live today with no cap at all before this).
+            // $backup_name (set in step 1 above) is this same run's own fresh backup --
+            // excluded from deletion even in principle, never just "should rank first."
+            $pruned = pruneOldBackups(20, $backup_name);
+            if ($pruned) $results[] = ['status' => 'ok', 'msg' => '🗑 Pruned ' . count($pruned) . ' old backup(s), kept the newest 20'];
+
             echo json_encode([
                 'success'  => empty($errors),
                 'results'  => $results,
@@ -182,8 +189,53 @@ function getBackups() {
         $name = basename($d);
         $out[$name] = ['name' => $name, 'date' => filemtime($d), 'path' => $d];
     }
-    arsort($out);
+    // v3.22.10 — arsort() on an array of arrays compares by PHP's own array-comparison
+    // rules (count, then value-by-value in key order), which for an identically-shaped
+    // ['name'=>...,'date'=>...,'path'=>...] element short-circuits on the first pair,
+    // 'name' -- so this was sorting by NAME AS A STRING all along, not by date, which is
+    // exactly why 'backup_v3.9.x' (string '9' > '2') sorted above 'backup_v3.22.x'.
+    // uasort() with an explicit numeric comparison on 'date' (real mtime) preserves the
+    // name-keyed shape every caller (rollback()'s isset($backups[$target]) lookup,
+    // list_backups' JSON) already relies on, newest first.
+    uasort($out, fn($a, $b) => $b['date'] <=> $a['date']);
     return $out;
+}
+
+/** v3.22.10 — keeps only the newest $keep backup_v* folders (by getBackups()'s own now-
+ *  correct mtime sort), deleting everything older. Two belt-and-suspenders checks before
+ *  any delete, since this recursively removes directories on live:
+ *    1. realpath() containment — every candidate must resolve to a real path still
+ *       inside BACKUP_DIR, not just trust that glob(BACKUP_DIR.'backup_*') inside
+ *       getBackups() already scoped it (a symlink or an unexpected path shape is refused,
+ *       not assumed away).
+ *    2. $justCreated (this same update run's own fresh backup name) is never deleted,
+ *       full stop, even in the pathological case its own rank somehow fell outside the
+ *       kept window — an in-progress update must always have a backup to roll back to.
+ *  Returns the names actually removed, purely for the caller's own result/log line. */
+function pruneOldBackups(int $keep, string $justCreated = ''): array {
+    $backups = getBackups(); // newest-first by mtime
+    $realBackupDir = realpath(BACKUP_DIR);
+    $removed = [];
+    $i = 0;
+    foreach ($backups as $name => $info) {
+        $i++;
+        if ($i <= $keep) continue;
+        if ($name === $justCreated) continue;
+        $realPath = realpath($info['path']);
+        if ($realBackupDir === false || $realPath === false || strpos($realPath, $realBackupDir . DIRECTORY_SEPARATOR) !== 0) continue;
+        deleteDirRecursive($realPath);
+        $removed[] = $name;
+    }
+    return $removed;
+}
+
+function deleteDirRecursive(string $dir): void {
+    if (!is_dir($dir)) return;
+    $items = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+    foreach ($items as $item) {
+        $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
+    }
+    rmdir($dir);
 }
 
 $local = getLocalVersion();

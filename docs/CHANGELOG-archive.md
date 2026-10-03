@@ -4616,6 +4616,143 @@ file, duplicate-name scan clean.
 
 ---
 
+### v3.22.10: Risk Ladder in the Backtest Engine
+
+**Why.** The ladder (`use_flat_risk`/`risk_ladder_json`, v3.22.0) and the setup form
+existed since v3.22.0/v3.22.1, but nothing in the replay engine ever read it — every order
+sized from whatever risk % the ticket sent, flat or not. This release makes it live.
+
+#### Engine
+
+**`backtestLadderTier(array $tiers, float $startOfDayEquity, float $startingBalance):
+float`** (`backtest_engine.php`) — lower-inclusive/upper-exclusive tier lookup on %-of-
+starting-balance, same convention `helpers.php::ladderTierForBalance()` already uses for
+the live challenge ladder. Unlike that live helper, this never returns null: a malformed/
+gapped ladder (shouldn't happen — `validateRiskLadder()` already enforces a well-formed
+3-tier shape) falls back to the highest-`lower_pct` tier rather than leaving an order
+unsized. Self-test: 100%, exactly 95.0%, 94.99%, exactly 92.5%, 90% — all five boundary
+cases from the briefing, plus an empty-ladder fallback case.
+
+**Start-of-day equity, not this instant's equity.** `BacktestController::
+startOfDayEquityAndTier()` (shared by `computeSessionState()` and the new
+`ladderInfoAsOf()` below) walks the session's own closed-trade history and captures the
+running equity total immediately BEFORE the first trade that closed on the CURRENT UTC
+replay day — the same `today_date` boundary `computeSessionState()`'s daily-drawdown
+figure already uses, so the two can never disagree about what day it is. A trade that
+closes mid-day doesn't retroactively change TODAY's own basis — only tomorrow's — which
+is exactly "the tier stays at 1.0% until the next day" from the briefing's own verify
+list, item 2. `computeSessionState()`/`sessionSummary()` now return `start_of_day_equity`
+(always a real number) and `ladder_risk_pct` (null whenever `use_flat_risk=1`).
+
+**A limit order's tier is fixed at placement, not fill — without a new column.**
+`backtest_pending_orders` has no column to literally store a planned tier at placement
+time, and this release adds none (see "Schema" below). Instead, `ladderInfoAsOf(array
+$session, int $asOfBarTimeMs)` re-derives exactly what the tier/start-of-day-equity WERE
+at a past moment — the order's own already-stored, immutable `placed_at_bar_time` —
+straight from closed-trade history, the same "derive, don't store" rule this whole
+controller already lives by for equity itself. Deterministic and always reproducible: a
+trade that closes AFTER an order was placed can't retroactively change what the tier was
+AT that earlier moment.
+
+**`fillPosition()`** gained two parameters (`$plannedRiskPct`, `$balanceAtDayStart`) and
+now writes all four v3.15/v3.16 columns on every fill, flat or tiered: `planned_risk_pct`
+(the ladder tier, or the flat `risk_pct` when the ladder is off), `actual_risk_pct` (what
+the order actually used — never blocked for disagreeing with the plan),
+`balance_at_day_start`, `risk_deviation_pct` = `(actual − planned) / planned × 100`. A
+market order's "planned at placement" is simply its current `computeSessionState()`
+(fills the same bar it's placed); a limit order's is `ladderInfoAsOf()` against its own
+`placed_at_bar_time`.
+
+#### Ticket and header strip
+
+The ticket's risk field now prefills from `ladder_risk_pct` when the ladder is active
+(previously always the flat `risk_pct`, with the ladder tier looked up client-side,
+separately, only for the off-ladder comparison — a v3.22.0-era placeholder explicitly
+marked "until [the engine] lands, use flat risk"). That whole client-side approximation
+(`btLadderTierForEquityPct()`, based on the CURRENT equity including floating P&L) is
+removed — `btComputeTicket()` now reads the server's own authoritative, start-of-day-
+equity-based `ladder_risk_pct` directly. A new line under Risk, shown only while the
+ladder is active: `Tier 0.5% · start-of-day equity $9,340 (93.4%)`. The existing amber
+"Off-ladder" note now compares the typed risk % against this same authoritative
+`ladder_risk_pct` instead of the old client-side approximation. Nothing is ever blocked —
+off-ladder only shows a note and gets recorded on the trade row either way. Header strip
+gains a `Tier {x}%` badge next to Equity/Target/Loss, shown only when the ladder is
+active (`#bt-strip-tier-wrap`, toggled by `renderBtHeaderStrip()`).
+
+#### updater.php — two fixes
+
+CLAUDE.md's own Development Rule 12 says never edit `updater.php`; this release is a
+deliberate, explicitly-briefed exception for two concrete, verified bugs, not a casual
+touch.
+
+**Sort order.** `getBackups()`'s own `arsort($out)` sorted an array of
+`['name'=>...,'date'=>...,'path'=>...]` arrays — PHP's array-comparison rules short-
+circuit on the FIRST differing key in insertion order, which for this identically-shaped
+element is `name`, so every backup list was sorted by **name as a string** all along, not
+by date. `'backup_v3.9.x'` (`'9' > '2'`) sorted above `'backup_v3.22.x'` for exactly this
+reason, even though the latter is chronologically newer. Fixed with an explicit
+`uasort()` on `date` (real `filemtime()`), preserving the name-keyed shape `rollback()`'s
+own `isset($backups[$target])` lookup relies on.
+
+**Retention.** `pruneOldBackups(int $keep, string $justCreated)` keeps only the newest
+`$keep` (20) backup folders, called once after every successful `apply`. Two checks
+before any delete: a `realpath()` containment check (every candidate must resolve to a
+real path still inside `BACKUP_DIR`, refused otherwise — not just trusting `glob()`'s own
+scoping) and a hard exemption for `$justCreated` (this same update run's own fresh
+backup), which is never deleted regardless of its own rank — an in-progress update must
+always have a backup to roll back to. Verified with a new standalone CLI test,
+`tools/test-updater-backups.php` — `updater.php` can't be `require()`'d directly in a dev
+sandbox (`includes/config.php` is never in this repo), so the test copies the real file
+next to a minimal stub config in a temp directory (the same "copy the real app next to a
+stub" pattern `tools/ui-harness/setup.js` already established), then exercises it against
+~30 fake `backup_v*` folders with explicit, controlled `mtime`s: sort order survives a
+deliberately name-vs-mtime-mismatched pair, retention keeps exactly the newest 20 of 30,
+and the just-created exemption survives even when its own mtime is deliberately the
+oldest of the batch. The `realpath()` containment phase (a symlink into `BACKUP_DIR`
+pointing outside it) is skipped gracefully on a host/user without symlink privilege
+rather than failing the whole run.
+
+#### Schema
+
+None. Every column this release writes (`planned_risk_pct`/`actual_risk_pct`/
+`balance_at_day_start`/`risk_deviation_pct`) already existed on `trades` since v3.15.0/
+v3.16.0 (challenge-ladder Phase 1/2) — confirmed before writing a single line of
+`fillPosition()`'s own INSERT, per the briefing's own "stop and tell me first" instruction
+if something were missing.
+
+#### Verification
+
+New harness driver `tools/ui-harness/drive-v32210.mjs` (32 assertions, all passing)
+against two fresh stateful mock sessions (24, 25 — both `scenario='ladder'`,
+`stubs/api.php`) plus the existing flat session 20. The mock itself needed two real
+additions to make this testable at all: `mockStartOfDayEquityAndTier()` (mirrors
+`startOfDayEquityAndTier()`/`backtestLadderTier()` exactly, same "the mock reimplements
+the real server rule" convention `mockAdvance()` already established for SL/TP/fees), and
+REAL risk-based position sizing (`equity × risk% ÷ stop distance`) for `scenario='ladder'`
+sessions specifically — every other stateful session keeps its flat 0.5 display-only lot
+estimate unchanged. This let the driver engineer a specific, provable equity drop from
+the mock's own fixed deterministic candle sequence (a ~617-point dip between indices 400
+and 446) by choosing risk % and stop distance, rather than hunting for a naturally-
+occurring loss of the right size. Covers: tier 1.0% at 100% equity with the ticket
+prefilling 1; a same-day loss that drops equity into the 92.5–95% band while the tier
+provably stays at 1.0% (the UTC day boundary falls between index 400 and 446 in this
+mock's own fixed epoch, so entry and close already straddle two different replay days,
+the same day-rollover eventually tested explicitly ten bars later); the tier becoming
+0.5% only once the next replay day actually starts; a deeper loss (isolated on session 25)
+dropping the day after into the <92.5% band, tier 0.25%; typing 1% while the tier is
+0.5% — the amber note's exact text, the trade NOT being blocked, and
+`planned_risk_pct`/`actual_risk_pct`/`risk_deviation_pct` landing at exactly 0.5/1/100;
+and session 20 (flat) showing no tier badge, no ticket tier line, and
+`ladder_risk_pct: null`. The engine self-test (104 assertions, 0 failed, including the
+six new ladder-tier cases) also runs standalone inside the driver via `execSync`, same
+v3.22.8 convention.
+
+`drive.mjs`, `drive-v3223.mjs`, `drive-v3225.mjs`, `drive-v3226.mjs`, `drive-v3227.mjs`,
+`drive-v3228.mjs` and `drive-v3229.mjs` all pass unmodified. `php -l`/`node --check` clean
+on every changed file, duplicate-name scan clean.
+
+---
+
 ## Part 2 — Other Retired Reference Material
 
 ### Brand Identity — Full Type Scale Detail

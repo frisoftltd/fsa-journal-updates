@@ -169,6 +169,14 @@ function mockSessionConfig(int $id): ?array {
         // from backtest_engine.php's own self-test) + 2 rewound ones that must be
         // excluded. See mockResultsTrades() below for the full, hand-computed shape.
         case 23: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 500, 'scenario' => 'results'];
+        // v3.22.10 — the only stateful session with an ACTIVE (non-flat) risk ladder;
+        // every other session above is flat, same as before this release. Default
+        // ladder: >=95% -> 1.0%, 92.5-95% -> 0.5%, <92.5% -> 0.25%.
+        case 24: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'ladder'];
+        // v3.22.10 — a second, independent ladder session (fresh state, same deterministic
+        // candle sequence as 24) so the <92.5% tier can be tested directly, in isolation,
+        // without depending on/compounding session 24's own multi-step narrative.
+        case 25: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'ladder'];
         default: return null;
     }
 }
@@ -325,14 +333,61 @@ function mockComputeSessionState(array $st): array {
     return ['equity' => $equity, 'floating_pnl' => round($floatingTotal, 2), 'open_positions' => $openOut, 'mark_close' => $markClose];
 }
 
+// v3.22.10 — mirrors BacktestController::DEFAULT_RISK_LADDER and backtestLadderTier()
+// (includes/backtest_engine.php) exactly, for the one stateful mock session (24) that
+// has an active ladder. Same "the mock reimplements the real server rule for client-side
+// testing" convention mockAdvance() already uses for SL/TP/fees.
+const MOCK_DEFAULT_RISK_LADDER = [
+    ['lower_pct' => 0,    'upper_pct' => 92.5, 'risk_pct' => 0.25],
+    ['lower_pct' => 92.5, 'upper_pct' => 95,   'risk_pct' => 0.5],
+    ['lower_pct' => 95,   'upper_pct' => null, 'risk_pct' => 1.0],
+];
+function mockLadderTier(array $tiers, float $pct): float {
+    foreach ($tiers as $tier) {
+        $upper = $tier['upper_pct'];
+        if ($pct >= $tier['lower_pct'] && ($upper === null || $pct < $upper)) return $tier['risk_pct'];
+    }
+    return $tiers ? end($tiers)['risk_pct'] : 0.0;
+}
+/** Same start-of-day-equity derivation as BacktestController::startOfDayEquityAndTier()
+ *  — the running equity total immediately BEFORE the first trade closed on $todayDate
+ *  (or the full running total if nothing closed today yet), then the ladder tier that
+ *  basis falls into. $asOfMs lets a caller ask "as of this past moment" (a limit order's
+ *  own placement time) the same way BacktestController::ladderInfoAsOf() does. */
+function mockStartOfDayEquityAndTier(array $st, int $asOfMs, bool $useFlatRisk, float $flatRiskPct): array {
+    $todayDate = gmdate('Y-m-d', intdiv($asOfMs, 1000));
+    $starting = $st['starting_balance'];
+    $running = $starting;
+    $startOfDayEquity = $starting;
+    $sawToday = false;
+    foreach ($st['closed_trades'] as $t) {
+        if ($t['time_out'] > $asOfMs) continue; // not yet closed as of this moment
+        $tradeDate = gmdate('Y-m-d', intdiv($t['time_out'], 1000));
+        if (!$sawToday && $tradeDate === $todayDate) { $startOfDayEquity = $running; $sawToday = true; }
+        $running += $t['net_pnl'];
+    }
+    if (!$sawToday) $startOfDayEquity = $running;
+
+    $ladderRiskPct = null;
+    if (!$useFlatRisk) {
+        $pct = $starting > 0 ? ($startOfDayEquity / $starting * 100) : 0.0;
+        $ladderRiskPct = mockLadderTier(MOCK_DEFAULT_RISK_LADDER, $pct);
+    }
+    return ['start_of_day_equity' => round($startOfDayEquity, 2), 'ladder_risk_pct' => $ladderRiskPct !== null ? round($ladderRiskPct, 3) : null, 'flat_risk_pct' => $flatRiskPct];
+}
+
 function mockSessionResponse(int $id, array $st): array {
     $computed = mockComputeSessionState($st);
     $cursorMs = $st['origin_ms'] + $st['cursor_index'] * $st['step_ms'];
+    $cfg = mockSessionConfig($id);
+    $useFlatRisk = ($cfg['scenario'] ?? '') !== 'ladder';
+    $riskLadder = $useFlatRisk ? [['lower_pct' => 0, 'upper_pct' => null, 'risk_pct' => 1.0]] : MOCK_DEFAULT_RISK_LADDER;
+    $dayInfo = mockStartOfDayEquityAndTier($st, $cursorMs, $useFlatRisk, 1.0);
     return [
         'id' => $id, 'session_name' => 'UI Harness Stateful Session ' . $id,
         'symbol' => $st['symbol'], 'blind_mode' => false, 'replay_timeframe' => $st['timeframe'],
         'status' => 'active', 'risk_pct' => 1.0, 'fee_rate_pct' => 0.04, 'default_leverage' => 5,
-        'risk_ladder' => [['lower_pct' => 0, 'upper_pct' => null, 'risk_pct' => 1.0]], 'use_flat_risk' => true,
+        'risk_ladder' => $riskLadder, 'use_flat_risk' => $useFlatRisk,
         'starting_balance' => $st['starting_balance'], 'profit_target_pct' => 10.0,
         'daily_drawdown_pct' => 5.0, 'max_drawdown_pct' => 10.0, 'drawdown_type' => 'static',
         'max_trades_per_day' => $st['max_trades_per_day'],
@@ -348,6 +403,10 @@ function mockSessionResponse(int $id, array $st): array {
         'open_positions' => $computed['open_positions'],
         'pending_orders' => $st['pending_orders'],
         'closed_trades' => $st['closed_trades'],
+        // v3.22.10 — start_of_day_equity excludes floating P&L; ladder_risk_pct is null
+        // whenever use_flat_risk=true.
+        'start_of_day_equity' => $dayInfo['start_of_day_equity'],
+        'ladder_risk_pct' => $dayInfo['ladder_risk_pct'],
     ];
 }
 
@@ -367,10 +426,18 @@ function mockAdvance(int $id, array $st): array {
         if (!$touched) { $stillPending[] = $o; continue; }
         $lotSize = 0.5; // fixed, display-only estimate -- this mock doesn't reproduce real position sizing
         $tradeId = $st['next_id']++;
+        // v3.22.10 — carries the tier/balance stored AT PLACEMENT (above) through to the
+        // fill, unchanged regardless of what the tier is NOW -- same "limit orders store
+        // the tier at placement" rule the real server's ladderInfoAsOf() enforces.
+        $plannedRiskPct = $o['planned_risk_pct'] ?? null;
+        $actualRiskPct = $o['risk_pct'];
+        $riskDeviationPct = ($plannedRiskPct !== null && $plannedRiskPct > 0) ? round(($actualRiskPct - $plannedRiskPct) / $plannedRiskPct * 100, 2) : null;
         $st['open_positions'][] = [
             'id' => $tradeId, 'direction' => $o['direction'], 'entry_price' => $o['limit_price'],
             'stop_loss' => $o['stop_loss'], 'take_profit' => $o['take_profit'], 'lot_size' => $lotSize,
             'fees_paid' => round($lotSize * $o['limit_price'] * 0.0004, 4), 'leverage' => $o['leverage'], 'time_in' => $bar['time'],
+            'planned_risk_pct' => $plannedRiskPct, 'actual_risk_pct' => $actualRiskPct,
+            'balance_at_day_start' => $o['balance_at_day_start'] ?? null, 'risk_deviation_pct' => $riskDeviationPct,
         ];
         $st['trades_today']++;
         $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => $o['id'], 'price' => $o['limit_price'], 'lot_size' => $lotSize, 'direction' => $o['direction']];
@@ -610,13 +677,35 @@ switch ($action) {
             $takeProfit = isset($body['take_profit']) && $body['take_profit'] !== null ? (float) $body['take_profit'] : null;
             $cursorMs = $st['origin_ms'] + $st['cursor_index'] * $st['step_ms'];
             $lotSize = 0.5;
+            $cfg = mockSessionConfig($sessionIdParam);
+            $useFlatRisk = ($cfg['scenario'] ?? '') !== 'ladder';
+            $actualRiskPct = (float) ($body['risk_pct'] ?? 1);
             if (($body['type'] ?? 'market') === 'market') {
                 $entryPrice = mockPriceAtIndex($st['cursor_index']);
+                // v3.22.10 — every OTHER stateful session keeps the flat, display-only
+                // 0.5 lot estimate (unchanged, so none of their existing driver
+                // assertions shift); only the ladder scenario needs a REAL risk-based
+                // size (backtestPositionSize()'s own formula) so a harness test can
+                // engineer a specific, provable equity drop from the mock's fixed
+                // candle sequence, the same way a real trader's position size actually
+                // scales with their chosen risk %.
+                if (!$useFlatRisk) {
+                    $stopDist = abs($entryPrice - $stopLoss);
+                    $lotSize = $stopDist > 0 ? ($st['starting_balance'] * $actualRiskPct / 100) / $stopDist : 0.5;
+                }
                 $tradeId = $st['next_id']++;
+                // v3.22.10 — a market order fills the same bar it's placed, so "planned at
+                // placement" and "right now" are the same state (BacktestController::
+                // placeOrder()'s own market branch reasons the same way).
+                $dayInfo = mockStartOfDayEquityAndTier($st, $cursorMs, $useFlatRisk, 1.0);
+                $plannedRiskPct = $dayInfo['ladder_risk_pct'] ?? $dayInfo['flat_risk_pct'];
+                $riskDeviationPct = $plannedRiskPct > 0 ? round(($actualRiskPct - $plannedRiskPct) / $plannedRiskPct * 100, 2) : null;
                 $st['open_positions'][] = [
                     'id' => $tradeId, 'direction' => $direction, 'entry_price' => $entryPrice, 'stop_loss' => $stopLoss,
                     'take_profit' => $takeProfit, 'lot_size' => $lotSize, 'fees_paid' => round($lotSize * $entryPrice * 0.0004, 4),
                     'leverage' => (int) ($body['leverage'] ?? 5), 'time_in' => $cursorMs,
+                    'planned_risk_pct' => $plannedRiskPct, 'actual_risk_pct' => $actualRiskPct,
+                    'balance_at_day_start' => $dayInfo['start_of_day_equity'], 'risk_deviation_pct' => $riskDeviationPct,
                 ];
                 $st['trades_today']++;
                 putMockSessionState($sessionIdParam, $st);
@@ -624,10 +713,20 @@ switch ($action) {
             } else {
                 $limitPrice = (float) ($body['limit_price'] ?? 0);
                 $orderId = $st['next_id']++;
+                // v3.22.10 — "limit orders store the tier at placement": computed and
+                // stored right here (this mock's own pending_orders row, unlike the real
+                // backtest_pending_orders table which has no such column -- see
+                // BacktestController::ladderInfoAsOf()'s own doc comment for why the real
+                // server re-derives this from history instead of storing it; this mock
+                // just stores it directly, which is simpler and just as correct for a
+                // fixture with no DB behind it).
+                $dayInfo = mockStartOfDayEquityAndTier($st, $cursorMs, $useFlatRisk, 1.0);
                 $st['pending_orders'][] = [
                     'id' => $orderId, 'direction' => $direction, 'limit_price' => $limitPrice, 'stop_loss' => $stopLoss,
-                    'take_profit' => $takeProfit, 'risk_pct' => (float) ($body['risk_pct'] ?? 1), 'leverage' => (int) ($body['leverage'] ?? 5),
+                    'take_profit' => $takeProfit, 'risk_pct' => $actualRiskPct, 'leverage' => (int) ($body['leverage'] ?? 5),
                     'placed_at_bar_time' => $cursorMs,
+                    'planned_risk_pct' => $dayInfo['ladder_risk_pct'] ?? $dayInfo['flat_risk_pct'],
+                    'balance_at_day_start' => $dayInfo['start_of_day_equity'],
                 ];
                 putMockSessionState($sessionIdParam, $st);
                 out(['success' => true, 'filled' => false, 'pending_order_id' => $orderId]);
@@ -717,5 +816,5 @@ switch ($action) {
  *  one owns a given order/trade id without the client telling them (cancelBtOrder()/
  *  closeBtPosition() only ever send the order/trade id, same as the real endpoints). */
 function mockSessionConfigsWithState(): array {
-    return [20 => true, 21 => true, 22 => true];
+    return [20 => true, 21 => true, 22 => true, 24 => true, 25 => true];
 }

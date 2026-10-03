@@ -787,7 +787,12 @@ class BacktestController {
             if ($direction === 'Long' && $stopLoss >= $entryPrice) jsonError('For a Long, stop loss must be below entry.');
             if ($direction === 'Short' && $stopLoss <= $entryPrice) jsonError('For a Short, stop loss must be above entry.');
             $this->checkMarginAndLiquidation($session, $direction, $entryPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
-            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time']);
+            // v3.22.10 — a market order fills on the same bar it's placed, so "the tier
+            // at placement" and "the tier right now" are the same state — no historical
+            // re-derivation needed (that's only for a limit order sitting pending across
+            // bars/days, see evaluateBar()'s own call site below).
+            $plannedRiskPct = $state['ladder_risk_pct'] ?? (float) $session['risk_pct'];
+            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time'], $plannedRiskPct, $state['start_of_day_equity']);
             jsonResponse(['success' => true, 'filled' => true, 'entry_price' => $entryPrice, 'lot_size' => $lotSize, 'direction' => $direction, 'trade_id' => $tradeId]);
         } else {
             $limitPrice = backtestRoundPrice(num($d['limit_price'] ?? 0));
@@ -988,10 +993,18 @@ class BacktestController {
             // ticket at placement time), never the session's current defaults — a
             // limit order can sit pending for many bars, during which the session's own
             // defaults could in principle be nothing this trade was ever sized against.
+            // v3.22.10 — "limit orders store the tier at placement": re-derived from this
+            // order's own already-stored placed_at_bar_time, not the CURRENT $state above
+            // (which is this bar's state, possibly a different day/tier by the time a
+            // multi-bar-pending limit actually fills) — see ladderInfoAsOf()'s own doc
+            // comment for why this needs no new column.
+            $dayInfo = $this->ladderInfoAsOf($session, (int) $order['placed_at_bar_time']);
+            $plannedRiskPct = $dayInfo['ladder_risk_pct'] ?? (float) $session['risk_pct'];
             [$tradeId, $lotSize] = $this->fillPosition(
                 $session, $order['direction'], $fillPrice, (float) $order['stop_loss'],
                 $order['take_profit'] !== null ? (float) $order['take_profit'] : null,
-                (float) $order['risk_pct'], (int) $order['leverage'], $state['equity'], $bar['open_time']
+                (float) $order['risk_pct'], (int) $order['leverage'], $state['equity'], $bar['open_time'],
+                $plannedRiskPct, $dayInfo['start_of_day_equity']
             );
             $this->db->prepare("UPDATE backtest_pending_orders SET status='filled', trade_id=? WHERE id=?")->execute([$tradeId, $order['id']]);
             $filledThisBar[$tradeId] = $fillPrice;
@@ -1053,26 +1066,35 @@ class BacktestController {
      *  actually runs. leverage/planned_margin are stored so the ticket's own "margin
      *  required" figure is reconstructable from the trade row afterward; planned_margin
      *  is reused (not a new column) per the original v3.22.0 briefing's own "reuse
-     *  existing trades columns" instruction — see the migration's own doc comment. */
+     *  existing trades columns" instruction — see the migration's own doc comment.
+     *
+     *  v3.22.10 — $plannedRiskPct/$balanceAtDayStart are reused v3.15/v3.16 columns too
+     *  (planned_risk_pct/balance_at_day_start), same "no new columns" instruction. Never
+     *  blocks an off-ladder trade — $riskPct (whatever the order actually used) is always
+     *  honoured as-is; $plannedRiskPct is recorded purely for the deviation figure, not
+     *  compared against anything that could reject the order. */
     /** @return array{0:int,1:float} [tradeId, lotSize] -- lotSize is returned (not just
      *  the id) so callers can report a real fill confirmation ("Long 0.87 BTC filled @
      *  7140", v3.22.3 Fix F) without a second query or re-deriving the sizing math. */
-    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime): array {
+    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime, float $plannedRiskPct, float $balanceAtDayStart): array {
         $riskAmount = $equity * $riskPct / 100;
         $lotSize = backtestPositionSize($equity, $riskPct, $entryPrice, $stopLoss);
         $entryFee = round(backtestFee($lotSize, $entryPrice, (float) $session['fee_rate_pct']), 4);
         $marginUsed = round(backtestMarginRequired($lotSize * $entryPrice, $leverage), 2);
         $tradeDate = gmdate('Y-m-d', (int) ($barTime / 1000));
         $timeIn = gmdate('Y-m-d H:i:s', (int) ($barTime / 1000));
+        $riskDeviationPct = $plannedRiskPct > 0 ? round(($riskPct - $plannedRiskPct) / $plannedRiskPct * 100, 2) : null;
 
         $this->db->prepare(
             "INSERT INTO trades
                 (user_id, challenge_id, trade_date, time_in, pair, direction, entry_price, stop_loss, take_profit,
-                 lot_size, fees, result, source, backtest_session_id, risk_amount, leverage, planned_margin)
-             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?)"
+                 lot_size, fees, result, source, backtest_session_id, risk_amount, leverage, planned_margin,
+                 planned_risk_pct, actual_risk_pct, balance_at_day_start, risk_deviation_pct)
+             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?,?,?,?,?)"
         )->execute([
             $this->uid, $tradeDate, $timeIn, $session['symbol'], $direction, $entryPrice, $stopLoss, $takeProfit,
             $lotSize, $entryFee, $session['id'], $riskAmount, $leverage, $marginUsed,
+            $plannedRiskPct, $riskPct, $balanceAtDayStart, $riskDeviationPct,
         ]);
         return [(int) $this->db->lastInsertId(), $lotSize];
     }
@@ -1161,6 +1183,12 @@ class BacktestController {
         $closed->execute([$session['id']]);
         $closedRows = $closed->fetchAll();
 
+        // v3.22.10 — needed before the main accumulation loop below so that same loop can
+        // capture start-of-day equity in one pass (see startOfDayEquityAndTier()'s own
+        // doc comment for why this has to be the running total BEFORE today's first
+        // trade, not today's OWN first trade's entry balance).
+        $todayDate = $markBar ? gmdate('Y-m-d', (int) ($markBar['open_time'] / 1000)) : gmdate('Y-m-d', (int) ($session['replay_cursor_ms'] / 1000));
+
         $starting = (float) $session['starting_balance'];
         $running = $starting;
         $peak = $starting;
@@ -1171,6 +1199,7 @@ class BacktestController {
             if ($row['trade_date']) $tradingDays[$row['trade_date']] = true;
         }
         $closedEquity = $running;
+        $dayInfo = $this->startOfDayEquityAndTier($session, $closedRows, $todayDate);
 
         $open = $this->db->prepare("SELECT * FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND result='Open'");
         $open->execute([$session['id']]);
@@ -1203,7 +1232,6 @@ class BacktestController {
         }
         if ($peak < $closedEquity + $floatingTotal) $peak = $closedEquity + $floatingTotal;
 
-        $todayDate = $markBar ? gmdate('Y-m-d', (int) ($markBar['open_time'] / 1000)) : gmdate('Y-m-d', (int) ($session['replay_cursor_ms'] / 1000));
         $tradesToday = $this->db->prepare("SELECT COUNT(*) FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0 AND trade_date=?");
         $tradesToday->execute([$session['id'], $todayDate]);
 
@@ -1228,7 +1256,68 @@ class BacktestController {
             'trades_today' => (int) $tradesToday->fetchColumn(),
             'today_date' => $todayDate,
             'today_change' => $todayChange,
+            // v3.22.10 — start_of_day_equity excludes floating P&L (matching live since
+            // v3.16.0); ladder_risk_pct is null whenever use_flat_risk=1.
+            'start_of_day_equity' => $dayInfo['start_of_day_equity'],
+            'ladder_risk_pct' => $dayInfo['ladder_risk_pct'],
         ];
+    }
+
+    /**
+     * v3.22.10 — shared by computeSessionState() (the session's CURRENT state) and
+     * ladderInfoAsOf() (a past moment, for a limit order's own placement-time tier): the
+     * running equity total immediately BEFORE the first trade whose own trade_date equals
+     * $todayDate (not today's own first trade's post-fill balance — the basis is what the
+     * day STARTED with), or the full running total if nothing has closed on $todayDate
+     * (yet, for the current-state caller; or at all, for a historical one). $closedRows
+     * must already be ordered time_out ASC, id ASC, with whatever upper time bound the
+     * caller wants already applied by its own query.
+     */
+    private function startOfDayEquityAndTier(array $session, array $closedRows, string $todayDate): array {
+        $starting = (float) $session['starting_balance'];
+        $running = $starting;
+        $startOfDayEquity = $starting;
+        $sawToday = false;
+        foreach ($closedRows as $row) {
+            if (!$sawToday && $row['trade_date'] === $todayDate) { $startOfDayEquity = $running; $sawToday = true; }
+            $running += (float) $row['net_pnl'];
+        }
+        if (!$sawToday) $startOfDayEquity = $running;
+
+        $ladderRiskPct = null;
+        if (empty($session['use_flat_risk'])) {
+            $tiers = $session['risk_ladder_json'] !== null
+                ? (json_decode($session['risk_ladder_json'], true) ?: self::DEFAULT_RISK_LADDER)
+                : self::DEFAULT_RISK_LADDER;
+            $ladderRiskPct = backtestLadderTier($tiers, $startOfDayEquity, $starting);
+        }
+        return [
+            'start_of_day_equity' => round($startOfDayEquity, 2),
+            'ladder_risk_pct' => $ladderRiskPct !== null ? round($ladderRiskPct, 3) : null,
+        ];
+    }
+
+    /**
+     * v3.22.10 — "limit orders store the tier at placement and fill using the order's own
+     * risk_pct, as today." backtest_pending_orders has no column to literally persist a
+     * planned_risk_pct/balance_at_day_start at placement time (and this release adds
+     * none — see the briefing's own "no schema change expected"), so this re-derives
+     * exactly what those would have been AS OF the order's own already-stored
+     * placed_at_bar_time, from the session's immutable closed-trade history up to that
+     * point — the same "derive, don't store" rule this whole controller already lives by
+     * for equity itself. Deterministic and always reproducible: placed_at_bar_time never
+     * changes once an order exists, and a trade that closes AFTER it can't retroactively
+     * change what the tier was AT that earlier moment.
+     */
+    private function ladderInfoAsOf(array $session, int $asOfBarTimeMs): array {
+        $asOfDt = gmdate('Y-m-d H:i:s', (int) ($asOfBarTimeMs / 1000));
+        $todayDate = gmdate('Y-m-d', (int) ($asOfBarTimeMs / 1000));
+        $closed = $this->db->prepare(
+            "SELECT trade_date, net_pnl FROM trades WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
+               AND result IN ('Win','Loss','Break Even') AND time_out <= ? ORDER BY time_out ASC, id ASC"
+        );
+        $closed->execute([$session['id'], $asOfDt]);
+        return $this->startOfDayEquityAndTier($session, $closed->fetchAll(), $todayDate);
     }
 
     /** Daily trade-count cap — a soft BLOCK on new entries, not a session failure, per
@@ -1342,6 +1431,11 @@ class BacktestController {
             'floating_pnl' => $state['floating_pnl'],
             'peak_equity' => $state['peak_equity'],
             'today_change' => $state['today_change'],
+            // v3.22.10 — start_of_day_equity is always a real number (excludes floating
+            // P&L); ladder_risk_pct is null whenever use_flat_risk=1, so the ticket/header
+            // strip can tell "ladder off" apart from "ladder says 0%" by key value alone.
+            'start_of_day_equity' => $state['start_of_day_equity'],
+            'ladder_risk_pct' => $state['ladder_risk_pct'],
             'progress_to_target_pct' => $session['profit_target_pct'] > 0 ? round(($state['equity'] - $starting) / ($starting * (float) $session['profit_target_pct'] / 100) * 100, 1) : null,
             // Same today_change the daily-drawdown rule check itself uses (see
             // checkChallengeRules()) — the panel and the rule can never disagree.

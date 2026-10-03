@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.22.5 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.6 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -4722,6 +4722,116 @@ No PHP changed this release, no migration — `php -l`/`node --check` clean on e
 file, duplicate-name scan clean, and `drive.mjs`/`drive-v3223.mjs` both still pass
 unmodified.
 
+### v3.22.6: Price-Axis Manual-Scale Regression (Bug 1) + Overlapping Same-Bar Markers (Bug 2)
+
+**Renumbering:** the risk-ladder engine, previously slated as v3.22.6, is now **v3.22.7**.
+
+#### Bug 1 — a regression from v3.22.5 itself
+
+**Trader report, live:** dragging the right-hand price axis to expand or compress it did
+nothing — the axis snapped straight back to auto every time.
+
+**Root cause.** v3.22.5 Fix A's own nudge
+(`tvCandleSeries.priceScale().applyOptions({autoScale:true})`) ran **unconditionally, on
+every render pass** (`btRenderDrawings()`, `js/backtest-drawings.js`) — and a render pass
+fires on every mousemove and every redraw, not just when a trade/order actually changes.
+Dragging the axis turns `autoScale` off, exactly as Lightweight Charts intends; the very
+next render pass forced it straight back on, so a manual scale could never survive even
+one frame. The fix this release exists to close was real (a far TP needs to appear the
+instant a trade opens) — the mechanism it shipped with was simply too blunt.
+
+**Fix — a tracked signature, not an unconditional nudge.** `js/backtest.js::
+btTradeLevelsSignatureParts()` builds a sorted, order-independent signature string from
+every open position's and pending order's own id+entry+stop+take-profit, plus the open
+ticket's own entry/stop/take-profit (the ticket has no stable id of its own — deliberately
+excluded from the separate `ids` list used for the override rule below, since opening a
+*ticket* is not an "opening" in the sense that rule means). `btMaybeNudgeAutoScale()`
+(replacing the old unconditional call, still invoked once per render pass from
+`btRenderDrawings()`) only re-applies `autoScale:true` when this signature actually
+changed since the last pass — a trade opened/closed, an order placed/filled/cancelled, the
+ticket opened/edited, or a level dragged — never on a plain redraw.
+
+**Respecting a manual scale.** This codebase never sets `autoScale` to `false` anywhere —
+the only two things that can are the trader dragging the axis, or Lightweight Charts
+itself. Observing `false` is therefore always a real, user-driven manual scale, whether it
+just started or is still in effect from an earlier drag; `btMaybeNudgeAutoScale()` sets
+`btUserPriceScaleManual = true` the moment it sees this, and stops nudging from then on —
+**except** a brand-new open position or pending order (detected by an id appearing that
+wasn't in the previous signature) still forces one re-enable regardless, because "levels
+always in view on entry" is the v3.22.5 requirement and a manual scale shouldn't be able to
+hide a trade the moment it opens. Closing a trade, cancelling an order, or editing the
+ticket while manual does **not** force an override — there's no new level that needs
+forcing into view, so the trader's own zoom choice is left alone.
+
+**Two ways back to auto, both explicit.** Double-clicking the axis is Lightweight Charts'
+own native reset — confirmed the capture-phase listeners on `.tv-chart-wrap` don't swallow
+it (see the listener hardening below); `btMaybeNudgeAutoScale()` recognizes the resulting
+`autoScale:true` on the next pass and clears `btUserPriceScaleManual` to match reality. A
+new bottom-right **"A"** toggle (`#bt-autoscale-toggle`, `pages/backtest.php`) does the same
+thing on click (`js/backtest.js::btReenableAutoScale()` — the one function that flips the
+option AND clears the manual flag together, also used by the v3.22.5 edge-pinned-pill
+safety net, `btFitPriceAxisToLevel()`, so neither path can disagree about whether the scale
+is still "manual" afterward) and is highlighted (`js/backtest-drawings.js::
+btSyncAutoScaleToggleButton()`, every render pass) exactly while auto-scale is actually on.
+
+**Listener hardening (checked, and a latent gap closed).** `btEventInPlotArea(x, y)`
+(`js/backtest-drawings.js`) computes the plot area's own bounds from the chart's own APIs
+(`tvChart.priceScale('right').width()`, `tvChart.timeScale().height()`) and is checked
+first, before any hit-testing, in `btOnDrawMouseDown`/`btOnDrawDblClick`/
+`btOnDrawContextMenu` — an event over either axis strip is never ours, full stop. This was
+checked rather than assumed necessary, and it did find a real latent gap:
+`horizontal_line`/`horizontal_ray`'s own hit-test is **deliberately x-unbounded** (the
+whole point of a "ray"/"line" spanning the full chart width) — a mousedown or dblclick
+landing on that drawing's own Y, anywhere along `.tv-chart-wrap`'s width, including
+directly over the price axis, could have claimed the event and `stopPropagation()`'d it
+before Lightweight Charts ever saw the gesture. Closed by construction now, not just for
+the reported regression.
+
+#### Bug 2 — overlapping same-bar closed-trade markers
+
+**Symptom:** two trades closing on the same bar (the duplicate longs #132/#134, the same
+pair already seen in v3.22.3/v3.22.5's own test fixtures) drew their `-1.00R SL`-style exit
+pills at the identical spot — identical exit price, identical direction, so identical
+natural position — and the second one's text rendered directly over the first's, reading
+as a garbled "00R SL".
+
+**Fix.** `btDrawClosedTradeMarkers()` (`js/backtest-drawings.js`) now groups
+`btSession.closed_trades` by their exact `time_out` value before drawing anything —
+`settleTrade()` stores `time_out` as the **closing bar's own time** (CLAUDE.md v3.22.3 Fix
+E), so two trades genuinely closed on the same bar always share the identical value here,
+and two trades on different bars can never collide into the same group from this key
+alone. Within a group, exit pills are sorted by their natural vertical position and stacked
+top-to-bottom, only pushing a lower one further down when it would otherwise overlap the
+pill above it (never moves one upward, never touches a different bar's own group) — a
+single trade closing on a bar renders pixel-identical to before this fix. The gap is a flat
+4px, matching `btDrawPill()`'s own fixed single-line height (22px) exactly, so two stacked
+pills always land exactly 26px apart.
+
+#### Verification
+
+New harness driver `tools/ui-harness/drive-v3226.mjs` (30 assertions, all passing) against
+the existing stateful mock sessions (20 fresh, 21 pre-seeded with the real #132/#134
+shape) — `drive.mjs`, `drive-v3223.mjs` and `drive-v3225.mjs` are all untouched and still
+pass. Closes the one gap v3.22.5's own harness explicitly flagged as "left for a real
+browser click-through" — a **real Playwright mouse drag** on the price axis (computed from
+`tvChart.priceScale('right').width()`, not a guessed pixel count), held through 20 Next Bar
+steps interspersed with real mouse moves over the plot area (the exact "every render pass"
+case Bug 1's own regression depended on), both the double-click and "A"-button resets
+confirmed via `tvCandleSeries.priceScale().options().autoScale` directly (not inferred from
+a screenshot), a brand-new trade placed while manually scaled confirming the one-time
+override, and — for Bug 2 — a direct canvas pixel-position check via a `fillText()`
+prototype patch (capturing text **and** x/y, extending v3.22.5's own text-only version)
+confirming the two same-bar pills land exactly 26px apart, never overlapping, with fully
+formed (non-garbled) text. One test-writing lesson worth recording: a forced extra render
+pass immediately after `advanceBars()` can still land ahead of a leftover
+`btLoadCandleWindow()`-scheduled frame queued moments earlier — de-duplicating captured
+`(text,x,y)` tuples rather than asserting a raw count is what makes this assertion robust
+regardless of exactly how many render passes actually fired, while still catching a real
+overlap (which would produce distinct, *not* identical, duplicate positions).
+
+No PHP changed this release, no migration — `php -l`/`node --check` clean on every changed
+file, duplicate-name scan clean.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -5822,7 +5932,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.5
+Current Version: v3.22.6
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

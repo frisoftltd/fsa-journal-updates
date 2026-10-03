@@ -234,6 +234,13 @@
              the level immediately since the stabilizer's own stored range already widens
              to include every level registered here. -->
         <div id="bt-edge-pinned-buttons"></div>
+        <!-- v3.22.6 Bug 1 — manual "go back to auto-scale" control, bottom-right corner
+             of the chart. Highlighted while auto-scale is actually on
+             (js/backtest-drawings.js::btSyncAutoScaleToggleButton(), every render pass);
+             clicking it always re-enables auto and clears btUserPriceScaleManual
+             (js/backtest.js::btReenableAutoScale()) — the second of the two explicit
+             "ways back to auto," alongside double-clicking the axis itself. -->
+        <button id="bt-autoscale-toggle" class="bt-autoscale-toggle" onclick="btReenableAutoScale()" title="Re-enable auto price-scale">A</button>
       </div>
 
       <div class="bt-side-panel">

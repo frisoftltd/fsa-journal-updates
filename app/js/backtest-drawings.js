@@ -605,6 +605,25 @@ function btEventIsOnDrawingSurface(e) {
     return !e.target.closest('#bt-ticket, #bt-pos-toolbar');
 }
 
+/** v3.22.6 Bug 1 item 4 — our capture-phase listeners must never intercept an event over
+ *  the price-scale (right) or time-scale (bottom) axis strips, so a drag or double-click
+ *  there always reaches Lightweight Charts' own native handling (resize/zoom the axis,
+ *  double-click-to-reset) instead of being claimed by this file. Without this, a
+ *  horizontal_line/horizontal_ray drawing's own hit-test (deliberately X-UNBOUNDED, see
+ *  btHitTestOne() above — the whole point of a "ray"/"line" is that it spans the full
+ *  chart width) could claim a mousedown or dblclick landing on that drawing's own Y
+ *  ANYWHERE along the width of .tv-chart-wrap, including directly over the price axis —
+ *  silently swallowing the exact gesture this release's own fix depends on. x/y are in
+ *  the same overlay-canvas coordinate space every other hit-test in this file already
+ *  uses. */
+function btEventInPlotArea(x, y) {
+    if (typeof tvChart === 'undefined' || !tvChart || !btDrawOverlay) return true; // not ready -- don't block anything
+    let priceScaleW = 0, timeScaleH = 0;
+    try { priceScaleW = tvChart.priceScale('right').width(); } catch (e) { /* ignore */ }
+    try { timeScaleH = tvChart.timeScale().height(); } catch (e) { /* ignore */ }
+    return x < (btDrawOverlay.width - priceScaleW) && y < (btDrawOverlay.height - timeScaleH);
+}
+
 function btOnDrawMouseDown(e) {
     if (e.button !== 0) return; // left click only -- right click is contextmenu (settings)
     if (!btEventIsOnDrawingSurface(e)) return;
@@ -615,6 +634,12 @@ function btOnDrawMouseDown(e) {
     const rect = btDrawOverlay.getBoundingClientRect();
     btDragRect = rect;
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
+
+    // v3.22.6 Bug 1 item 4 — a click on the price/time axis strip is never ours, full
+    // stop, before even checking the ticket's own lines or an active tool — see
+    // btEventInPlotArea()'s own doc comment for the horizontal_line/ray hit-test gap this
+    // closes.
+    if (!btEventInPlotArea(x, y)) return;
 
     // v3.22.1 — the order ticket's own lines take priority over everything else while
     // open: the trader is actively configuring an order, not drawing or panning.
@@ -836,6 +861,7 @@ function btEndDrag() {
 function btOnDrawDblClick(e) {
     if (!btEventIsOnDrawingSurface(e)) return;
     const { x, y } = btMousePos(e);
+    if (!btEventInPlotArea(x, y)) return; // v3.22.6 Bug 1 item 4 -- let the axis's own double-click-to-reset through
     const hit = btHitTest(x, y);
     if (hit) {
         e.stopPropagation(); // don't also let chart.js's own dblclick-to-fitContent() fire
@@ -847,6 +873,7 @@ function btOnDrawDblClick(e) {
 function btOnDrawContextMenu(e) {
     if (!btEventIsOnDrawingSurface(e)) return;
     const { x, y } = btMousePos(e);
+    if (!btEventInPlotArea(x, y)) return; // v3.22.6 Bug 1 item 4 -- axis area is never ours
     const hit = btHitTest(x, y);
     if (hit) {
         e.preventDefault();
@@ -1367,28 +1394,63 @@ function btDrawLiveTrades(ctx) {
  *  date happens to be, nowhere near the actual close. */
 function btDrawClosedTradeMarkers(ctx) {
     const reasonAbbrev = { 'Stop Loss': 'SL', 'Take Profit': 'TP', 'Manual Closing': 'Manual' };
+    const tri = (x, y, up, color) => {
+        if (x === null || y === null) return;
+        const s = 5;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        if (up) { ctx.moveTo(x, y - s); ctx.lineTo(x - s, y + s); ctx.lineTo(x + s, y + s); }
+        else { ctx.moveTo(x, y + s); ctx.lineTo(x - s, y - s); ctx.lineTo(x + s, y - s); }
+        ctx.closePath(); ctx.fill();
+    };
+
+    // v3.22.6 Bug 2 — two trades closing on the SAME bar (confirmed on live: the
+    // duplicate longs #132/#134) drew their exit pills at the same spot, overlapping so
+    // badly the second one's text rendered on top of the first's, reading "00R SL"
+    // instead of "-1.00R SL". Grouped by the exact `time_out` value, not a pixel-rounding
+    // guess — settleTrade() stores time_out as the CLOSING BAR'S OWN time (CLAUDE.md
+    // v3.22.3 Fix E), so two trades genuinely closed on the same bar always share the
+    // identical value here, and two trades on different bars can never collide into the
+    // same group from this key alone.
+    const byBar = new Map();
     (btSession.closed_trades || []).forEach(t => {
-        const isLong = t.direction === 'Long';
-        const xIn = btTimeToX(toDisplaySeconds(t.time_in, chartState.timezone));
-        const xOut = btTimeToX(toDisplaySeconds(t.time_out, chartState.timezone));
-        const yIn = btPriceToY(t.entry_price);
-        const yOut = btPriceToY(t.exit_price);
-        const tri = (x, y, up, color) => {
-            if (x === null || y === null) return;
-            const s = 5;
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            if (up) { ctx.moveTo(x, y - s); ctx.lineTo(x - s, y + s); ctx.lineTo(x + s, y + s); }
-            else { ctx.moveTo(x, y + s); ctx.lineTo(x - s, y - s); ctx.lineTo(x + s, y - s); }
-            ctx.closePath(); ctx.fill();
-        };
-        tri(xIn, yIn, isLong, '#6b7280');
-        tri(xOut, yOut, !isLong, '#6b7280');
-        if (xOut !== null && yOut !== null) {
+        const key = String(t.time_out);
+        if (!byBar.has(key)) byBar.set(key, []);
+        byBar.get(key).push(t);
+    });
+
+    const PILL_GAP = 4, PILL_H = 22; // PILL_H matches btDrawPill()'s own single-line height (14 + 5*2 - 2)
+    byBar.forEach(group => {
+        // Entry triangles don't suffer the same overlap (each trade's own entry bar is
+        // ordinarily distinct) — drawn unconditionally, same as before this fix.
+        group.forEach(t => {
+            const isLong = t.direction === 'Long';
+            tri(btTimeToX(toDisplaySeconds(t.time_in, chartState.timezone)), btPriceToY(t.entry_price), isLong, '#6b7280');
+            tri(btTimeToX(toDisplaySeconds(t.time_out, chartState.timezone)), btPriceToY(t.exit_price), !isLong, '#6b7280');
+        });
+
+        // Stack this bar's own exit pills top-to-bottom, starting from each one's natural
+        // position — a single trade on a bar renders pixel-identical to before this fix —
+        // only pushing a LOWER-sorted one further down when it would otherwise overlap
+        // the pill above it. Never moves a pill upward, never touches another bar's group.
+        const pills = group.map(t => {
+            const isLong = t.direction === 'Long';
+            const x = btTimeToX(toDisplaySeconds(t.time_out, chartState.timezone));
+            const yOut = btPriceToY(t.exit_price);
+            if (x === null || yOut === null) return null;
             const rTxt = t.r_multiple !== null ? `${t.r_multiple >= 0 ? '+' : ''}${t.r_multiple.toFixed(2)}R` : '—';
             const label = `${rTxt} ${reasonAbbrev[t.exit_reason] || t.exit_reason || ''}`.trim();
-            btDrawPill(ctx, xOut, yOut + (isLong ? 18 : -18), label, t.net_pnl >= 0 ? '#26a69a' : '#ef5350');
-        }
+            return { x, cy: yOut + (isLong ? 18 : -18), label, color: t.net_pnl >= 0 ? '#26a69a' : '#ef5350' };
+        }).filter(Boolean).sort((a, b) => a.cy - b.cy);
+
+        let prevBottom = null;
+        pills.forEach(p => {
+            if (prevBottom !== null && p.cy - PILL_H / 2 < prevBottom + PILL_GAP) {
+                p.cy = prevBottom + PILL_GAP + PILL_H / 2;
+            }
+            prevBottom = p.cy + PILL_H / 2;
+            btDrawPill(ctx, p.x, p.cy, p.label, p.color);
+        });
     });
 }
 
@@ -1447,9 +1509,21 @@ function btSyncEdgePinnedButtons() {
  *  of them, so simply re-enabling auto-scale is sufficient to bring `price` back into
  *  view; no need to track which specific level was clicked beyond that. */
 function btFitPriceAxisToLevel(price) {
-    if (!tvCandleSeries) return;
-    try { tvCandleSeries.priceScale().applyOptions({ autoScale: true }); } catch (e) { /* ignore */ }
-    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
+    // v3.22.6 Bug 1 — delegates to the one shared "go back to auto" action
+    // (js/backtest.js::btReenableAutoScale()) so this click and the bottom-right "A"
+    // button can never disagree about whether the scale is still "manual" afterward.
+    if (typeof btReenableAutoScale === 'function') btReenableAutoScale();
+}
+
+/** v3.22.6 Bug 1 — the bottom-right "A" toggle (#bt-autoscale-toggle, pages/backtest.php)
+ *  is a permanent, always-present control (unlike the pending-cancel/edge-pinned buttons,
+ *  which are rebuilt from scratch every render) — this just syncs its highlighted state
+ *  to whether the chart is currently on auto, called once per render pass alongside the
+ *  other button-sync calls above. */
+function btSyncAutoScaleToggleButton() {
+    const btn = document.getElementById('bt-autoscale-toggle');
+    if (!btn) return;
+    btn.classList.toggle('active', typeof btUserPriceScaleManual !== 'undefined' ? !btUserPriceScaleManual : true);
 }
 
 // v3.22.1 Part B1 — the floating selection toolbar's own state. btToolbarOffset is a
@@ -1696,19 +1770,21 @@ function btRenderDrawings() {
     // autoscaleInfoProvider (btInstallPriceRangeStabilizer(), js/backtest.js) when it
     // decides the price scale needs recomputing — a data change, a visible-range change,
     // or a resize. Placing a trade, opening a ticket, or an order filling via advance()
-    // changes none of those; without this nudge the stored range stayed locked at
-    // whatever it was computed from BEFORE the trade existed, and a level union'd in by
-    // the provider was never actually picked up until some unrelated later redraw
-    // happened to trigger one — confirmed as a real gap, not just theoretical, by this
-    // release's own harness (a far TP stayed off-screen immediately after a fill until
-    // this nudge was added). Re-applying `autoScale: true` on every render pass here
-    // (this function already runs on every state-changing event this whole feature cares
-    // about) forces the library to invalidate and recompute every time, which is exactly
-    // what makes a newly-opened trade's levels appear immediately rather than on the
-    // next unrelated chart interaction.
-    if (typeof tvCandleSeries !== 'undefined' && tvCandleSeries) {
-        try { tvCandleSeries.priceScale().applyOptions({ autoScale: true }); } catch (e) { /* chart not ready yet */ }
-    }
+    // changes none of those; without a nudge the stored range stayed locked at whatever
+    // it was computed from BEFORE the trade existed, and a level union'd in by the
+    // provider was never actually picked up until some unrelated later redraw happened to
+    // trigger one — confirmed as a real gap, not just theoretical, by that release's own
+    // harness (a far TP stayed off-screen immediately after a fill until a nudge was
+    // added).
+    //
+    // v3.22.6 Bug 1 — that nudge originally ran UNCONDITIONALLY, every render pass (this
+    // function runs on every mousemove/redraw, not just on a trade/order event), which
+    // forced autoScale back on the very next frame after the trader dragged the price
+    // axis themselves — a manual scale could never hold for even one frame. Replaced with
+    // btMaybeNudgeAutoScale() (js/backtest.js), which only re-applies autoScale when the
+    // set of trade levels actually changed, and otherwise respects a manual scale except
+    // for a brand-new position/order (see that function's own doc comment).
+    if (typeof btMaybeNudgeAutoScale === 'function') btMaybeNudgeAutoScale();
     // v3.22.5 Fix A safety net — rebuilt fresh every render pass by btDrawLevelPill(),
     // called from btDrawTicketLines()/btDrawLiveTrades() below.
     btEdgePinnedPills = [];
@@ -1800,6 +1876,7 @@ function btRenderDrawings() {
     btPositionSelectionToolbar();
     btSyncPendingCancelButtons();
     btSyncEdgePinnedButtons();
+    btSyncAutoScaleToggleButton();
 }
 function btDrawOne(ctx, d, selected, isPreview, override) {
     ctx.save();

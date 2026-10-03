@@ -519,6 +519,15 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
    already the visible element here. */
 .bt-edge-pinned-btn{position:absolute;z-index:6;width:160px;height:20px;background:transparent;border:none;cursor:pointer;padding:0}
 
+/* v3.22.6 Bug 1 — the bottom-right "A" (auto-scale) toggle. Highlighted the same blue as
+   every other active toggle in this file (.bt-util-btn.active) while auto-scale is on;
+   muted once the trader has manually dragged the price axis
+   (js/backtest-drawings.js::btSyncAutoScaleToggleButton() sets/clears .active every
+   render pass). */
+.bt-autoscale-toggle{position:absolute;z-index:6;right:6px;bottom:6px;width:22px;height:20px;display:flex;align-items:center;justify-content:center;background:#181c27;border:1px solid #2a2e39;border-radius:4px;color:#8b93a7;font-size:11px;font-weight:600;font-family:var(--font-body);cursor:pointer;padding:0}
+.bt-autoscale-toggle:hover{background:#1c2030;color:#d1d4dc}
+.bt-autoscale-toggle.active{background:rgba(41,98,255,0.18);color:#5b8dff;border-color:rgba(41,98,255,0.35)}
+
 /* The ticket itself: docked at the LEFT of the chart, not a centred modal, so the chart
    (and the lines/box it's editing) stay visible while it's open — the whole point of
    docking it per the briefing. Sits above the drawing overlay (z-index:4) and the

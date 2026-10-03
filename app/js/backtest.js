@@ -398,6 +398,7 @@ async function openBacktestSession(id) {
     // starts from a clean natural fit rather than inheriting an unrelated one.
     btDisplayTimeframe = null;
     btResetPriceRangeStabilizer();
+    btResetAutoScaleTracking(); // v3.22.6 Bug 1 -- a manual scale from a prior session is stale here
     showBacktestScreen('window');
 
     if (typeof initTvChart === 'function') initTvChart();
@@ -519,6 +520,24 @@ function btSetVisibleRange() {
  */
 let btPriceRangeState = null;
 
+/** v3.22.6 Bug 1 — true once the trader has manually dragged the price axis. Detected,
+ *  never set directly by a drag handler (see btMaybeNudgeAutoScale()'s own doc comment
+ *  for why observing the chart's own autoScale option going false is sufficient on its
+ *  own). While true, the per-render nudge stops forcing autoScale back on, except for a
+ *  brand-new open position/pending order ("levels always in view on entry" is the
+ *  v3.22.5 requirement, and it still applies over a manual scale). Cleared by
+ *  btReenableAutoScale() -- the "A" button, an edge-pinned-pill click, or Lightweight
+ *  Charts' own native double-click-to-reset being recognized on the next render -- and by
+ *  btResetAutoScaleTracking() on a fresh session open or display-timeframe switch. */
+let btUserPriceScaleManual = false;
+let btLastTradeLevelsSignature = null;
+let btLastTradeLevelIds = new Set();
+function btResetAutoScaleTracking() {
+    btUserPriceScaleManual = false;
+    btLastTradeLevelsSignature = null;
+    btLastTradeLevelIds = new Set();
+}
+
 /** v3.22.5 Fix A — every level the autoscale stabilizer below must union into its
  *  stored range, confirmed on live: a TP set well above the recently-loaded candles'
  *  own range scrolled off-screen the instant a trade opened, since the stabilizer only
@@ -553,6 +572,89 @@ function btCollectTradeLevels() {
         if (btTicket.takeProfit !== null && btTicket.takeProfit !== undefined) add(btTicket.takeProfit);
     }
     return levels;
+}
+
+/** v3.22.6 Bug 1 — a stable signature of every trade-level-bearing entity, used by
+ *  btMaybeNudgeAutoScale() to decide whether this render pass is a "plain redraw" (never
+ *  touch the scale) or a real change (a trade/order opened, closed, filled or cancelled,
+ *  the ticket opened/closed/edited, or a level dragged). `ids` is deliberately separate
+ *  from the full signature -- it carries only REAL trade/order ids (never the ticket,
+ *  which has no stable id of its own and isn't an "opening" for the override rule below)
+ *  so the caller can tell "something changed" apart from "a brand-new position/order
+ *  specifically just appeared." Sorted so insertion order never affects the result. */
+function btTradeLevelsSignatureParts() {
+    const ids = [];
+    const parts = [];
+    if (typeof btSession !== 'undefined' && btSession) {
+        (btSession.open_positions || []).forEach(p => {
+            ids.push('p' + p.id);
+            parts.push(`p${p.id}:${p.entry_price}:${p.stop_loss}:${p.take_profit}`);
+        });
+        (btSession.pending_orders || []).forEach(o => {
+            ids.push('o' + o.id);
+            parts.push(`o${o.id}:${o.limit_price}:${o.stop_loss}:${o.take_profit}`);
+        });
+    }
+    if (typeof btTicket !== 'undefined' && btTicket) {
+        parts.push(`t:${btTicketEffectiveEntry()}:${btTicket.stopLoss}:${btTicket.takeProfit}`);
+    }
+    parts.sort();
+    return { signature: parts.join('|'), ids };
+}
+
+/** v3.22.6 Bug 1 — replaces v3.22.5 Fix A's own unconditional per-render nudge
+ *  (tvCandleSeries.priceScale().applyOptions({autoScale:true}) on EVERY render pass,
+ *  which runs on every mousemove/redraw). That nudge forced autoScale back on the very
+ *  next frame after the trader dragged the price axis themselves -- Lightweight Charts
+ *  turns autoScale off the instant that drag starts, exactly as it's meant to, so a
+ *  manual scale could never hold even for one frame. Called once per render pass from
+ *  btRenderDrawings() (js/backtest-drawings.js) instead. */
+function btMaybeNudgeAutoScale() {
+    if (typeof tvCandleSeries === 'undefined' || !tvCandleSeries) return;
+    let currentAuto;
+    try { currentAuto = tvCandleSeries.priceScale().options().autoScale; } catch (e) { return; }
+
+    // Nothing in this codebase ever sets autoScale to FALSE -- the only two things that
+    // can are the trader dragging the axis, or Lightweight Charts itself. Observing false
+    // here is therefore always a real, user-driven manual scale, whether it just started
+    // or is still in effect from an earlier drag this session.
+    if (currentAuto === false) {
+        btUserPriceScaleManual = true;
+    } else if (currentAuto === true && btUserPriceScaleManual) {
+        // Already back to true without going through btReenableAutoScale() below --
+        // Lightweight Charts' own native double-click-to-reset on the axis. Recognize it
+        // so the manual flag (and the "A" button's own highlight) both reflect reality.
+        btUserPriceScaleManual = false;
+    }
+
+    const { signature, ids } = btTradeLevelsSignatureParts();
+    const isNewLevel = ids.some(id => !btLastTradeLevelIds.has(id));
+    const changed = signature !== btLastTradeLevelsSignature;
+    btLastTradeLevelsSignature = signature;
+    btLastTradeLevelIds = new Set(ids);
+
+    if (!changed) return; // a plain redraw -- never touch the scale, manual or not
+
+    // A brand-new open position or pending order always gets its levels into view, even
+    // over a manual scale ("levels always in view on entry" is the v3.22.5 requirement).
+    // Every other kind of change -- the ticket opening/closing/being edited, an existing
+    // level's own value changing, a position/order being removed -- respects a manual
+    // scale instead of fighting it.
+    if (isNewLevel || !btUserPriceScaleManual) {
+        btReenableAutoScale();
+    }
+}
+
+/** Explicit "go back to auto-scale" action. The bottom-right "A" button, the Fix A
+ *  edge-pinned-pill safety net (js/backtest-drawings.js::btFitPriceAxisToLevel()), and
+ *  btMaybeNudgeAutoScale() above all funnel through here -- the one place that flips the
+ *  chart's own autoScale option AND clears the tracked manual flag together, so the two
+ *  can never go out of sync with each other. */
+function btReenableAutoScale() {
+    if (typeof tvCandleSeries === 'undefined' || !tvCandleSeries) return;
+    try { tvCandleSeries.priceScale().applyOptions({ autoScale: true }); } catch (e) { /* chart not ready yet */ }
+    btUserPriceScaleManual = false;
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
 }
 
 function btInstallPriceRangeStabilizer() {
@@ -602,6 +704,7 @@ async function setBtDisplayTimeframe(tf) {
     setActiveBtDisplayTfButton();
     setBtStepLabel();
     btResetPriceRangeStabilizer();
+    btResetAutoScaleTracking(); // v3.22.6 Bug 1 -- a new display resolution is a fresh view too
     await btLoadCandleWindow();
     if (typeof resizeTvChart === 'function') resizeTvChart();
 }

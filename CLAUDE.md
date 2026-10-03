@@ -26,7 +26,7 @@ A professional trading journal SaaS built specifically for **prop firm traders**
 | Domain (rebranding) | fundedcontrol.com |
 | Blog | https://blog.fundedcontrol.com/ |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS described in §1A below. Replaces the old Namecheap-hosted `theittav_journal` as of the 2026-09-24 migration. **`theittav_fundedcontrol` was an abandoned copy on the old host** — this file briefly said it was correct (v3.7.0 release) based on an audit that had checked the wrong database; corrected 2026-09-13 while scoping v3.8.0. See §11 Bug 2 (retracted). Both `theittav_journal` and `theittav_fundedcontrol` are old-host names and no longer apply at all post-migration. |
-| Current Version | v3.22.4 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
+| Current Version | v3.22.5 (repo/tag version — NOT confirmed to match what `updater.php` reports as `local_version` on the live server; see the v3.21.9 cumulative-manifest section above §3A) |
 
 ### Tech Stack
 
@@ -4489,6 +4489,239 @@ engine-level fill-price and same-bar-touch rules are PHP self-test coverage, not
 coverage — there's no UI surface for "fill price computation" in isolation to drive
 through a page.
 
+### v3.22.5: In-Trade View and Position-Tool Handling — Six Fixes From a Real Session
+
+**Renumbering:** the risk-ladder engine, previously slated as v3.22.5, is now **v3.22.6**.
+Session 6, 2 Oct 2026 — the trader's first real session actually placing and holding
+trades since v3.22.4 — surfaced six separate problems at once, all fixed in this release.
+
+#### Fix A — the price-range stabilizer never looked at trade levels
+
+**Symptom:** a Long's TP, set well above the recently-loaded candles' own range, had no
+line at all once the trade was open — "disappears once in a trade." Confirmed two
+separate, compounding causes, not one:
+
+1. **`btInstallPriceRangeStabilizer()`'s stored range (v3.20.10) only ever unioned in the
+   loaded CANDLES' own prices** — never the open positions/pending orders/open ticket
+   actually drawn on the same chart. A TP set far outside the candle window's own natural
+   range scrolled off-screen the instant the trade opened, regardless of how far the
+   trader had or hadn't manually zoomed.
+2. **An open position's own Take Profit never had a full-width LINE drawn at all** —
+   confirmed by reading `btDrawLiveTrades()` against its own pending-orders block just
+   above, which already draws all three lines (Limit/Stop/TP); the open-positions block
+   only ever called `btPriceToY()` for TP (box-fill math) and a pill, never
+   `btDrawFullWidthLine()`. This is the direct, proximate cause of "TP line disappears" —
+   even on-screen, no line was ever there once a position actually opened.
+
+**Fix, three parts:**
+- **`btCollectTradeLevels()`** (new, `js/backtest.js`) returns every open position's and
+  pending order's own entry/stop/take-profit, plus the open ticket's own (via
+  `btTicketEffectiveEntry()`), as a flat array. `btInstallPriceRangeStabilizer()`'s
+  provider now unions these into the stored range — each with its own ~3% padding,
+  applied only when a level actually falls outside the candle-derived range — alongside
+  the existing 8% candle padding, unchanged for the candle-only case. Still strictly
+  widen-only: a level (like the candle range before it) can only ever push
+  `btPriceRangeState`'s min/max further out, never pull it back in.
+- **A real, independent bug found while testing this fix**, not specified by the
+  briefing: Lightweight Charts only re-invokes a series' own `autoscaleInfoProvider` when
+  it decides the price scale needs recomputing — a data change, a visible-range change,
+  or a resize. Placing a trade or opening a ticket changes none of those, so the stored
+  range stayed locked at whatever it was computed from *before* the trade existed until
+  some unrelated later redraw happened to trigger one. `btRenderDrawings()`
+  (`js/backtest-drawings.js`) now calls `tvCandleSeries.priceScale().applyOptions({
+  autoScale: true })` on every render pass — forcing a recompute every time this file's
+  own redraw already runs, which is what makes a newly-opened trade's levels appear
+  immediately instead of on the next unrelated chart interaction. Confirmed empirically
+  via this release's own harness: without this nudge, a far TP stayed off-screen
+  immediately after a fill.
+- **The missing TP line for open positions** is fixed by routing it through
+  `btDrawFullWidthLine()` like Entry/Stop already do, matching the pending-orders block.
+
+**Safety net — "if a level still ends up off-screen (user zoomed tight), pin its pill to
+the top/bottom edge."** `btDrawLevelPill()` (new) draws a level's normal pill when its own
+y falls inside `[20, h-20]`; outside that margin, it instead pins a pill reading
+`{▲/▼} {name} {price} {amount}` (e.g. `▲ Take Profit 7790.00 +$286.19`, per the briefing's
+own example — the normal on-screen Stop/TP pills never show their own price, only the
+dollar amount, so the pinned version adds it back since the line itself can't be seen to
+read it off) to the clamped edge, and registers a click target in `btEdgePinnedPills`.
+`btSyncEdgePinnedButtons()` turns these into real, transparent DOM buttons positioned over
+each pinned pill (`#bt-edge-pinned-buttons`, `pages/backtest.php`) — same "real DOM over
+hand-rolled canvas hit-testing" convention `btSyncPendingCancelButtons()` already
+established. Clicking one calls `btFitPriceAxisToLevel()`, which simply re-enables
+`autoScale: true` — sufficient on its own, since the stabilizer's stored range already
+includes every level registered here; the only reason one is ever off-screen is a
+user-driven manual zoom/drag of the price axis away from auto-scale.
+
+**A second, real bug found building this fix's own harness coverage, not specified by the
+briefing:** `btOpenTicket()`'s own `stopLoss: init.stopLoss || 0` leaves a freshly-opened
+ticket's stop at the placeholder `0` until the trader types a real one. `btCollectTradeLevels()`
+unconditionally including `btTicket.stopLoss` meant simply *opening* a ticket — before
+ever typing a stop — unioned in a level of `0`, permanently widening the stored range to
+include it (widen-only, so this could never un-happen for the rest of the session) the
+moment any render fired in between. Fixed by skipping `btTicket.stopLoss` when it's falsy
+(`0`), the same "not yet set" treatment `takeProfit`'s own `!== null` check already uses.
+
+**Candle levels still call `btResetPriceRangeStabilizer()`** on a fresh session open/
+resume and a display-timeframe switch, unchanged from v3.20.10; this release adds two
+more call sites, both "a trade closed" — `btAdvance()`'s own stop-loss/take-profit event
+branch, and `closeBtPosition()` — per the briefing's own instruction, so a closed trade's
+levels don't keep padding the range forever once they're no longer relevant.
+
+#### Fix B — no position box while in a trade
+
+Root cause: the box-fill rectangle (`btDrawLiveTrades()`) requires `yEntry`/`yStop` to be
+non-null, which Fix A's range extension now guarantees for a level still within the
+stabilizer's union — the live screenshot showing no box at all was the same off-screen
+symptom as Fix A's TP line, not a second, separate bug. Verified directly rather than by
+screenshot alone, per the briefing's own explicit instruction: a new harness assertion
+(`drive-v3225.mjs`) reads the fill-bar-to-cursor box's own pixel data off
+`#bt-draw-overlay` via `getImageData()` at a point between the entry/stop lines, asserting
+the real drawn RGBA (`rgba(239,83,80,0.18)`) is present — then advances a bar and confirms
+the box's own on-screen width (not `xNow` alone, which the replay window's own fixed-width
+design keeps pinned at a constant screen position every step — it's the fill bar's `xFill`
+that moves left as the window shifts underneath it) grew and the pixel is still present.
+
+#### Fix C — Open P&L pill could show a positive/zero-signed R against a negative dollar amount
+
+Confirmed on live: `-$3.42 (+0.00R)` — a negative dollar figure next to a positive-looking
+R. Root cause: the R formula was gross, price-only (`(mark-entry)/(entry-SL)`), which can
+disagree in *sign* with the net (fee-inclusive) dollar P&L specifically near breakeven,
+once fees eat a small favourable gross price move into a net loss. Confirmed not a
+rounding artifact (`(-0.003).toFixed(2)` is `"-0.00"`, not `"0.00"` — a negative sign
+survives `toFixed` all the way down). Fixed by deriving R from the same net figures
+(`p.floating_pnl / riskUsd`) the Stop Loss pill in the same function already computes —
+sign-consistent with the displayed dollar figure by construction, not just for this one
+reported case. The sign prefix is now three explicit branches (positive/negative/exactly
+zero), replacing the old `>= 0 ? '+' : ''` that silently treated a positive-or-zero gross R
+the same way. Verified in this release's own harness against a scenario engineered from
+the deterministic mock price curve (a small *positive* gross move whose entry fee still
+makes the net loss) — the rendered pill text is asserted to never contain `+0.00R` and to
+show the minus sign whenever `floating_pnl < 0`.
+
+#### Fix D — the live challenge's STOP banner showed on the backtest screen
+
+Confirmed on live: the topbar's "+ Trade" button showed `STOP — weekly trade limit reached
+(4/4)` while a backtest session was open — the *live* challenge's own gate
+(`refreshNewTradeGate()`, `js/trades.js`), which has nothing to do with the backtest
+session's own limits and just confused the trader. `window._riskStopReason` itself is left
+accurate (still the real guard `openTradeModal()`/`openChecklist()` check for an actual
+live-challenge save) — only the always-visible topbar button's own label/disabled styling
+is suppressed while `body.backtest-active` is set; `showBacktestScreen()` re-runs
+`refreshNewTradeGate()` on every screen transition so this doesn't wait for an unrelated
+refresh to catch up. In its place, the header strip (`#bt-strip-trades`,
+`renderBtHeaderStrip()`) gains a fourth figure — this session's own
+`trades_today`/`max_trades_per_day` from `sessionSummary()` — the only trade-limit figure
+shown on the backtest screen. Every other page is completely unaffected; verified in the
+harness by patching `get_risk_status` to report `stopped: true` and checking the topbar
+button's text both on the backtest screen (no STOP) and after leaving it (STOP, as before).
+
+#### Fix E — position-tool drag was jumpy, and dragged with magnet off should follow the cursor exactly
+
+Two separate performance/behaviour problems in the same drag pipeline, both confirmed by
+reading the code before fixing anything:
+
+1. `btMousePos()` called `getBoundingClientRect()` on every single mousemove event — a
+   real layout read inside the hottest loop in this file.
+2. `btPixelToPoint()` called `btSnapTimeToCandle()` **unconditionally, regardless of the
+   magnet toggle** (unlike `btSnapPrice()`, which already checked it), and `btSnapPrice()`
+   itself does an O(n) linear scan over every loaded candle — both running on *every*
+   native mousemove event, not once per rendered frame. Magnet was on in the trader's own
+   screenshots; unconditional time-snapping plus magnet-on price-snapping's own per-event
+   candle scan is the likely cause of the reported jumpiness.
+
+**Fix, per the briefing's own four requirements:**
+- **Render from `requestAnimationFrame`, one redraw per frame.** `btOnDrawMouseMove()` no
+  longer computes anything — it only records the latest `{clientX, clientY}` and schedules
+  (at most) one `requestAnimationFrame` callback (`btScheduleMoveFrame()`). However many
+  native mousemove events fire before the next frame, `btProcessPendingMove()` reads only
+  the latest one, coalescing all of them into exactly one state update and one render —
+  distinct from the pre-existing `btScheduleRedraw()`/`btDrawRaf`, which only ever
+  throttled the *render*, not the *state computation* feeding it.
+- **No layout reads beyond one cached read at drag start.** `btDragRect` is captured once,
+  in `btOnDrawMouseDown()`, at the exact moment every gesture starts (regardless of
+  whether it becomes a drag), and `btMousePos()` prefers it over a fresh query. Cleared by
+  `btEndDrag()` at the end of every gesture.
+- **Continuous while dragging; snap only on release, only when magnet is on.**
+  `btPixelToPointContinuous()` (new) skips both `btSnapTimeToCandle()` and
+  `btSnapPrice()` entirely — used by the move loop and, for a position tool specifically,
+  by the creation-drag preview and finalize too. At release
+  (`btOnDrawMouseUp()`), a position tool's own point is `btPixelToPoint()` (full snap)
+  when magnet is on, or stays continuous when it's off. Every *other* tool (fib/
+  trend-line/horizontal) is untouched — still always-snapped during its own move loop and
+  at release, exactly as before; this release was not asked to change their feel.
+- **Target: no long task over 16ms dragging across 50 bars.** Verified directly via the
+  `PerformanceObserver` Long Tasks API in this release's own harness — a real,
+  60-discrete-mousemove-event drag across 50 bars' worth of pixels records zero entries
+  over 16ms.
+
+**A real bug caught building this fix, not shipped:** `btOnDrawMouseDown()`'s own
+cursor-mode handler computed `dragState.startPoint` via the old, always-snapped
+`btPixelToPoint()` even for a position tool, while the move loop now computes `newPoint`
+via the continuous variant — mixing a *snapped* baseline with *continuous* in-flight
+points injected a phantom offset equal to whatever the snap moved the baseline by, visible
+even on a drag that never actually changed the cursor's own price at all. Caught by the
+harness's own exact-value comparison (a mid-drag entry that should have equalled the raw
+continuous conversion came back wildly different), not by inspection. Fixed by using
+`btPixelToPointContinuous()` for `startPoint` too, whenever the hit drawing is a position
+tool — matching the move loop's own choice exactly.
+
+#### Fix F — position tool had no way to resize its own width
+
+New: two edge handles, vertical centre of the box's own left/right edges, shown only while
+selected (so an edge isn't accidentally grabbed instead of a different drawing, or the
+box's own "move" zone, while just clicking around). Hit-tested in `btHitTestOne()` *before*
+the `x < left || x > right` bounds check — the handle itself sits exactly on the edge,
+which that check would otherwise exclude. Dragging the left handle moves only
+`points[0].time`; the right handle, only `points[1].time` — `points[0]` is always the
+box's own earlier/left time by construction (`btFinalizeNewDrawing()` never creates the
+reverse), so there's no need to re-derive which point is visually left. Minimum width 3
+bars, enforced by clamping the dragged time against the *other*, fixed edge's own time
+(`btStepSec() * 3`); prices are never touched by either handle. Cursor becomes
+`ew-resize` on hover (`btUpdateHoverCursor()`, new — a plain hit-test against the
+currently-selected drawing only, run on a mousemove when no drag is in progress, not part
+of Fix E's own hot-path concerns). New drawings keep the existing default width
+(`BT_POSITION_TOOL_SPAN_BARS`, 20 bars) unless the trader drags horizontally more than 3
+bars while first drawing the box, in which case that dragged width is used instead
+(`btPositionCreationSpanMs()`, new, shared by the creation finalize step and its own live
+preview so the preview can never show a width different from what mouseup actually saves)
+— the floor at 3 bars means the near-zero-width-box defect `BT_POSITION_TOOL_SPAN_BARS`
+was originally introduced to prevent (v3.21.2) is still exactly as impossible as before.
+Width is saved in `points` exactly as it already was — no schema change.
+
+#### `tools/ui-harness/` — new driver, `drive-v3225.mjs`
+
+A new driver file, not an extension of `drive-v3223.mjs` (left completely untouched, same
+as `drive.mjs`/session 6 before it) — reuses the same stateful mock sessions
+(20/21/22, `stubs/api.php`) end to end on session 20 so one open position carries through
+Fixes A/B/C/E/F without re-placing a trade for each. Runs the briefing's own 7-item verify
+checklist, with a before/after screenshot for every fix. Notable techniques, reusable for
+future canvas-heavy releases: patching `CanvasRenderingContext2D.prototype.fillText` once,
+globally, to capture every pill's drawn text (there is no DOM text node for a canvas-drawn
+string to query a selector against) — used to assert the R-multiple's sign (Fix C) and the
+pinned pill's exact `arrow + name + price + amount` format (Fix A); reading `getImageData()`
+directly off `#bt-draw-overlay` to assert a fill colour is actually present, not just
+visible in a screenshot (Fix B, the briefing's own explicit "a screenshot alone isn't
+enough" instruction); the `PerformanceObserver` Long Tasks API for Fix E's own performance
+target. A precise *numeric* comparison (Fix E's continuous-vs-snapped check) is driven
+directly through `btApplyDrag()`/`btPixelToPointContinuous()` rather than a second
+pixel-perfect mouse drag — a real synthetic drag's own few-millisecond round trip between
+computing a target pixel and the event actually landing is enough jitter to occasionally
+miss a handle by a pixel, which would test mouse-event timing, not Fix E's own logic; same
+"drive the mechanism directly" choice already made for Fix A's own
+`btDrawLevelPill()`/`btFitPriceAxisToLevel()`, and the one `drive-v3223.mjs` already makes
+for the order ticket's own lines via `btTicketSetField()`.
+
+**Not done in this release:** the actual "drag the price axis with a mouse to zoom in
+tight" gesture from Fix A's own verify item 1 is left for a real browser click-through —
+Lightweight Charts v4.1.3's price-axis drag-to-zoom is a real mouse gesture with no direct
+public API to simulate deterministically, and the safety-net *mechanism* itself (pin +
+click-to-fit) is fully verified directly, which is what this harness can actually test
+without flakiness.
+
+No PHP changed this release, no migration — `php -l`/`node --check` clean on every changed
+file, duplicate-name scan clean, and `drive.mjs`/`drive-v3223.mjs` both still pass
+unmodified.
+
 ## 3A. DATABASE MIGRATIONS (added v3.7.0)
 
 Before v3.7.0, `updater.php` deployed files only — nothing ever ran SQL against the live
@@ -5589,7 +5822,7 @@ Copy-paste this at the start of every Claude Code session:
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.4
+Current Version: v3.22.5
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306 (migrated off Namecheap/theittav_journal 2026-09-24)
 CLAUDE.md is in the repo root — read it for full context.

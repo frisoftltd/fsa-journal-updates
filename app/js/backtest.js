@@ -116,6 +116,12 @@ function showBacktestScreen(screen) {
     // "BACKTESTING" block) -- scoped to exactly this screen, not the whole module, so
     // Screen A stays a normal light-themed page like everywhere else in the app.
     document.body.classList.toggle('backtest-active', screen === 'window');
+    // v3.22.5 Fix D — the topbar "+ Trade" button's STOP styling is keyed off
+    // document.body.classList at render time (see refreshNewTradeGate(), js/trades.js);
+    // re-run it immediately on every screen transition so entering/leaving the replay
+    // window doesn't leave a stale live-challenge banner showing (or a suppressed one
+    // failing to come back) until the next unrelated refresh happens to fire.
+    if (typeof refreshNewTradeGate === 'function') refreshNewTradeGate();
 
     // v3.20.11 — drop the session id from the URL hash the moment there's no longer a
     // specific session open, so a refresh at this point lands back on the plain form
@@ -512,6 +518,43 @@ function btSetVisibleRange() {
  * timeframe switch, since a genuinely new dataset should start from a clean natural fit.
  */
 let btPriceRangeState = null;
+
+/** v3.22.5 Fix A — every level the autoscale stabilizer below must union into its
+ *  stored range, confirmed on live: a TP set well above the recently-loaded candles'
+ *  own range scrolled off-screen the instant a trade opened, since the stabilizer only
+ *  ever looked at candle prices. Each open position's and pending order's own entry/
+ *  stop/take-profit, plus the open ticket's own (the ticket isn't a real order yet, but
+ *  its lines are already drawn on this same chart -- btDrawTicketLines(),
+ *  js/backtest-drawings.js -- so it needs to stay visible too). Returns a flat array of
+ *  real numbers only -- nothing here assumes which levels are set (take-profit is
+ *  routinely null, a Market ticket has no stored limit price, etc). */
+function btCollectTradeLevels() {
+    const levels = [];
+    const add = v => { const n = parseFloat(v); if (isFinite(n)) levels.push(n); };
+    if (typeof btSession !== 'undefined' && btSession) {
+        (btSession.open_positions || []).forEach(p => {
+            add(p.entry_price); add(p.stop_loss);
+            if (p.take_profit !== null && p.take_profit !== undefined) add(p.take_profit);
+        });
+        (btSession.pending_orders || []).forEach(o => {
+            add(o.limit_price); add(o.stop_loss);
+            if (o.take_profit !== null && o.take_profit !== undefined) add(o.take_profit);
+        });
+    }
+    if (typeof btTicket !== 'undefined' && btTicket) {
+        add(btTicketEffectiveEntry());
+        // btOpenTicket()'s own `stopLoss: init.stopLoss || 0` leaves a freshly-opened
+        // ticket's stop at the placeholder 0 until the trader actually types one -- 0 is
+        // never a real stop price, so unioning it in would permanently widen the stored
+        // range to include 0 (widen-only, so this can never un-happen for the rest of
+        // the session) the instant any ticket is opened, before it has a real stop at
+        // all. Confirmed exactly this way while building this release's own harness.
+        if (btTicket.stopLoss) add(btTicket.stopLoss);
+        if (btTicket.takeProfit !== null && btTicket.takeProfit !== undefined) add(btTicket.takeProfit);
+    }
+    return levels;
+}
+
 function btInstallPriceRangeStabilizer() {
     if (!tvCandleSeries) return;
     tvCandleSeries.applyOptions({
@@ -520,11 +563,23 @@ function btInstallPriceRangeStabilizer() {
             if (!res || !res.priceRange) return res;
             const natural = res.priceRange;
             const pad = Math.max((natural.maxValue - natural.minValue) * 0.08, Math.abs(natural.maxValue) * 0.001, 0.0001);
+            let desiredMin = natural.minValue - pad;
+            let desiredMax = natural.maxValue + pad;
+            // v3.22.5 Fix A — union in every trade level, each with its own ~3% padding
+            // (separate from the candle range's own 8% above) only when that level
+            // actually falls outside the candle-derived range -- a level already inside
+            // it changes nothing here.
+            btCollectTradeLevels().forEach(v => {
+                if (v < desiredMin) desiredMin = v - Math.max(Math.abs(v) * 0.03, 0.0001);
+                if (v > desiredMax) desiredMax = v + Math.max(Math.abs(v) * 0.03, 0.0001);
+            });
             if (!btPriceRangeState) {
-                btPriceRangeState = { minValue: natural.minValue - pad, maxValue: natural.maxValue + pad };
+                btPriceRangeState = { minValue: desiredMin, maxValue: desiredMax };
             } else {
-                if (natural.minValue < btPriceRangeState.minValue) btPriceRangeState.minValue = natural.minValue - pad;
-                if (natural.maxValue > btPriceRangeState.maxValue) btPriceRangeState.maxValue = natural.maxValue + pad;
+                // Widen-only: candle range AND trade levels alike must never SHRINK the
+                // stored range mid-trade, only ever extend it.
+                if (desiredMin < btPriceRangeState.minValue) btPriceRangeState.minValue = desiredMin;
+                if (desiredMax > btPriceRangeState.maxValue) btPriceRangeState.maxValue = desiredMax;
             }
             return { priceRange: btPriceRangeState };
         },
@@ -657,6 +712,9 @@ function renderBtHeaderStrip(s) {
     eqEl.textContent = fmt(s.equity);
     document.getElementById('bt-strip-target').textContent = `${s.progress_to_target_pct ?? '—'}% / ${s.profit_target_pct}%`;
     document.getElementById('bt-strip-loss').textContent = `${s.max_drawdown_used_pct ?? 0}% / ${s.max_drawdown_pct}%`;
+    // v3.22.5 Fix D — this session's own trade-count limit, the only trade-limit figure
+    // shown on this screen (the topbar's live-challenge STOP banner is suppressed here).
+    document.getElementById('bt-strip-trades').textContent = s.max_trades_per_day ? `${s.trades_today}/${s.max_trades_per_day}` : `${s.trades_today}`;
 }
 
 /** v3.22.3 Fix C — "the sidebar New Trade button and the toolbar Place trade button are
@@ -788,6 +846,11 @@ async function btAdvance() {
         if (ev.type === 'stop_loss' || ev.type === 'take_profit') {
             const rTxt = ev.r_multiple !== null && ev.r_multiple !== undefined ? ` (${ev.r_multiple >= 0 ? '+' : ''}${ev.r_multiple.toFixed(2)}R)` : '';
             toast(`Trade closed: ${fmt(ev.net_pnl)}${rTxt}`, ev.net_pnl >= 0 ? 'success' : 'error');
+            // v3.22.5 Fix A — "Call btResetPriceRangeStabilizer() once when a trade
+            // closes": a closed trade's own entry/SL/TP no longer need to stay in view,
+            // so the next render is free to re-fit to a clean natural range instead of
+            // forever carrying a now-irrelevant level's padding.
+            btResetPriceRangeStabilizer();
         } else if (ev.type === 'limit_filled') {
             toast(`${ev.direction} ${ev.lot_size.toFixed(4)} ${btBaseAsset(btSession.symbol)} filled @ ${fmtPrice5(ev.price)}`);
             // v3.22.3 Part C — a drawing linked to this pending order (linked_order_id)
@@ -1416,5 +1479,6 @@ async function closeBtPosition(tradeId) {
     const res = await btApi('backtest_close_position', 'POST', { trade_id: tradeId });
     if (res && res.error) { toast(res.error, 'error'); return; }
     toast('Position closed');
+    btResetPriceRangeStabilizer(); // v3.22.5 Fix A — see btAdvance()'s own close-event branch for why
     await refreshBtSession();
 }

@@ -146,14 +146,18 @@
       </div>
       <div id="bt-replay-status" style="color:#8b93a7;font-size:11px"></div>
       <!-- v3.22.3 Part C — "header strip, always visible on the replay screen": these
-           three read straight off sessionSummary()'s own fields (renderBtHeaderStrip(),
+           read straight off sessionSummary()'s own fields (renderBtHeaderStrip(),
            js/backtest.js), the same figures the sidebar's Challenge panel already shows
            -- this is a second, more prominent place for them, not a second source of
-           truth for what they say. -->
+           truth for what they say. "Trades" (v3.22.5 Fix D) is this session's own
+           trades_today/max_trades_per_day -- deliberately the ONLY trade-limit figure
+           shown on this screen; the topbar's own live-challenge STOP banner is
+           suppressed here on purpose, see refreshNewTradeGate()'s own comment. -->
       <div class="tf-group" id="bt-header-strip" style="gap:12px">
         <span style="color:#6b7280;font-size:11px">Equity <b id="bt-strip-equity" style="color:#d1d4dc"></b></span>
         <span style="color:#6b7280;font-size:11px">Target <b id="bt-strip-target" style="color:#d1d4dc"></b></span>
         <span style="color:#6b7280;font-size:11px">Loss <b id="bt-strip-loss" style="color:#d1d4dc"></b></span>
+        <span style="color:#6b7280;font-size:11px">Trades <b id="bt-strip-trades" style="color:#d1d4dc"></b></span>
       </div>
       <div id="bt-replay-note" style="margin-left:auto;font-size:11px;color:#6b7280">Bybit data — indicative vs. live BitFunded fills</div>
     </div>
@@ -221,6 +225,15 @@
              canvas-drawn pill, same "real DOM over hand-rolled canvas hit-testing"
              convention the selection toolbar (v3.22.1 Part B1) already established. -->
         <div id="bt-pending-cancel-buttons"></div>
+        <!-- v3.22.5 Fix A safety net — one real, clickable element per level pinned to
+             the top/bottom edge because it's scrolled off-screen (user zoomed/dragged the
+             price axis away from auto-scale), positioned over its own canvas-drawn pill
+             by js/backtest-drawings.js::btSyncEdgePinnedButtons() every redraw -- same
+             "real DOM over hand-rolled canvas hit-testing" convention as the two
+             containers just above. Clicking re-enables price-axis auto-scale, which shows
+             the level immediately since the stabilizer's own stored range already widens
+             to include every level registered here. -->
+        <div id="bt-edge-pinned-buttons"></div>
       </div>
 
       <div class="bt-side-panel">

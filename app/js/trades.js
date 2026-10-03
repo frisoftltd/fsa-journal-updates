@@ -40,16 +40,25 @@ async function refreshNewTradeGate(){
     if (!status || status.error) return;
     window._riskStopReason = status.stopped ? status.reason : null;
     const label = status.stopped ? `STOP — ${status.reason}` : null;
+    // v3.22.5 Fix D — confirmed on live: the topbar button showed the LIVE challenge's
+    // own "STOP — weekly trade limit reached (4/4)" banner while a backtest session was
+    // open, which has nothing to do with that session's own limits and just confuses the
+    // trader. window._riskStopReason itself is left accurate above (it's still the real
+    // guard openTradeModal()/openChecklist() check for an actual live-challenge save) —
+    // only the always-visible topbar button's own label/disabled styling is suppressed
+    // while body.backtest-active is set. Every other page is completely unaffected.
+    const onBacktestScreen = document.body.classList.contains('backtest-active');
     [
         { id: 'new-trade-btn', normalText: '+ New Trade' },
         { id: 'topbar-trade-btn', normalText: '+ Trade' },
     ].forEach(({ id, normalText }) => {
         const btn = document.getElementById(id);
         if (!btn) return;
-        btn.disabled = status.stopped;
-        btn.textContent = status.stopped ? label : normalText;
-        btn.title = status.stopped ? label : '';
-        btn.style.background = status.stopped ? 'var(--red)' : '';
+        const showStop = status.stopped && !(onBacktestScreen && id === 'topbar-trade-btn');
+        btn.disabled = showStop;
+        btn.textContent = showStop ? label : normalText;
+        btn.title = showStop ? label : '';
+        btn.style.background = showStop ? 'var(--red)' : '';
     });
 }
 

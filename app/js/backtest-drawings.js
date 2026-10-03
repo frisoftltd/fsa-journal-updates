@@ -42,6 +42,18 @@ let btMagnetEnabled = true;
 let btDrawRaf = null;             // requestAnimationFrame handle, for throttled redraws
 let btDrawingDefaults = {};       // {tool: settings}, this user's saved defaults — loaded once per session open (v3.21.12)
 
+// v3.22.5 Fix E — the move loop's own state, separate from btDrawRaf above (that one
+// throttles the CANVAS REDRAW; this one throttles the STATE UPDATE that redraw depends
+// on, which is the thing actually doing per-move work: btDragRect is one
+// getBoundingClientRect() read cached at drag start (see btMousePos()'s own doc comment
+// below) instead of one call per native mousemove event, btPendingMoveClientPos/
+// btMoveRaf coalesce however many mousemove events the browser fires before the next
+// frame into exactly one state update + one render, via btScheduleMoveFrame()/
+// btProcessPendingMove().
+let btDragRect = null;
+let btMoveRaf = null;
+let btPendingMoveClientPos = null; // {clientX, clientY} of the latest mousemove while a drag/preview is active
+
 // Tools that currently expose "Save as default"/"Reset to default" in their settings
 // panel (v3.21.12). Fib retracement only this release, per the briefing's own scope —
 // btTemplateRowHtml()/btMergedToolDefaults() are already generic by tool, so adding
@@ -497,8 +509,16 @@ function btDeleteSelected() {
 }
 
 // ── MOUSE / KEYBOARD ───────────────────────────────────────
+/** v3.22.5 Fix E — "no layout reads (getBoundingClientRect) inside the move loop beyond
+ *  one cached read at drag start." Prefers btDragRect (set once by btOnDrawMouseDown()
+ *  at the moment a drag/preview actually begins, cleared by btOnDrawMouseUp()) over a
+ *  fresh query -- the overlay's own position relative to the viewport can't change
+ *  mid-gesture, so one cached rect is exactly as correct as re-querying on every event,
+ *  just without the repeated layout read. Falls back to a live query for every call
+ *  outside an active drag (a plain click's hit-test, dblclick, contextmenu), where a
+ *  single one-off read costs nothing. */
 function btMousePos(e) {
-    const rect = btDrawOverlay.getBoundingClientRect();
+    const rect = btDragRect || btDrawOverlay.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 }
 /** Raw pixel -> {time, price}, snapped to the nearest candle when magnet is on. Returns
@@ -510,6 +530,23 @@ function btPixelToPoint(x, y) {
     time = btSnapTimeToCandle(time);
     price = btSnapPrice(time, price, y);
     return { time, price };
+}
+/** v3.22.5 Fix E — the position tool's own move-loop point: continuous, never snapped.
+ *  "While dragging, use continuous time/price; snap only on release, and only when the
+ *  magnet toggle is on" -- btPixelToPoint() above time-snaps UNCONDITIONALLY (regardless
+ *  of magnet) and, with magnet on, also runs btSnapPrice()'s O(n) candle scan on every
+ *  single call; doing either on every native mousemove event (not just once per frame)
+ *  was the likely cause of the reported jumpiness. Every other tool (fib/trend-line/
+ *  horizontal) still goes through btPixelToPoint() during its own move loop, unchanged —
+ *  this release was not asked to change their feel, only the position tool's. */
+function btPixelToPointContinuous(x, y) {
+    const time = btXToTime(x);
+    const price = btYToPrice(y);
+    if (time === null || price === null || time === undefined || price === undefined) return null;
+    return { time, price };
+}
+function btIsPositionTool(tool) {
+    return tool === 'position_long' || tool === 'position_short';
 }
 
 /** Only ever true while this file is actually claiming the gesture (a tool is active, a
@@ -571,7 +608,13 @@ function btEventIsOnDrawingSurface(e) {
 function btOnDrawMouseDown(e) {
     if (e.button !== 0) return; // left click only -- right click is contextmenu (settings)
     if (!btEventIsOnDrawingSurface(e)) return;
-    const { x, y } = btMousePos(e);
+    // v3.22.5 Fix E — cache the overlay's bounding rect once, right here at the exact
+    // moment a gesture starts, so every mousemove during this same gesture (if it turns
+    // into a drag) reads btDragRect instead of re-querying layout on every event.
+    // Cleared by btOnDrawMouseUp() regardless of whether a drag actually followed.
+    const rect = btDrawOverlay.getBoundingClientRect();
+    btDragRect = rect;
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
 
     // v3.22.1 — the order ticket's own lines take priority over everything else while
     // open: the trader is actively configuring an order, not drawing or panning.
@@ -616,7 +659,13 @@ function btOnDrawMouseDown(e) {
     const hit = btHitTest(x, y);
     if (hit) {
         e.stopPropagation(); // claiming this drag -- the chart must not also start panning from the same mousedown
-        const startPoint = btPixelToPoint(x, y);
+        // v3.22.5 Fix E — this baseline must use the SAME conversion btProcessPendingMove()
+        // uses for every subsequent move (continuous for a position tool, snapped
+        // otherwise) — mixing a snapped startPoint with continuous in-flight points would
+        // inject a phantom offset equal to whatever the snap moved it by, the moment the
+        // move loop subtracts a continuous newPoint from this snapped baseline, even for
+        // a drag that never actually moves the cursor's own price at all.
+        const startPoint = btIsPositionTool(hit.drawing.tool) ? btPixelToPointContinuous(x, y) : btPixelToPoint(x, y);
         btSelectedDrawingId = hit.drawing.id;
         btDragState = {
             drawingId: hit.drawing.id, handleIndex: hit.handleIndex, startPoint,
@@ -632,30 +681,84 @@ function btOnDrawMouseDown(e) {
     btScheduleRedraw();
 }
 
+/**
+ * v3.22.5 Fix E — this handler no longer does any point computation or rendering
+ * itself. It only records the latest raw client coordinates and schedules (at most) one
+ * requestAnimationFrame callback -- btScheduleMoveFrame()/btProcessPendingMove() below --
+ * which coalesces however many native mousemove events the browser fires between frames
+ * (a high-poll-rate mouse or a synthetic/scripted drag can fire far more than one per
+ * frame) into exactly one state update and one render. Previously, every single
+ * mousemove event ran btPixelToPoint() (an unconditional time-snap plus, with magnet on,
+ * an O(n) candle scan for price-snap) and btApplyDrag() synchronously, then scheduled a
+ * redraw on TOP of that — rendering was already throttled to one frame, but the actual
+ * work computing what to render was not, which is what this fix addresses.
+ */
 function btOnDrawMouseMove(e) {
+    if (!btTicketDragField && !btDrawInProgress && !btDragState) {
+        // v3.22.5 Fix F — "cursor becomes ew-resize on hover": no drag is in progress
+        // here, so none of Fix E's hot-path concerns above apply — this is one hit-test
+        // against, at most, the single currently-selected drawing, not a per-frame
+        // recompute during an active gesture.
+        btUpdateHoverCursor(e);
+        return; // nothing of ours in progress -- let the chart's own crosshair/pan handle this move untouched
+    }
+    e.stopPropagation();
+    btPendingMoveClientPos = { clientX: e.clientX, clientY: e.clientY };
+    btScheduleMoveFrame();
+}
+
+/** v3.22.5 Fix F — sets the overlay's cursor to ew-resize while hovering either edge
+ *  handle of the currently selected position tool, 'default' otherwise. Restores
+ *  'default' rather than leaving a stale ew-resize behind once the pointer moves off the
+ *  handle — setBtActiveToolButton() is the only other thing that writes this same style
+ *  property (to 'crosshair' while a tool is active), which is why this bails out
+ *  immediately whenever a tool is active: that state owns the cursor instead. */
+function btUpdateHoverCursor(e) {
+    if (!btDrawOverlay || btActiveTool) return;
+    if (!btSelectedDrawingId) { btDrawOverlay.style.cursor = 'default'; return; }
+    const d = btDrawings.find(x => x.id === btSelectedDrawingId);
+    if (!d || !btIsPositionTool(d.tool)) { btDrawOverlay.style.cursor = 'default'; return; }
+    const { x, y } = btMousePos(e);
+    const hit = btHitTestOne(d, x, y);
+    btDrawOverlay.style.cursor = (hit === 'edge-left' || hit === 'edge-right') ? 'ew-resize' : 'default';
+}
+
+function btScheduleMoveFrame() {
+    if (btMoveRaf) return;
+    btMoveRaf = requestAnimationFrame(() => { btMoveRaf = null; btProcessPendingMove(); });
+}
+
+/** Runs at most once per animation frame, against whatever the LATEST mousemove this
+ *  frame actually was (btPendingMoveClientPos, overwritten by every native event, read
+ *  once here) — this is the coalescing itself. Calls btRenderDrawings() directly rather
+ *  than btScheduleRedraw(): we're already inside this frame's one rAF callback, so going
+ *  through that function's own separate rAF scheduling would add a full extra frame of
+ *  latency for no benefit. */
+function btProcessPendingMove() {
+    if (!btPendingMoveClientPos) return;
+    const { x, y } = btMousePos(btPendingMoveClientPos);
     if (btTicketDragField) {
-        e.stopPropagation();
-        const { y } = btMousePos(e);
         const price = btYToPrice(y);
         // v3.21.13's own side-clamp is applied inside btTicketSetField()
         // (js/backtest.js) itself, not here — same single-state-object/single-render
         // pattern this whole ticket feature uses throughout.
         if (price !== null) btTicketSetField(btTicketDragField, price);
+        btRenderDrawings();
         return;
     }
-    if (!btDrawInProgress && !btDragState) return; // nothing of ours in progress -- let the chart's own crosshair/pan handle this move untouched
-    e.stopPropagation();
-    const { x, y } = btMousePos(e);
     if (btDrawInProgress) {
-        const pt = btPixelToPoint(x, y);
+        // v3.22.5 Fix E — continuous (unsnapped) while actually dragging a position
+        // tool into existence; every other tool's live preview is unchanged.
+        const pt = btIsPositionTool(btDrawInProgress.tool) ? btPixelToPointContinuous(x, y) : btPixelToPoint(x, y);
         if (pt) btDrawInProgress.previewPoint = pt;
-        btScheduleRedraw();
+        btRenderDrawings();
         return;
     }
     if (btDragState) {
-        const pt = btPixelToPoint(x, y);
+        const d = btDrawings.find(x2 => x2.id === btDragState.drawingId);
+        const pt = (d && btIsPositionTool(d.tool)) ? btPixelToPointContinuous(x, y) : btPixelToPoint(x, y);
         if (pt) btApplyDrag(btDragState, pt);
-        btScheduleRedraw();
+        btRenderDrawings();
     }
 }
 
@@ -663,13 +766,21 @@ function btOnDrawMouseUp(e) {
     if (btTicketDragField) {
         e.stopPropagation();
         btTicketDragField = null; // the field's own value is already committed live, on every move -- nothing left to finalize here
+        btEndDrag();
         return;
     }
-    if (!btDrawInProgress && !btDragState) return;
+    if (!btDrawInProgress && !btDragState) { btEndDrag(); return; }
     e.stopPropagation();
     if (btDrawInProgress && btDrawInProgress.dragging) {
         const { x, y } = btMousePos(e);
-        const pt = btPixelToPoint(x, y) || btDrawInProgress.previewPoint;
+        // v3.22.5 Fix E — "snap only on release, and only when the magnet toggle is
+        // on": a position tool's own release point goes through the full snap
+        // (btPixelToPoint(), same as every other tool always has) only when magnet is
+        // on; with magnet off, the release point stays exactly continuous, matching
+        // the cursor exactly throughout the whole drag, not just up to the last pixel.
+        const isPosition = btIsPositionTool(btDrawInProgress.tool);
+        const commit = isPosition ? (btMagnetEnabled ? btPixelToPoint(x, y) : btPixelToPointContinuous(x, y)) : btPixelToPoint(x, y);
+        const pt = commit || btDrawInProgress.previewPoint;
         const start = btDrawInProgress.points[0];
         // A mousedown+mouseup with (near-)no real drag -- a plain accidental click, or a
         // shaky retry on top of a drawing that already exists -- shouldn't create a
@@ -684,17 +795,42 @@ function btOnDrawMouseUp(e) {
         if (pxDist < BT_HANDLE_RADIUS) {
             btDrawInProgress = null;
             btScheduleRedraw();
+            btEndDrag();
             return;
         }
         btFinalizeNewDrawing(btDrawInProgress.tool, [start, pt]);
         btDrawInProgress = null;
+        btEndDrag();
         return;
     }
     if (btDragState) {
         const d = btDrawings.find(x2 => x2.id === btDragState.drawingId);
+        // v3.22.5 Fix E — the move loop itself (btProcessPendingMove()) deliberately
+        // never snaps a position tool's handle/move drag (continuous throughout, per
+        // the briefing). If magnet is on, apply the one, final snap here, at release,
+        // against the last real cursor position seen this drag -- if magnet is off,
+        // the drawing's points/settings already hold the exact continuous values from
+        // the last processed move, which is exactly "follows cursor exactly."
+        if (d && btIsPositionTool(d.tool) && btMagnetEnabled && btPendingMoveClientPos) {
+            const { x, y } = btMousePos(btPendingMoveClientPos);
+            const snapped = btPixelToPoint(x, y);
+            if (snapped) btApplyDrag(btDragState, snapped);
+        }
         if (d) btUpdateDrawing(d.id, { points: d.points, settings: d.settings });
         btDragState = null;
     }
+    btEndDrag();
+}
+
+/** v3.22.5 Fix E — clears every piece of this file's own move-loop state at the end of
+ *  a gesture: the cached rect (btMousePos()'s own doc comment), the pending-move
+ *  coordinates, and cancels a still-scheduled move frame (a mouseup can land between a
+ *  mousemove and its own rAF firing — without this, that stale frame would still fire
+ *  once more against a drag that's already been finalized/cleared). */
+function btEndDrag() {
+    btDragRect = null;
+    btPendingMoveClientPos = null;
+    if (btMoveRaf) { cancelAnimationFrame(btMoveRaf); btMoveRaf = null; }
 }
 
 function btOnDrawDblClick(e) {
@@ -758,6 +894,25 @@ function btApplyDrag(dragState, newPoint) {
     }
     if (typeof dragState.handleIndex === 'number') {
         d.points = dragState.startPoints.map((p, i) => i === dragState.handleIndex ? newPoint : p);
+        return;
+    }
+    // v3.22.5 Fix F — the two edge handles: "dragging left handle moves points[0].time,
+    // right handle moves points[1].time... minimum width 3 bars; prices unchanged."
+    // points[0] is always the box's own left/earlier time and points[1] always the
+    // right/later one, by construction (btFinalizeNewDrawing() only ever creates a
+    // position tool's points as [start, start+span] — never the reverse), so there's no
+    // need to re-derive which point is visually "left" here. Only points[] changes;
+    // d.settings (entry/stop_loss/take_profit) is untouched either way.
+    if (dragState.handleIndex === 'edge-left') {
+        const stepSec = btStepSec();
+        const maxLeftTime = dragState.startPoints[1].time - 3 * stepSec;
+        d.points = [{ time: Math.min(newPoint.time, maxLeftTime) }, { time: dragState.startPoints[1].time }];
+        return;
+    }
+    if (dragState.handleIndex === 'edge-right') {
+        const stepSec = btStepSec();
+        const minRightTime = dragState.startPoints[0].time + 3 * stepSec;
+        d.points = [{ time: dragState.startPoints[0].time }, { time: Math.max(newPoint.time, minRightTime) }];
         return;
     }
     if (dragState.handleIndex === 'entry') {
@@ -881,9 +1036,26 @@ function btNormalizePositionSides(tool, s) {
 // width) NO area at all to ever be clicked again. This is what "many clicks and drags"
 // actually was, and is the same underlying defect that made a follow-up drag attempt
 // land on a near-zero-size box, producing the reported entry===take_profit/R:R=0 case.
-// The box's horizontal span is now always this fixed number of bars from the entry
-// point, completely independent of how far sideways the drag happened to go.
+// The box's horizontal span defaults to this fixed number of bars from the entry point
+// -- v3.22.5 Fix F changed this from an UNCONDITIONAL default to a FLOOR: dragging more
+// than 3 bars horizontally while drawing now uses that dragged width instead (see
+// btPositionCreationSpanMs() below), but anything at or below 3 bars still falls back to
+// this default, so the near-zero-width box this constant was originally introduced to
+// prevent is still exactly as impossible as it was before.
 const BT_POSITION_TOOL_SPAN_BARS = 20;
+
+/** v3.22.5 Fix F — "New drawings: default width stays 20 bars (BT_POSITION_TOOL_SPAN_
+ *  BARS), but if the user drags horizontally >3 bars while drawing, use that dragged
+ *  width instead." Shared by btFinalizeNewDrawing() and the live creation-drag preview
+ *  in btRenderDrawings() so the preview can never show a width different from what
+ *  actually gets saved a moment later — same "preview must match the save" discipline
+ *  v3.21.12/v3.21.13 already established for this tool's other fields. */
+function btPositionCreationSpanMs(timeStart, timeEnd) {
+    const stepSec = btStepSec();
+    const draggedBars = Math.round((timeEnd - timeStart) / stepSec);
+    const spanBars = draggedBars > 3 ? draggedBars : BT_POSITION_TOOL_SPAN_BARS;
+    return stepSec * 1000 * spanBars;
+}
 
 async function btFinalizeNewDrawing(tool, points) {
     // v3.21.12 — merged with this user's saved per-tool default (btMergedToolDefaults()),
@@ -905,7 +1077,7 @@ async function btFinalizeNewDrawing(tool, points) {
         const stopDist = Math.max(Math.abs(points[1].price - points[0].price), minDist);
         settings.stop_loss = isLong ? settings.entry - stopDist : settings.entry + stopDist;
         settings.take_profit = btComputeTpFromRatio(tool, settings.entry, settings.stop_loss, settings.rr_ratio);
-        const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
+        const spanMs = btPositionCreationSpanMs(points[0].time, points[1].time);
         points = [{ time: points[0].time }, { time: points[0].time + spanMs / 1000 }];
     }
     const drawing = await btSaveNewDrawing(tool, points, settings);
@@ -950,6 +1122,7 @@ function btDrawTicketLines(ctx) {
     if (!btTicket || !btDrawOverlay) return;
     const c = btComputeTicket();
     const w = btDrawOverlay.width;
+    const h = btDrawOverlay.height;
     const pillX = Math.max(60, w - 70);
 
     const drawLine = (price, color, dashed) => {
@@ -963,18 +1136,18 @@ function btDrawTicketLines(ctx) {
     };
 
     const entryColor = btTicket.orderType === 'limit' ? '#f59e0b' : '#2962ff';
+    const entryName = btTicket.orderType === 'limit' ? 'Limit' : 'Entry';
     const yEntry = drawLine(c.entry, entryColor, btTicket.orderType === 'limit');
     if (yEntry !== null) {
-        const label = btTicket.orderType === 'limit' ? `Limit ${fmtPrice5(c.entry)}` : `Entry ${fmtPrice5(c.entry)}`;
-        btDrawPill(ctx, pillX, yEntry, label, entryColor);
+        btDrawLevelPill(ctx, pillX, yEntry, h, `${entryName} ${fmtPrice5(c.entry)}`, entryName, c.entry, null, entryColor);
     }
 
     const yStop = drawLine(btTicket.stopLoss, '#ef5350', true);
-    if (yStop !== null) btDrawPill(ctx, pillX, yStop, `Stop Loss −$${c.riskUsdNet.toFixed(2)}`, '#ef5350');
+    if (yStop !== null) btDrawLevelPill(ctx, pillX, yStop, h, `Stop Loss −$${c.riskUsdNet.toFixed(2)}`, 'Stop Loss', btTicket.stopLoss, `−$${c.riskUsdNet.toFixed(2)}`, '#ef5350');
 
     if (btTicket.takeProfit !== null) {
         const yTp = drawLine(btTicket.takeProfit, '#26a69a', true);
-        if (yTp !== null && c.rewardUsdNet !== null) btDrawPill(ctx, pillX, yTp, `Take Profit +$${c.rewardUsdNet.toFixed(2)}`, '#26a69a');
+        if (yTp !== null && c.rewardUsdNet !== null) btDrawLevelPill(ctx, pillX, yTp, h, `Take Profit +$${c.rewardUsdNet.toFixed(2)}`, 'Take Profit', btTicket.takeProfit, `+$${c.rewardUsdNet.toFixed(2)}`, '#26a69a');
     }
 }
 
@@ -999,6 +1172,48 @@ function btDrawFullWidthLine(ctx, w, price, color, dashed) {
 // pixel position to sit at, and canvas drawing is the only thing that knows it.
 let btPendingOrderPillPos = {}; // order id -> {x, y}
 
+// v3.22.5 Fix A safety net — "if a level still ends up off-screen (user zoomed tight),
+// pin its pill to top/bottom edge with an arrow and price; clicking it scrolls/fits the
+// price axis to show it." Reset once per render pass (btRenderDrawings(), right before
+// btDrawTicketLines()/btDrawLiveTrades() run), populated by every btDrawLevelPill() call
+// below, turned into real DOM click targets right after by btSyncEdgePinnedButtons() --
+// same "real DOM over hand-rolled canvas hit-testing" convention
+// btSyncPendingCancelButtons() already established.
+let btEdgePinnedPills = []; // [{x, y, price}]
+const BT_EDGE_PILL_MARGIN = 20;
+
+/**
+ * v3.22.5 Fix A safety net. `y` is the level's own true on-screen coordinate (possibly
+ * far outside [0, h] -- Lightweight Charts' priceToCoordinate() keeps computing a real
+ * number for a price outside the visible range, it doesn't return null or clamp). Inside
+ * the margin: draws `onScreenLabel` exactly where every level has always been drawn, no
+ * change. Outside it: draws a pill PINNED to the top/bottom edge instead, with an arrow
+ * and the level's real price and amount -- the on-screen label text alone isn't always
+ * enough (Stop/TP's normal pill never shows its own price, only the dollar amount; see
+ * the example in the briefing, "▲ Take Profit 7790.00 +$286.19") -- and registers a
+ * click target in btEdgePinnedPills. The only reason a level registered here (every open
+ * position/pending order/open ticket's entry/SL/TP) is ever actually off-screen is a
+ * user-driven manual zoom/drag of the price axis away from auto-scale: the stabilizer's
+ * own stored range (btInstallPriceRangeStabilizer()) already widens to include every one
+ * of them. Returns the y actually drawn at, so a caller that also needs to position a
+ * real DOM element against this pill (btPendingOrderPillPos, for the Limit cancel
+ * button) follows it to the pinned position too, rather than pointing at an invisible
+ * off-screen coordinate.
+ */
+function btDrawLevelPill(ctx, x, y, h, onScreenLabel, edgeName, price, edgeAmountText, color) {
+    if (y >= BT_EDGE_PILL_MARGIN && y <= h - BT_EDGE_PILL_MARGIN) {
+        btDrawPill(ctx, x, y, onScreenLabel, color);
+        return y;
+    }
+    const top = y < BT_EDGE_PILL_MARGIN;
+    const edgeY = top ? BT_EDGE_PILL_MARGIN : h - BT_EDGE_PILL_MARGIN;
+    const arrow = top ? '▲' : '▼';
+    const pinnedLabel = `${arrow} ${edgeName} ${fmtPrice5(price)}${edgeAmountText ? ' ' + edgeAmountText : ''}`;
+    btDrawPill(ctx, x, edgeY, pinnedLabel, color);
+    btEdgePinnedPills.push({ x, y: edgeY, price });
+    return edgeY;
+}
+
 /**
  * v3.22.3 Part C — the running trade display. MANDATORY per the briefing: every line
  * here is drawn from btSession.pending_orders / btSession.open_positions (the session
@@ -1019,6 +1234,7 @@ function btDrawLiveTrades(ctx) {
     // single frame's worth of open/pending lines costs nothing visible in practice.
     if (!chartState || !chartState.timezone) return;
     const w = btDrawOverlay.width;
+    const h = btDrawOverlay.height;
     const pillX = Math.max(60, w - 70);
     const feeRatePct = btSession.fee_rate_pct || 0;
     btPendingOrderPillPos = {};
@@ -1040,71 +1256,99 @@ function btDrawLiveTrades(ctx) {
 
         const yLimit = btDrawFullWidthLine(ctx, w, limitPrice, '#f59e0b', true);
         if (yLimit !== null) {
-            btDrawPill(ctx, pillX, yLimit, `Limit ${fmtPrice5(limitPrice)}`, '#f59e0b');
-            btPendingOrderPillPos[o.id] = { x: pillX, y: yLimit };
+            const pinnedAt = btDrawLevelPill(ctx, pillX, yLimit, h, `Limit ${fmtPrice5(limitPrice)}`, 'Limit', limitPrice, null, '#f59e0b');
+            btPendingOrderPillPos[o.id] = { x: pillX, y: pinnedAt };
         }
         const yStop = btDrawFullWidthLine(ctx, w, stopLoss, '#ef5350', true);
-        if (yStop !== null) btDrawPill(ctx, pillX, yStop, `Stop Loss −$${riskUsd.toFixed(2)}`, '#ef5350');
+        if (yStop !== null) btDrawLevelPill(ctx, pillX, yStop, h, `Stop Loss −$${riskUsd.toFixed(2)}`, 'Stop Loss', stopLoss, `−$${riskUsd.toFixed(2)}`, '#ef5350');
         if (takeProfit !== null) {
             const exitFeeAtTp = btCalcFee(lotSize, takeProfit, feeRatePct);
             const rewardUsd = Math.abs(takeProfit - limitPrice) * lotSize - (entryFee + exitFeeAtTp);
             const yTp = btDrawFullWidthLine(ctx, w, takeProfit, '#26a69a', true);
-            if (yTp !== null) btDrawPill(ctx, pillX, yTp, `Take Profit +$${rewardUsd.toFixed(2)}`, '#26a69a');
+            if (yTp !== null) btDrawLevelPill(ctx, pillX, yTp, h, `Take Profit +$${rewardUsd.toFixed(2)}`, 'Take Profit', takeProfit, `+$${rewardUsd.toFixed(2)}`, '#26a69a');
         }
     });
 
     // ── Open positions: solid blue Entry / red SL / green TP + a fill-to-cursor box ──
     (btSession.open_positions || []).forEach(p => {
-        const isLong = p.direction === 'Long';
         const entry = parseFloat(p.entry_price), stopLoss = parseFloat(p.stop_loss);
         const takeProfit = p.take_profit !== null ? parseFloat(p.take_profit) : null;
         const lotSize = parseFloat(p.lot_size);
-        const mark = parseFloat(p.mark_price);
         const stopDist = Math.abs(entry - stopLoss);
 
-        // Box from the fill bar to the current replay cursor, red for SL<->entry, teal
-        // for entry<->TP -- same two-zone fill btDrawPosition() (Part A) already uses
-        // for a plain, not-yet-placed drawing, just anchored at REAL fill/now times
-        // instead of the drawing's own two arbitrary anchor points.
-        const xFill = btTimeToX(toDisplaySeconds(p.time_in, chartState.timezone));
-        const xNow = btTimeToX(toDisplaySeconds(btSession.replay_cursor_ms, chartState.timezone));
+        // v3.22.5 Fix B — a long-running position's own fill bar (p.time_in) can sit
+        // BEFORE the currently loaded candle window (BT_LEAD_IN_BARS, a fixed 300-bar
+        // lookback) once a session has been open for a while -- confirmed on live
+        // (session 6, two trades that had been open since 2020-03). btTimeToX()'s own
+        // off-range extrapolation (logicalToCoordinate() on a projected logical index)
+        // returns null for an extrapolation this extreme, which made xFill null and
+        // skipped the ENTIRE box below outright (the `xFill !== null` guard), even
+        // though the box only actually needs an x coordinate to clip against -- the
+        // chart's own left edge (0) is exactly where a box whose start predates the
+        // loaded window should visually begin anyway. xNow gets the same treatment for
+        // the (much rarer) symmetrical case, clamped to the right edge.
+        const xFillRaw = btTimeToX(toDisplaySeconds(p.time_in, chartState.timezone));
+        const xNowRaw = btTimeToX(toDisplaySeconds(btSession.replay_cursor_ms, chartState.timezone));
+        const xFill = xFillRaw !== null ? xFillRaw : 0;
+        const xNow = xNowRaw !== null ? xNowRaw : w;
         const yEntry = btPriceToY(entry), yStop = btPriceToY(stopLoss);
-        const yTp = takeProfit !== null ? btPriceToY(takeProfit) : null;
-        if (xFill !== null && xNow !== null && yEntry !== null && yStop !== null) {
+        const yTpBox = takeProfit !== null ? btPriceToY(takeProfit) : null;
+        if (yEntry !== null && yStop !== null) {
             const left = Math.min(xFill, xNow), right = Math.max(xFill, xNow);
             ctx.fillStyle = 'rgba(239,83,80,0.18)';
             ctx.fillRect(left, Math.min(yEntry, yStop), right - left, Math.abs(yStop - yEntry));
-            if (yTp !== null) {
+            if (yTpBox !== null) {
                 ctx.fillStyle = 'rgba(38,166,154,0.18)';
-                ctx.fillRect(left, Math.min(yEntry, yTp), right - left, Math.abs(yTp - yEntry));
+                ctx.fillRect(left, Math.min(yEntry, yTpBox), right - left, Math.abs(yTpBox - yEntry));
             }
         }
 
         const yE = btDrawFullWidthLine(ctx, w, entry, '#2962ff', false);
-        if (yE !== null) btDrawPill(ctx, pillX, yE, `Entry ${fmtPrice5(entry)}`, '#2962ff');
+        if (yE !== null) btDrawLevelPill(ctx, pillX, yE, h, `Entry ${fmtPrice5(entry)}`, 'Entry', entry, null, '#2962ff');
+        // fees_paid already includes the entry fee (computeSessionState()'s own
+        // comment); the exit-at-stop fee isn't charged yet, so it's added here the same
+        // way the ticket's own riskUsdNet does for a not-yet-filled order. Hoisted out of
+        // the yS-null guard below (v3.22.5) -- Fix C's own net R-multiple needs this
+        // same number regardless of whether the Stop Loss pill itself is on-screen.
+        const exitFeeAtStop = btCalcFee(lotSize, stopLoss, feeRatePct);
+        const riskUsd = stopDist * lotSize + p.fees_paid + exitFeeAtStop;
         const yS = btDrawFullWidthLine(ctx, w, stopLoss, '#ef5350', true);
-        if (yS !== null) {
-            // fees_paid already includes the entry fee (computeSessionState()'s own
-            // comment); the exit-at-stop fee isn't charged yet, so it's added here the
-            // same way the ticket's own riskUsdNet does for a not-yet-filled order.
-            const exitFeeAtStop = btCalcFee(lotSize, stopLoss, feeRatePct);
-            const riskUsd = stopDist * lotSize + p.fees_paid + exitFeeAtStop;
-            btDrawPill(ctx, pillX, yS, `Stop Loss −$${riskUsd.toFixed(2)}`, '#ef5350');
-        }
-        if (yTp !== null) {
-            const exitFeeAtTp = btCalcFee(lotSize, takeProfit, feeRatePct);
-            const rewardUsd = Math.abs(takeProfit - entry) * lotSize - (p.fees_paid + exitFeeAtTp);
-            btDrawPill(ctx, pillX, yTp, `Take Profit +$${rewardUsd.toFixed(2)}`, '#26a69a');
+        if (yS !== null) btDrawLevelPill(ctx, pillX, yS, h, `Stop Loss −$${riskUsd.toFixed(2)}`, 'Stop Loss', stopLoss, `−$${riskUsd.toFixed(2)}`, '#ef5350');
+        // v3.22.5 Fix A — an open position's own Take Profit never actually had a
+        // full-width LINE drawn at all (only the pill, via a plain btPriceToY() call
+        // that fed just the box-fill math above) -- confirmed by reading this block
+        // against the pending-orders block just above, which already draws all three
+        // lines. This is the direct, proximate cause of live finding #1 ("TP line
+        // disappears once in a trade"): the line was never there once a position
+        // actually opened, on-screen or not. Fixed by routing through
+        // btDrawFullWidthLine() like Entry/Stop already do, same as the pending-order
+        // case just above.
+        if (takeProfit !== null) {
+            const yTp = btDrawFullWidthLine(ctx, w, takeProfit, '#26a69a', true);
+            if (yTp !== null) {
+                const exitFeeAtTp = btCalcFee(lotSize, takeProfit, feeRatePct);
+                const rewardUsd = Math.abs(takeProfit - entry) * lotSize - (p.fees_paid + exitFeeAtTp);
+                btDrawLevelPill(ctx, pillX, yTp, h, `Take Profit +$${rewardUsd.toFixed(2)}`, 'Take Profit', takeProfit, `+$${rewardUsd.toFixed(2)}`, '#26a69a');
+            }
         }
 
         // Centre pill: Open P&L net of the entry fee already paid (p.floating_pnl,
         // computeSessionState()'s own figure -- never re-derived here, so this can never
-        // disagree with the header/Open Positions panel showing the exact same number),
-        // plus the R-multiple the current mark represents.
-        if (xFill !== null && xNow !== null && yEntry !== null) {
-            const moveDist = isLong ? (mark - entry) : (entry - mark);
-            const rMultiple = stopDist > 0 ? moveDist / stopDist : null;
-            const rTxt = rMultiple !== null ? `${rMultiple >= 0 ? '+' : ''}${rMultiple.toFixed(2)}R` : '—';
+        // disagree with the header/Open Positions panel showing the exact same number).
+        //
+        // v3.22.5 Fix C — R is now floating_pnl / riskUsd (both NET of fees), not the
+        // earlier gross price-only (mark-entry)/(entry-SL). The two can disagree in
+        // SIGN right around breakeven: a trade with a tiny favourable gross price move
+        // that fees have already eaten into a net loss showed "-$3.42 (+0.00R)" on live
+        // -- a positive-looking R next to a negative dollar figure, confirmed not a
+        // rounding artifact (toFixed(2) preserves a negative sign all the way to
+        // "-0.00", so the gross rMultiple here was genuinely >= 0 while the net dollar
+        // amount was negative). Deriving R from the SAME net riskUsd the Stop Loss pill
+        // above already shows guarantees R and the dollar figure can never disagree
+        // about direction again, by construction, not just for this one reported case.
+        if (yEntry !== null) {
+            const rMultiple = riskUsd > 0 ? p.floating_pnl / riskUsd : null;
+            const rTxt = rMultiple !== null ? `${rMultiple > 0 ? '+' : (rMultiple < 0 ? '−' : '')}${Math.abs(rMultiple).toFixed(2)}R` : '—';
             const pnlColor = p.floating_pnl < 0 ? '#ef5350' : '#26a69a';
             btDrawPill(ctx, (Math.min(xFill, xNow) + Math.max(xFill, xNow)) / 2, yEntry,
                 `Open P&L: ${fmt(p.floating_pnl)} (${rTxt}) · Qty ${lotSize.toFixed(4)}`, pnlColor);
@@ -1171,6 +1415,41 @@ function btSyncPendingCancelButtons() {
         btn.onclick = () => cancelBtOrder(order.id);
         container.appendChild(btn);
     }
+}
+
+/** v3.22.5 Fix A safety net — one real, transparent click target per edge-pinned pill
+ *  (btEdgePinnedPills, populated this same render pass by btDrawLevelPill() calls in
+ *  btDrawTicketLines()/btDrawLiveTrades() above), same "real DOM over hand-rolled canvas
+ *  hit-testing" convention btSyncPendingCancelButtons() already established. Rebuilt
+ *  from scratch every render -- there are never more than a handful of levels on screen
+ *  at once, so a full rebuild is cheap and trivially handles a level scrolling back
+ *  on-screen (or a new one going off-screen) between renders with no diff step. */
+function btSyncEdgePinnedButtons() {
+    const container = document.getElementById('bt-edge-pinned-buttons');
+    if (!container) return;
+    container.innerHTML = '';
+    btEdgePinnedPills.forEach(({ x, y, price }) => {
+        const btn = document.createElement('button');
+        btn.className = 'bt-edge-pinned-btn';
+        btn.title = 'Show this level';
+        btn.style.left = (x - 80) + 'px';
+        btn.style.top = (y - 10) + 'px';
+        btn.onclick = () => btFitPriceAxisToLevel(price);
+        container.appendChild(btn);
+    });
+}
+
+/** v3.22.5 Fix A safety net — "clicking the pill scrolls/fits the price axis to show
+ *  it." The only reason a registered level (every open position/pending order/open
+ *  ticket's own entry/SL/TP) is ever off-screen is a user-driven manual zoom/drag of the
+ *  price axis away from auto-scale -- the stabilizer's own stored range
+ *  (btInstallPriceRangeStabilizer(), js/backtest.js) already widens to include every one
+ *  of them, so simply re-enabling auto-scale is sufficient to bring `price` back into
+ *  view; no need to track which specific level was clicked beyond that. */
+function btFitPriceAxisToLevel(price) {
+    if (!tvCandleSeries) return;
+    try { tvCandleSeries.priceScale().applyOptions({ autoScale: true }); } catch (e) { /* ignore */ }
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
 }
 
 // v3.22.1 Part B1 — the floating selection toolbar's own state. btToolbarOffset is a
@@ -1379,8 +1658,22 @@ function btHitTestOne(d, x, y) {
         const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
         if (x1 === null || x2 === null) return null;
         const left = Math.min(x1, x2), right = Math.max(x1, x2);
-        if (x < left || x > right) return null;
         const yEntry = btPriceToY(d.settings.entry), yStop = btPriceToY(d.settings.stop_loss), yTp = btPriceToY(d.settings.take_profit);
+        // v3.22.5 Fix F — the two edge handles (vertical centre of the box's own left/
+        // right edges), hit-testable only "when selected" per the briefing, so an edge
+        // isn't accidentally grabbed instead of selecting a different drawing (or this
+        // one's own "move" zone) while just clicking around. Checked BEFORE the
+        // `x < left || x > right` bounds check just below, deliberately — the handle
+        // itself sits exactly ON the edge, which that check would otherwise exclude.
+        if (d.id === btSelectedDrawingId) {
+            const ys = [yEntry, yStop, yTp].filter(v => v !== null);
+            if (ys.length) {
+                const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+                if (Math.hypot(x - left, y - centerY) <= BT_HANDLE_RADIUS) return 'edge-left';
+                if (Math.hypot(x - right, y - centerY) <= BT_HANDLE_RADIUS) return 'edge-right';
+            }
+        }
+        if (x < left || x > right) return null;
         if (yEntry !== null && Math.abs(y - yEntry) <= BT_LINE_HIT_TOLERANCE) return 'entry';
         if (yStop !== null && Math.abs(y - yStop) <= BT_LINE_HIT_TOLERANCE) return 'stop';
         if (yTp !== null && Math.abs(y - yTp) <= BT_LINE_HIT_TOLERANCE) return 'tp';
@@ -1399,6 +1692,26 @@ function btRenderDrawings() {
     btResizeDrawOverlay();
     const ctx = btDrawCtx;
     ctx.clearRect(0, 0, btDrawOverlay.width, btDrawOverlay.height);
+    // v3.22.5 Fix A — Lightweight Charts only re-invokes a series' own
+    // autoscaleInfoProvider (btInstallPriceRangeStabilizer(), js/backtest.js) when it
+    // decides the price scale needs recomputing — a data change, a visible-range change,
+    // or a resize. Placing a trade, opening a ticket, or an order filling via advance()
+    // changes none of those; without this nudge the stored range stayed locked at
+    // whatever it was computed from BEFORE the trade existed, and a level union'd in by
+    // the provider was never actually picked up until some unrelated later redraw
+    // happened to trigger one — confirmed as a real gap, not just theoretical, by this
+    // release's own harness (a far TP stayed off-screen immediately after a fill until
+    // this nudge was added). Re-applying `autoScale: true` on every render pass here
+    // (this function already runs on every state-changing event this whole feature cares
+    // about) forces the library to invalidate and recompute every time, which is exactly
+    // what makes a newly-opened trade's levels appear immediately rather than on the
+    // next unrelated chart interaction.
+    if (typeof tvCandleSeries !== 'undefined' && tvCandleSeries) {
+        try { tvCandleSeries.priceScale().applyOptions({ autoScale: true }); } catch (e) { /* chart not ready yet */ }
+    }
+    // v3.22.5 Fix A safety net — rebuilt fresh every render pass by btDrawLevelPill(),
+    // called from btDrawTicketLines()/btDrawLiveTrades() below.
+    btEdgePinnedPills = [];
 
     // v3.22.2 Fix 3 — the drawing linked to an open ticket (sourceDrawingId) renders from
     // the ticket's own live values, not its last-saved settings, so the box/pills and the
@@ -1461,7 +1774,10 @@ function btRenderDrawings() {
             const stopDist = Math.max(Math.abs(previewPoints[1].price - previewPoints[0].price), minDist);
             preview.settings.stop_loss = isLong ? preview.settings.entry - stopDist : preview.settings.entry + stopDist;
             preview.settings.take_profit = btComputeTpFromRatio(preview.tool, preview.settings.entry, preview.settings.stop_loss, preview.settings.rr_ratio);
-            const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
+            // v3.22.5 Fix F — same drag-distance-aware width as btFinalizeNewDrawing()
+            // (btPositionCreationSpanMs()), not the old unconditional fixed span, so the
+            // preview never shows a narrower/wider box than what mouseup will save.
+            const spanMs = btPositionCreationSpanMs(previewPoints[0].time, previewPoints[1].time);
             preview.points = [{ time: previewPoints[0].time }, { time: previewPoints[0].time + spanMs / 1000 }];
         }
         btDrawOne(ctx, preview, false, true);
@@ -1483,6 +1799,7 @@ function btRenderDrawings() {
     btDrawLiveTrades(ctx);
     btPositionSelectionToolbar();
     btSyncPendingCancelButtons();
+    btSyncEdgePinnedButtons();
 }
 function btDrawOne(ctx, d, selected, isPreview, override) {
     ctx.save();
@@ -1819,6 +2136,16 @@ function btDrawPosition(ctx, d, selected, override) {
         btDrawHandle(ctx, left, yEntry, '#d1d4dc');
         btDrawHandle(ctx, left, yStop, '#ef5350');
         if (yTp !== null) btDrawHandle(ctx, left, yTp, '#26a69a');
+        // v3.22.5 Fix F — the two edge handles, vertical centre of the box's own left/
+        // right edges, shown only while selected — same centre-Y math btHitTestOne()
+        // uses for these same handles, so the drawn position and the clickable area
+        // can never disagree.
+        const edgeYs = [yEntry, yStop, yTp].filter(v => v !== null);
+        if (edgeYs.length) {
+            const edgeCenterY = (Math.min(...edgeYs) + Math.max(...edgeYs)) / 2;
+            btDrawHandle(ctx, left, edgeCenterY, '#d1d4dc');
+            btDrawHandle(ctx, right, edgeCenterY, '#d1d4dc');
+        }
         // x-axis time pills — the box's own start/end times, small blue pills, shown
         // only while selected (per the spec's own "when the tool is selected").
         // HH:MM is deliberately compact -- there's no room for a full date on the

@@ -69,6 +69,8 @@ async function main() {
 
     const browser = await chromium.launch();
     const page = await browser.newPage({ locale: 'en-US', viewport: { width: 1365, height: 760 } });
+    page.setDefaultTimeout(15000); // hard cap on every action/wait below -- no open-ended hangs
+    page.setDefaultNavigationTimeout(30000); // hard cap on every goto
     page.on('pageerror', e => console.log('  [pageerror]', e.message));
     page.on('console', msg => { if (msg.type() === 'error') console.log('  [console.error]', msg.text()); });
 

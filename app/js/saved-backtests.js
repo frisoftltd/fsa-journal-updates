@@ -56,6 +56,17 @@ async function loadSavedBacktests() {
     el.innerHTML = `<div class="sb-grid">${sessions.map(sbCardHtml).join('')}</div>`;
 }
 
+/** v3.22.8 — "n trades · win rate · expectancy R," straight off results_summary
+ *  (BacktestController::getSessions() computes it per session via the same
+ *  backtestMetricsBlock() the Results page itself uses — one source of truth for this
+ *  number, not a second, cheaper approximation). */
+function sbSummaryLine(rs) {
+    if (!rs || !rs.trade_count) return 'No closed trades yet';
+    const wr = rs.win_rate === null ? '—' : (rs.win_rate * 100).toFixed(0) + '%';
+    const exp = rs.expectancy_r === null ? '—' : `${rs.expectancy_r >= 0 ? '+' : ''}${rs.expectancy_r.toFixed(2)}R`;
+    return `${rs.trade_count} trade${rs.trade_count === 1 ? '' : 's'} · ${wr} win rate · ${exp} expectancy`;
+}
+
 function sbCardHtml(s) {
     const progressPct = s.progress_to_target_pct === null ? null : Math.max(0, Math.min(100, s.progress_to_target_pct));
     const progressLabel = s.status === 'passed'
@@ -81,8 +92,10 @@ function sbCardHtml(s) {
             <div class="sb-progress-bar"><div class="sb-progress-fill ${progressFillClass}" style="width:${progressPct !== null ? progressPct : 0}%"></div></div>
             <div class="sb-progress-label">${progressLabel}</div>
         </div>
+        <div class="sb-card-summary">${sbSummaryLine(s.results_summary)}</div>
         <div class="sb-card-actions">
             <button class="btn btn-primary btn-sm" style="flex:1" onclick="openBacktestFromList(${s.id})">${s.status === 'active' ? 'Resume' : 'Review'}</button>
+            <button class="btn btn-ghost btn-sm" style="flex:1" onclick="showPage('backtest-results', ${s.id})">Results</button>
             <button class="btn btn-ghost btn-sm" onclick="deleteBacktestSession(${s.id}, this)" title="Delete">🗑</button>
         </div>
     </div>`;

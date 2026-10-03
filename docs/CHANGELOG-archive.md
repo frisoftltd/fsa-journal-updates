@@ -4334,6 +4334,141 @@ purpose.
 No PHP changed this release, no migration — `php -l`/`node --check` clean on every changed
 file, duplicate-name scan clean.
 
+### v3.22.8: Backtest Session Results and Statistics
+
+**Why.** Saved Backtests only ever offered Resume — no way to see how a strategy
+actually performed. This page is the whole point of backtesting: it decides whether
+live trading resumes. Built so a second/third column (the v3.23.0 gate-checklist clean
+vs not-clean split) can be added later without a rewrite.
+
+#### Data (server)
+
+New route `get_backtest_results&session_id=` (`BacktestController::getResults()`).
+Computed live from `trades`, filtered on `source='backtest'`, `backtest_session_id=?`,
+`backtest_rewound=0`, closed trades only (`result IN ('Win','Loss','Break Even')`) —
+never stored, same "derive, don't store" rule this whole controller already lives by.
+
+**The pure metric math lives in `backtest_engine.php`**, not the controller:
+- `backtestWilsonInterval($wins, $n, $z=1.96)` — the Wilson score interval for the win
+  rate, chosen over the naive normal approximation specifically because it can't produce
+  a bound outside [0,1] at small n, which is exactly the regime a sub-30-trade backtest
+  (this release's own "EARLY SIGNAL" threshold) lives in.
+- `backtestMetricsBlock($trades, $startingBalance)` — one block: n/wins/losses/
+  breakevens, win rate + its Wilson interval, average R, expectancy R, total R, profit
+  factor, average win/loss R, net $, fees (+ % of gross), longest win/loss streak, max
+  drawdown $/%. Called three times (overall/Long/Short) by the function below, always
+  the identical shape, so a future fourth column only needs a fourth filtered call.
+- `backtestEquityCurve($trades, $startingBalance)` — closed equity ($ and cumulative R)
+  after each trade, in the order given.
+- `backtestResultsMetrics($trades, $startingBalance)` — ties the three together:
+  `{overall, long, short, equity_curve}`.
+
+**avg_r and expectancy_r are the same number, by construction.** `settleTrade()`
+derives `r_multiple` from the identical price difference `backtestPnl()` uses for `pnl`,
+so a Break-Even trade (`pnl===0`) always has `r_multiple===0` too — meaning
+`sum(r)/n` and the textbook `(wins/n)*avgWinR + (losses/n)*avgLossR` expectancy formula
+reduce to the same arithmetic. Returned under both keys rather than inventing a second
+formula for a number that's already exact.
+
+**`profit_factor` and `fees_pct_of_gross` are `null` (not 0 or `INF`)** when their own
+denominator is empty (no losing trades; no trades at all) — "undefined," not "zero,"
+same NULL-means-unavailable convention this codebase uses everywhere (session,
+r_multiple, emotion_tag).
+
+**A real bug caught by the self-test, not shipped:** profit factor's gross profit/loss
+split originally used `net_pnl`'s own sign (`> 0` → profit, `< 0` → loss) — but a
+Break-Even trade (gross `pnl` exactly 0) can still have a slightly NEGATIVE `net_pnl`
+once its $1 fee is subtracted, which silently landed it in the LOSS bucket despite not
+being a "Loss" by this engine's own result classification. The self-test's hand-computed
+profit factor (950/404) caught the discrepancy immediately (the buggy code produced
+950/405). Fixed by splitting on `result` ('Win'/'Loss') instead of the raw net_pnl sign.
+
+**Self-test: 10 hand-constructed trades** (7 Long, 3 Short — the exact set documented in
+`backtest_engine.php`'s own self-test comment), every aggregate derived on paper before
+being asserted: n, wins/losses/breakevens, win rate, the Wilson interval (recomputed
+independently via the same formula, not a second call to the function under test), total
+R, avg R, avg win/loss R, profit factor, net $, fees, both streaks, and max drawdown.
+**One hand-calculation mistake of this session's own, caught before shipping:** the
+first draft assumed the dollar-max-drawdown point and the percentage-max-drawdown point
+would be the same trade — they aren't (a smaller absolute drawdown against a smaller
+peak can be a larger percentage), confirmed by walking every point in the equity curve
+by hand rather than just the obvious dollar-max candidate. The self-test's own comment
+now documents all ten points' dollar and percentage drawdown explicitly so this can't be
+mis-assumed again.
+
+**Duration in bars** (the trade list's own column) is built in the controller, not the
+engine — `backtestTimeframeStepMs()` (already in `bybit_client.php`, already required by
+this controller) divides `time_out - time_in`. Not a "pure metrics" concern, so it stays
+out of `backtest_engine.php`.
+
+**`BacktestController::getSessions()`** (the Saved Backtests list) also gained a
+`results_summary` field per session — `{trade_count, win_rate, expectancy_r}` via a new
+`quickResultsSummary()` private method, reusing `backtestMetricsBlock()` against a
+lighter query (no entry/exit price columns the card doesn't need) so the card's own
+summary line can never disagree with the real Results page.
+
+#### UI
+
+**Backtest Results is its own page** (`pages/backtest-results.php` / `js/backtest-
+results.js`), not a `js/backtest.js` screen — the required hash format
+(`#backtest-results:<id>`) needs its own `#page-backtest-results` element for
+`js/app.js::_restoreFromHash()` to resolve, the identical reason Saved Backtests was
+split into its own page in v3.20.2. No sidebar nav link (reached via the Saved
+Backtests card's "Results" button, or the replay screen's own new "📊 Results" link) —
+`showPage()` doesn't require one.
+
+**Column-based metric table, not three separate tables.** `BR_METRIC_ROWS` (js/
+backtest-results.js) is the one list of which metric rows exist and how each formats;
+`brMetricTableHtml(columns)` renders however many `{label, block}` columns it's given.
+Today that's Overall/Long/Short, fed directly from the server's own three-block shape —
+the v3.23.0 gate-checklist split only needs a fourth column pushed onto that array, not
+a reshape of this table or the metrics feeding it.
+
+**Sample-size banner**, checked in the specified order: `n < 30` → "EARLY SIGNAL — {n}
+of 30 trades"; `n >= 30` and `expectancy_r > 0` → "Positive expectancy on this sample";
+otherwise nothing.
+
+**Equity curve** uses Chart.js (already loaded app-wide) with a dual y-axis — $ equity
+on the left, cumulative R on the right as a dashed line — so both of the briefing's
+required series ("in $ and cumulative R") share one chart rather than two.
+
+**CSV export** (`brDownloadCsv()`) is client-side only, straight from the already-loaded
+page data (`brData`) — no second server round trip. A real browser download, not a
+server-generated file.
+
+**Judgment calls, flagged rather than guessed silently:**
+- "Fees as % of gross" — defined as total fees ÷ `sum(abs(pnl))` across all trades
+  (gross trading activity, win and loss combined, before fees), not gross profit alone —
+  a symmetric base that doesn't need a separate "what if there are only losses" case.
+- Max drawdown is computed per block (Overall/Long/Short) independently, each starting
+  fresh from the session's own `starting_balance` — the Long-only and Short-only
+  drawdown figures are hypothetical ("what if only these trades existed"), not a
+  decomposition of the real combined equity curve. Reasonable for a backtest where the
+  question is "how would this leg have performed alone," flagged here since it's not the
+  only possible reading of "the same block split Long vs Short."
+- Win rate's denominator is all closed trades (wins+losses+breakevens), not just
+  wins+losses — a breakeven is a real resolved outcome, just not a win.
+
+#### Verification
+
+New harness driver `tools/ui-harness/drive-v3228.mjs` (35 assertions, all passing)
+against a new stateful mock session (23, `stubs/api.php::mockResultsTrades()`) — the
+EXACT 10-trade fixture `backtest_engine.php`'s own self-test hand-verifies, reused here
+specifically so the harness's own assertions cite numbers already proven correct by the
+PHP self-test, not a second, independently-derived set — plus 2 rewound trades that must
+never appear in the output (each a +5R win, impossible to miss in the aggregates if
+wrongly included: n would be 12 not 10, total R 15.5 not 5.5). Covers: the raw metrics
+payload against hand computation, the PHP self-test itself run standalone and passing,
+the Saved Backtests card's Results button + summary line, every Results-page panel
+actually rendering (6 tiles, the 18-row/4-column metric table, the equity chart canvas,
+all 10 trade rows), the EARLY SIGNAL banner's exact text at n=10, and — via
+`page.waitForEvent('download')`, a real browser download event, not a function-return
+check — the CSV's actual file content: 1 header row + 10 trade rows, correct filename.
+
+`drive.mjs`, `drive-v3223.mjs`, `drive-v3225.mjs`, `drive-v3226.mjs` and
+`drive-v3227.mjs` all pass unmodified. `php -l`/`node --check` clean on every changed
+file, duplicate-name scan clean.
+
 ---
 
 ## Part 2 — Other Retired Reference Material

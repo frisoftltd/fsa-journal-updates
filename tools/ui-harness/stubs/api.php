@@ -165,8 +165,48 @@ function mockSessionConfig(int $id): ?array {
         case 21: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 450, 'scenario' => 'preseeded'];
         // Daily cap already reached (2/2) -- Fix C.
         case 22: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'capped'];
+        // v3.22.8 — Results page: 10 real closed trades (the exact hand-verified set
+        // from backtest_engine.php's own self-test) + 2 rewound ones that must be
+        // excluded. See mockResultsTrades() below for the full, hand-computed shape.
+        case 23: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 500, 'scenario' => 'results'];
         default: return null;
     }
+}
+
+/** v3.22.8 — the Results page's own fixture: the EXACT 10-trade set
+ *  backtest_engine.php's own self-test hand-verifies (see that file's "10 hand-
+ *  constructed trades" comment) — reusing it here means drive-v3228.mjs's own
+ *  assertions can cite the identical hand-computed numbers already proven correct by
+ *  the PHP self-test, not a second, independently-derived set. Two further trades (11,
+ *  12) are marked rewound and must never appear in get_backtest_results' own output —
+ *  each is a large win that would be impossible to miss in the aggregates if wrongly
+ *  included (n=12 not 10, total R=15.5 not 5.5, win rate 7/12 not 5/10). */
+function mockResultsTrades(): array {
+    $base = 1577836800000; // 2020-01-01T00:00:00Z
+    $hour = 3600000;
+    $mk = function (int $i, string $dir, string $result, float $r, float $net, float $entry, float $stop, ?float $tp, float $exit, string $reason, bool $rewound = false) use ($base, $hour) {
+        return [
+            'id' => 100 + $i, 'direction' => $dir, 'result' => $result, 'r_multiple' => $r,
+            'net_pnl' => $net, 'fees' => 1.0, 'pnl' => $net + 1.0,
+            'entry_price' => $entry, 'stop_loss' => $stop, 'take_profit' => $tp, 'exit_price' => $exit,
+            'time_in' => $base + ($i * 10) * $hour, 'time_out' => $base + ($i * 10 + 4) * $hour,
+            'exit_reason' => $reason, 'backtest_rewound' => $rewound,
+        ];
+    };
+    return [
+        $mk(1, 'Long', 'Win', 2.0, 200, 100, 95, 110, 110, 'Take Profit'),
+        $mk(2, 'Long', 'Win', 1.5, 150, 100, 95, 107.5, 107.5, 'Take Profit'),
+        $mk(3, 'Short', 'Loss', -1.0, -101, 100, 105, 90, 105, 'Stop Loss'),
+        $mk(4, 'Long', 'Loss', -1.0, -101, 100, 95, 115, 95, 'Stop Loss'),
+        $mk(5, 'Long', 'Win', 3.0, 300, 100, 95, 115, 115, 'Take Profit'),
+        $mk(6, 'Short', 'Win', 1.0, 100, 100, 105, 90, 90, 'Take Profit'),
+        $mk(7, 'Long', 'Loss', -1.0, -101, 100, 95, 115, 95, 'Stop Loss'),
+        $mk(8, 'Short', 'Loss', -1.0, -101, 100, 105, 90, 105, 'Stop Loss'),
+        $mk(9, 'Long', 'Break Even', 0.0, -1, 100, 95, 115, 100, 'Manual Closing'),
+        $mk(10, 'Long', 'Win', 2.0, 200, 100, 95, 110, 110, 'Take Profit'),
+        $mk(11, 'Long', 'Win', 5.0, 500, 100, 90, 150, 150, 'Take Profit', true),
+        $mk(12, 'Short', 'Win', 5.0, 500, 100, 110, 50, 50, 'Take Profit', true),
+    ];
 }
 
 // One state file per harness run -- the temp app copy it lives in (setup.js) is fresh
@@ -394,6 +434,47 @@ switch ($action) {
         $out['pending_orders'] = [];
         $out['closed_trades'] = [];
         out($out);
+
+    case 'get_backtest_results':
+        // v3.22.8 — real backtest_engine.php functions, same temp-copy directory as this
+        // stub (setup.js copies the whole app/ tree) -- this mock doesn't reimplement the
+        // metrics math, it feeds the real thing a known fixture.
+        require_once __DIR__ . '/backtest_engine.php';
+        $all = mockResultsTrades();
+        $trades = array_values(array_filter($all, fn($t) => !$t['backtest_rewound']));
+        $startingBalance = 10000.0;
+        $metrics = backtestResultsMetrics($trades, $startingBalance);
+        $stepMs = 3600000; // 1H, matches this fixture's own timeframe
+        $tradeList = array_map(function ($t) use ($stepMs) {
+            $t['duration_bars'] = (int) round(($t['time_out'] - $t['time_in']) / $stepMs);
+            unset($t['backtest_rewound']);
+            return $t;
+        }, $trades);
+        out([
+            'session' => [
+                'id' => $sessionIdParam, 'session_name' => 'UI Harness Results Session',
+                'symbol' => 'BTCUSDT', 'replay_timeframe' => '1H', 'status' => 'passed',
+                'start_time' => 1577836800000, 'replay_cursor_ms' => 1577836800000 + 130 * 3600000,
+                'starting_balance' => $startingBalance,
+            ],
+            'metrics' => $metrics,
+            'trades' => $tradeList,
+        ]);
+
+    case 'get_backtest_sessions':
+        // v3.22.8 — the Saved Backtests list, carrying the same results_summary field
+        // the real BacktestController::getSessions() computes per session.
+        require_once __DIR__ . '/backtest_engine.php';
+        $all = mockResultsTrades();
+        $trades = array_values(array_filter($all, fn($t) => !$t['backtest_rewound']));
+        $block = backtestMetricsBlock($trades, 10000.0);
+        out([[
+            'id' => 23, 'session_name' => 'UI Harness Results Session', 'symbol' => 'BTCUSDT',
+            'blind_mode' => false, 'replay_timeframe' => '1H', 'status' => 'passed',
+            'starting_balance' => 10000.0, 'equity' => 10000.0 + $block['net_usd'], 'created_at' => '2020-01-01 00:00:00',
+            'progress_to_target_pct' => null, 'fail_reason' => null,
+            'results_summary' => ['trade_count' => $block['n'], 'win_rate' => $block['win_rate'], 'expectancy_r' => $block['expectancy_r']],
+        ]]);
 
     case 'get_backtest_candles':
         $limit = (int) ($_GET['limit'] ?? 301);

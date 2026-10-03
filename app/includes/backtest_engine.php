@@ -238,6 +238,150 @@ function backtestAggregateCandles(array $rows): ?array {
     ];
 }
 
+/**
+ * v3.22.8 — Wilson score interval for a binomial proportion (95% by default, z=1.96).
+ * Chosen over the naive p +/- z*sqrt(p(1-p)/n) normal approximation specifically because
+ * it can't produce a bound outside [0,1] at small n — exactly the regime a backtest
+ * under 30 trades (this release's own "EARLY SIGNAL" threshold) lives in. Returns
+ * [lower, upper] as fractions (0..1); [0,0] when n is 0 (nothing to estimate from).
+ */
+function backtestWilsonInterval(int $wins, int $n, float $z = 1.96): array {
+    if ($n <= 0) return [0.0, 0.0];
+    $p = $wins / $n;
+    $z2 = $z * $z;
+    $denom = 1 + $z2 / $n;
+    $centre = $p + $z2 / (2 * $n);
+    $margin = $z * sqrt(($p * (1 - $p) + $z2 / (4 * $n)) / $n);
+    return [max(0.0, ($centre - $margin) / $denom), min(1.0, ($centre + $margin) / $denom)];
+}
+
+/**
+ * v3.22.8 — one metrics block: n/wins/losses/breakevens, win rate + its Wilson interval,
+ * average R, expectancy R, total R, profit factor, average win/loss R, net $, fees (+ %
+ * of gross), longest win/loss streak, and max drawdown $/% from the closed equity curve
+ * this same loop builds. Called three times by backtestResultsMetrics() below (overall,
+ * Long-only, Short-only) — the SAME shape every time, so a future fourth column (the
+ * v3.23.0 gate-checklist clean/not-clean split) only needs a fourth filtered call, not a
+ * reshape of this function or its caller.
+ *
+ * `$trades` must already be ordered ascending by time_out (the caller's own DB query
+ * guarantees this) — streaks and the equity walk both depend on trade order. Each row
+ * needs: result ('Win'/'Loss'/'Break Even'), r_multiple (float|null), net_pnl, fees, pnl
+ * (all float) — exactly BacktestController::settleTrade()'s own written columns.
+ *
+ * avg_r and expectancy_r are the SAME number, by construction: this engine's own
+ * settleTrade() derives r_multiple from the identical price difference backtestPnl()
+ * uses for pnl, so a Break-Even trade (pnl===0) always has r_multiple===0 too — meaning
+ * sum(r)/n (avg_r) and (wins/n)*avgWinR + (losses/n)*avgLossR (the textbook expectancy
+ * formula) reduce to the same arithmetic. Returned under both keys rather than inventing
+ * a second formula for a number that's already exact.
+ *
+ * profit_factor and fees_pct_of_gross are null (not 0 or INF) when their own denominator
+ * is empty (no losing trades; no trades at all) — "undefined," not "zero," same
+ * NULL-means-unavailable convention this codebase uses everywhere else (CLAUDE.md:
+ * session/r_multiple/emotion_tag). No rounding here — every figure is full precision;
+ * callers round for display, same division of responsibility settleTrade() already has
+ * with backtestPnl()/backtestFee().
+ */
+function backtestMetricsBlock(array $trades, float $startingBalance): array {
+    $n = count($trades);
+    $wins = 0; $losses = 0; $breakevens = 0;
+    $sumR = 0.0; $rCount = 0;
+    $winRs = []; $lossRs = [];
+    $grossProfit = 0.0; $grossLoss = 0.0; $netUsd = 0.0; $totalFees = 0.0; $grossAbsPnl = 0.0;
+    $winStreak = 0; $maxWinStreak = 0; $lossStreak = 0; $maxLossStreak = 0;
+    $equity = $startingBalance; $peak = $startingBalance; $maxDdUsd = 0.0; $maxDdPct = 0.0;
+
+    foreach ($trades as $t) {
+        $r = $t['r_multiple'] !== null ? (float) $t['r_multiple'] : null;
+        $netPnl = (float) $t['net_pnl'];
+        $fees = (float) $t['fees'];
+        $pnl = (float) $t['pnl'];
+
+        // Profit factor's gross profit/loss are split by RESULT classification, not by
+        // net_pnl's own sign -- a Break-Even trade (gross pnl exactly 0) can still have a
+        // slightly NEGATIVE net_pnl once its fees are subtracted, which would otherwise
+        // silently land in the loss bucket despite not being a "Loss" by this engine's
+        // own definition (caught by this file's own self-test, not shipped as a guess).
+        if ($t['result'] === 'Win') {
+            $wins++; $winStreak++; $lossStreak = 0; $maxWinStreak = max($maxWinStreak, $winStreak);
+            if ($r !== null) $winRs[] = $r;
+            $grossProfit += $netPnl;
+        } elseif ($t['result'] === 'Loss') {
+            $losses++; $lossStreak++; $winStreak = 0; $maxLossStreak = max($maxLossStreak, $lossStreak);
+            if ($r !== null) $lossRs[] = $r;
+            $grossLoss += $netPnl;
+        } else {
+            $breakevens++; $winStreak = 0; $lossStreak = 0;
+        }
+
+        if ($r !== null) { $sumR += $r; $rCount++; }
+        $netUsd += $netPnl;
+        $totalFees += $fees;
+        $grossAbsPnl += abs($pnl);
+
+        $equity += $netPnl;
+        if ($equity > $peak) $peak = $equity;
+        $dd = $peak - $equity;
+        if ($dd > $maxDdUsd) $maxDdUsd = $dd;
+        if ($peak > 0) $maxDdPct = max($maxDdPct, $dd / $peak * 100);
+    }
+
+    $avgR = $rCount > 0 ? $sumR / $rCount : null;
+    [$wilsonLower, $wilsonUpper] = backtestWilsonInterval($wins, $n);
+
+    return [
+        'n' => $n, 'wins' => $wins, 'losses' => $losses, 'breakevens' => $breakevens,
+        'win_rate' => $n > 0 ? $wins / $n : null,
+        'win_rate_wilson_lower' => $wilsonLower, 'win_rate_wilson_upper' => $wilsonUpper,
+        'avg_r' => $avgR, 'expectancy_r' => $avgR, 'total_r' => $rCount > 0 ? $sumR : null,
+        'profit_factor' => $grossLoss < 0 ? $grossProfit / abs($grossLoss) : null,
+        'avg_win_r' => count($winRs) > 0 ? array_sum($winRs) / count($winRs) : null,
+        'avg_loss_r' => count($lossRs) > 0 ? array_sum($lossRs) / count($lossRs) : null,
+        'net_usd' => $netUsd, 'total_fees' => $totalFees,
+        'fees_pct_of_gross' => $grossAbsPnl > 0 ? $totalFees / $grossAbsPnl * 100 : null,
+        'longest_win_streak' => $maxWinStreak, 'longest_loss_streak' => $maxLossStreak,
+        'max_drawdown_usd' => $maxDdUsd, 'max_drawdown_pct' => $maxDdPct,
+    ];
+}
+
+/**
+ * v3.22.8 — closed equity (in $, and cumulative R) after each trade, in the SAME order
+ * `$trades` is given in (ascending time_out) — backs the Results page's equity curve
+ * chart. `time_out` is carried through opaquely (whatever format the caller passed —
+ * this function does no date parsing of its own), so the chart can key its own x-axis
+ * off it without this engine needing to know or care about timestamp formats.
+ */
+function backtestEquityCurve(array $trades, float $startingBalance): array {
+    $equity = $startingBalance;
+    $cumulativeR = 0.0;
+    $curve = [];
+    foreach ($trades as $t) {
+        $equity += (float) $t['net_pnl'];
+        if ($t['r_multiple'] !== null) $cumulativeR += (float) $t['r_multiple'];
+        $curve[] = ['time_out' => $t['time_out'], 'equity_usd' => $equity, 'cumulative_r' => $cumulativeR];
+    }
+    return $curve;
+}
+
+/**
+ * v3.22.8 — the full Backtest Results payload's metrics: overall / Long-only / Short-only
+ * blocks (identical shape, see backtestMetricsBlock()'s own doc comment for why) plus the
+ * overall equity curve. BacktestController::getResults() builds the trade-list rows
+ * itself straight from the same query — a passthrough, not math, so it stays out of this
+ * pure-function file.
+ */
+function backtestResultsMetrics(array $trades, float $startingBalance): array {
+    $longTrades = array_values(array_filter($trades, fn($t) => $t['direction'] === 'Long'));
+    $shortTrades = array_values(array_filter($trades, fn($t) => $t['direction'] === 'Short'));
+    return [
+        'overall' => backtestMetricsBlock($trades, $startingBalance),
+        'long' => backtestMetricsBlock($longTrades, $startingBalance),
+        'short' => backtestMetricsBlock($shortTrades, $startingBalance),
+        'equity_curve' => backtestEquityCurve($trades, $startingBalance),
+    ];
+}
+
 // ── SELF-TEST ────────────────────────────────────────────────────────────
 // Run standalone: `php includes/backtest_engine.php` — no DB, no network. Same
 // convention as bitfunded_parser.php/bybit_client.php's own self-tests.
@@ -381,6 +525,110 @@ function backtest_engine_self_test(): void {
     $check('round price: >=1 -> 4dp', backtestRoundPrice(6.283185307), 6.2832);
     $check('round price: <1 -> 6dp', backtestRoundPrice(0.0044123456), 0.004412);
     $check('round price: exactly 100 uses the >=100 bucket (2dp)', backtestRoundPrice(100.456), 100.46);
+
+    // v3.22.8 — Results/statistics: 10 hand-constructed trades (7 Long, 3 Short), ascending
+    // by time_out, with R/net_pnl/fees/pnl chosen by hand so every aggregate below can be
+    // derived on paper. Sequence (direction, result, R, net_pnl, fees, pnl):
+    //   1 Long  Win   +2.0  +200  1   201
+    //   2 Long  Win   +1.5  +150  1   151
+    //   3 Short Loss  -1.0  -101  1  -100
+    //   4 Long  Loss  -1.0  -101  1  -100
+    //   5 Long  Win   +3.0  +300  1   301
+    //   6 Short Win   +1.0  +100  1   101
+    //   7 Long  Loss  -1.0  -101  1  -100
+    //   8 Short Loss  -1.0  -101  1  -100
+    //   9 Long  BE     0.0    -1  1     0
+    //  10 Long  Win   +2.0  +200  1   201
+    $rows = function (array $spec): array {
+        [$dir, $result, $r, $net, $fees, $pnl, $t] = $spec;
+        return ['direction' => $dir, 'result' => $result, 'r_multiple' => $r, 'net_pnl' => $net, 'fees' => $fees, 'pnl' => $pnl, 'time_out' => $t];
+    };
+    $tenTrades = array_map($rows, [
+        ['Long', 'Win', 2.0, 200, 1, 201, 1000],
+        ['Long', 'Win', 1.5, 150, 1, 151, 2000],
+        ['Short', 'Loss', -1.0, -101, 1, -100, 3000],
+        ['Long', 'Loss', -1.0, -101, 1, -100, 4000],
+        ['Long', 'Win', 3.0, 300, 1, 301, 5000],
+        ['Short', 'Win', 1.0, 100, 1, 101, 6000],
+        ['Long', 'Loss', -1.0, -101, 1, -100, 7000],
+        ['Short', 'Loss', -1.0, -101, 1, -100, 8000],
+        ['Long', 'Break Even', 0.0, -1, 1, 0, 9000],
+        ['Long', 'Win', 2.0, 200, 1, 201, 10000],
+    ]);
+    $startingBalance = 10000.0;
+    $overall = backtestMetricsBlock($tenTrades, $startingBalance);
+
+    $check('results: n = 10', $overall['n'], 10);
+    $check('results: 5 wins (1,2,5,6,10)', $overall['wins'], 5);
+    $check('results: 4 losses (3,4,7,8)', $overall['losses'], 4);
+    $check('results: 1 breakeven (9)', $overall['breakevens'], 1);
+    $check('results: win rate = 5/10', $overall['win_rate'], 0.5);
+    // Wilson 95% CI for 5/10, z=1.96 — computed independently (not via the function under
+    // test): p=0.5, centre=(0.5+1.96^2/20)/(1+1.96^2/10), margin likewise.
+    $z = 1.96; $p = 0.5; $nn = 10;
+    $expCentre = ($p + $z * $z / (2 * $nn)) / (1 + $z * $z / $nn);
+    $expMargin = ($z * sqrt(($p * (1 - $p) + $z * $z / (4 * $nn)) / $nn)) / (1 + $z * $z / $nn);
+    $check('results: Wilson lower bound', $overall['win_rate_wilson_lower'], $expCentre - $expMargin);
+    $check('results: Wilson upper bound', $overall['win_rate_wilson_upper'], $expCentre + $expMargin);
+    $check('results: Wilson interval brackets the raw win rate', $overall['win_rate_wilson_lower'] <= 0.5 && $overall['win_rate_wilson_upper'] >= 0.5, true);
+    // Total R: 2.0+1.5-1.0-1.0+3.0+1.0-1.0-1.0+0+2.0 = 5.5
+    $check('results: total R = 5.5', $overall['total_r'], 5.5);
+    $check('results: avg R = 5.5/10', $overall['avg_r'], 5.5 / 10);
+    $check('results: expectancy R equals avg R exactly (same formula, see doc comment)', $overall['expectancy_r'], $overall['avg_r']);
+    $check('results: avg win R = (2.0+1.5+3.0+1.0+2.0)/5', $overall['avg_win_r'], 9.5 / 5);
+    $check('results: avg loss R = (-1-1-1-1)/4', $overall['avg_loss_r'], -1.0);
+    // Profit factor: gross profit 200+150+300+100+200=950, gross loss |−101*4|=404.
+    $check('results: profit factor = 950/404', $overall['profit_factor'], 950 / 404);
+    // Net $: 200+150-101-101+300+100-101-101-1+200 = 545
+    $check('results: net $ = 545', $overall['net_usd'], 545.0);
+    $check('results: total fees = 10 (flat $1 x 10 trades)', $overall['total_fees'], 10.0);
+    // Fees % of gross: gross |pnl| = 201+151+100+100+301+101+100+100+0+201 = 1355.
+    $check('results: fees % of gross = 10/1355*100', $overall['fees_pct_of_gross'], 10 / 1355 * 100);
+    // Streaks: W,W,L,L,W,W,L,L,BE,W -> longest win run is 2 (trades 1-2, or 5-6), longest
+    // loss run is 2 (trades 3-4, or 7-8); the breakeven at 9 resets both before the final W.
+    $check('results: longest win streak = 2', $overall['longest_win_streak'], 2);
+    $check('results: longest loss streak = 2', $overall['longest_loss_streak'], 2);
+    // Max drawdown: equity path from 10000 is 10200,10350,10249,10148,10448,10548,10447,
+    // 10346,10345,10545, against a running peak of 10200,10350,10350,10350,10448,10548,
+    // 10548,10548,10548,10548. Dollar drawdown at each point: 0,0,101,202,0,0,101,202,
+    // 203,3 -- the biggest dollar drawdown is 203 (trade 9, peak 10548 from trade 6).
+    // Percentage drawdown at each point: 0,0,0.976%,1.952%,0,0,0.958%,1.915%,1.925%,0.028%
+    // -- the biggest PERCENTAGE is trade 4's 202/10350, not trade 9's own 203/10548 -- a
+    // smaller dollar drawdown against a smaller peak can be a LARGER percentage. The two
+    // maxima are tracked independently and deliberately NOT assumed to land on the same
+    // trade (an assumption this test itself got wrong on the first pass, before checking
+    // every point by hand rather than just the obvious dollar-max candidate).
+    $check('results: max drawdown $ = 203 (peak 10548 at trade 6, trough 10345 at trade 9)', $overall['max_drawdown_usd'], 203.0);
+    $check('results: max drawdown % = 202/10350*100 (trade 4 -- NOT the same point as the dollar max)', $overall['max_drawdown_pct'], 202 / 10350 * 100);
+
+    // Long/Short filtering, spot-checked (the shared arithmetic is already fully verified
+    // above against the overall block) — Long: trades 1,2,4,5,7,9,10 (4W/2L/1BE); Short:
+    // trades 3,6,8 (1W/2L).
+    $results = backtestResultsMetrics($tenTrades, $startingBalance);
+    $check('results: Long block n = 7', $results['long']['n'], 7);
+    $check('results: Long block wins = 4', $results['long']['wins'], 4);
+    $check('results: Long block losses = 2', $results['long']['losses'], 2);
+    $check('results: Short block n = 3', $results['short']['n'], 3);
+    $check('results: Short block wins = 1', $results['short']['wins'], 1);
+    $check('results: Short block losses = 2', $results['short']['losses'], 2);
+    $check('results: overall block matches the top-level backtestResultsMetrics() call', $results['overall']['n'], $overall['n']);
+
+    // Edge cases: no trades, and no losses (undefined profit factor must be null, not 0/INF).
+    $empty = backtestMetricsBlock([], $startingBalance);
+    $check('results: empty set -> n=0', $empty['n'], 0);
+    $check('results: empty set -> win_rate null, not 0 or NAN', $empty['win_rate'], null);
+    $check('results: empty set -> profit factor null (no losses, no wins either)', $empty['profit_factor'], null);
+    $allWins = backtestMetricsBlock(array_map($rows, [['Long', 'Win', 1.0, 100, 1, 101, 1000], ['Long', 'Win', 1.0, 100, 1, 101, 2000]]), $startingBalance);
+    $check('results: all-wins set -> profit factor null (gross loss is 0, "undefined" not Infinity)', $allWins['profit_factor'], null);
+
+    // Equity curve: $ and cumulative R after each of the first three trades.
+    $curve = backtestEquityCurve($tenTrades, $startingBalance);
+    $check('equity curve: 10 points, one per trade', count($curve), 10);
+    $check('equity curve: point 1 equity = 10000+200', $curve[0]['equity_usd'], 10200.0);
+    $check('equity curve: point 1 cumulative R = 2.0', $curve[0]['cumulative_r'], 2.0);
+    $check('equity curve: point 3 equity = 10200+150-101', $curve[2]['equity_usd'], 10249.0);
+    $check('equity curve: point 3 cumulative R = 2.0+1.5-1.0', $curve[2]['cumulative_r'], 2.5);
+    $check('equity curve: time_out carried through opaquely, unmodified', $curve[2]['time_out'], 3000);
 
     fwrite(STDOUT, "backtest_engine.php self-test: $pass passed, $fail failed\n");
     if ($fail > 0) exit(1);

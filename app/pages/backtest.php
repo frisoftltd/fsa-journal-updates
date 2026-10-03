@@ -159,7 +159,10 @@
         <span style="color:#6b7280;font-size:11px">Loss <b id="bt-strip-loss" style="color:#d1d4dc"></b></span>
         <span style="color:#6b7280;font-size:11px">Trades <b id="bt-strip-trades" style="color:#d1d4dc"></b></span>
       </div>
-      <div id="bt-replay-note" style="margin-left:auto;font-size:11px;color:#6b7280">Bybit data — indicative vs. live BitFunded fills</div>
+      <!-- v3.22.8 — opens the same Results page a Saved Backtests card's own "Results"
+           button does, for the session currently open here. -->
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="if (btActiveSessionId) showPage('backtest-results', btActiveSessionId)">📊 Results</button>
+      <div id="bt-replay-note" style="font-size:11px;color:#6b7280">Bybit data — indicative vs. live BitFunded fills</div>
     </div>
 
     <div class="bt-window-body">

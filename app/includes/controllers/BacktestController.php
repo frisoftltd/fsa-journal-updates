@@ -75,8 +75,37 @@ class BacktestController {
         $sessions = $s->fetchAll();
         jsonResponse(array_map(function ($sess) {
             $state = $this->computeSessionState($sess);
-            return $this->sessionSummary($sess, $state);
+            $out = $this->sessionSummary($sess, $state);
+            // v3.22.8 — the Saved Backtests card's own "n trades · win rate ·
+            // expectancy R" line, per session.
+            $out['results_summary'] = $this->quickResultsSummary((int) $sess['id']);
+            return $out;
         }, $sessions));
+    }
+
+    /** v3.22.8 — the Saved Backtests card's summary line, computed from the exact same
+     *  closed/non-rewound trade set getResults() itself queries (backtestMetricsBlock()
+     *  is the one source of truth for n/win_rate/expectancy_r — not a second, cheaper
+     *  approximation that could disagree with the real Results page). Only the columns
+     *  that function actually reads are selected; starting balance is irrelevant to
+     *  these three fields (only drawdown needs it), so 0.0 is passed rather than a real
+     *  query for it. */
+    private function quickResultsSummary(int $sessionId): array {
+        $s = $this->db->prepare(
+            "SELECT direction, result, r_multiple, net_pnl, fees, pnl FROM trades
+             WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
+               AND result IN ('Win','Loss','Break Even')"
+        );
+        $s->execute([$sessionId]);
+        $rows = array_map(function ($t) {
+            return [
+                'direction' => $t['direction'], 'result' => $t['result'],
+                'r_multiple' => $t['r_multiple'] !== null ? (float) $t['r_multiple'] : null,
+                'net_pnl' => (float) $t['net_pnl'], 'fees' => (float) $t['fees'], 'pnl' => (float) $t['pnl'],
+            ];
+        }, $s->fetchAll());
+        $block = backtestMetricsBlock($rows, 0.0);
+        return ['trade_count' => $block['n'], 'win_rate' => $block['win_rate'], 'expectancy_r' => $block['expectancy_r']];
     }
 
     public function getSession() {
@@ -101,6 +130,71 @@ class BacktestController {
         $out['pending_orders'] = $this->getPendingOrders($id);
         $out['closed_trades'] = $this->getRecentClosedTrades($id);
         jsonResponse($out);
+    }
+
+    /**
+     * v3.22.8 — the Results page's one data source. Computed live from `trades` every
+     * call, never stored (same "derive, don't store" rule this whole controller already
+     * lives by) — overall/Long/Short metric blocks + the equity curve come straight out
+     * of backtest_engine.php's pure functions, and the trade-list rows are a plain
+     * passthrough of the same query, not a second computation.
+     */
+    public function getResults() {
+        $id = validId($_GET['session_id'] ?? 0);
+        if (!$id) jsonError('Invalid session id.');
+        $session = $this->loadSession($id);
+
+        $s = $this->db->prepare(
+            "SELECT id, direction, entry_price, stop_loss, take_profit, exit_price, time_in, time_out,
+                    exit_reason, result, r_multiple, net_pnl, fees, pnl
+             FROM trades
+             WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
+               AND result IN ('Win','Loss','Break Even')
+             ORDER BY time_out ASC, id ASC"
+        );
+        $s->execute([$id]);
+        $trades = array_map(function ($t) {
+            return [
+                'id' => (int) $t['id'],
+                'direction' => $t['direction'],
+                'entry_price' => (float) $t['entry_price'],
+                'stop_loss' => (float) $t['stop_loss'],
+                'take_profit' => $t['take_profit'] !== null ? (float) $t['take_profit'] : null,
+                'exit_price' => $t['exit_price'] !== null ? (float) $t['exit_price'] : null,
+                'time_in' => $t['time_in'] !== null ? strtotime($t['time_in']) * 1000 : null,
+                'time_out' => $t['time_out'] !== null ? strtotime($t['time_out']) * 1000 : null,
+                'exit_reason' => $t['exit_reason'],
+                'result' => $t['result'],
+                'r_multiple' => $t['r_multiple'] !== null ? (float) $t['r_multiple'] : null,
+                'net_pnl' => (float) $t['net_pnl'],
+                'fees' => (float) $t['fees'],
+                'pnl' => (float) $t['pnl'],
+            ];
+        }, $s->fetchAll());
+
+        // Duration in bars — the trade list's own column, not a metrics-block concern,
+        // so it's built here rather than inside backtest_engine.php's pure functions.
+        $stepMs = backtestTimeframeStepMs($session['replay_timeframe']);
+        $tradeList = array_map(function ($t) use ($stepMs) {
+            $t['duration_bars'] = ($t['time_in'] !== null && $t['time_out'] !== null)
+                ? (int) round(($t['time_out'] - $t['time_in']) / $stepMs) : null;
+            return $t;
+        }, $trades);
+
+        jsonResponse([
+            'session' => [
+                'id' => (int) $session['id'],
+                'session_name' => $session['session_name'],
+                'symbol' => $session['blind_mode'] ? null : $session['symbol'],
+                'replay_timeframe' => $session['replay_timeframe'],
+                'status' => $session['status'],
+                'start_time' => $session['blind_mode'] ? null : (int) $session['start_time'],
+                'replay_cursor_ms' => (int) $session['replay_cursor_ms'],
+                'starting_balance' => (float) $session['starting_balance'],
+            ],
+            'metrics' => backtestResultsMetrics($trades, (float) $session['starting_balance']),
+            'trades' => $tradeList,
+        ]);
     }
 
     /**

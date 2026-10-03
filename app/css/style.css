@@ -592,6 +592,31 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .sb-progress-fill.red{background:var(--red)}
 .sb-progress-label{font-size:11px;color:var(--text3)}
 .sb-card-actions{display:flex;gap:6px;margin-top:2px}
+.sb-card-summary{font-size:11px;color:var(--text3)}
+
+/* ── BACKTEST RESULTS (v3.22.8 — own page, #backtest-results:<id>) ── */
+.br-header{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:14px}
+.br-header-meta{display:flex;gap:14px;font-size:12px;color:var(--text3);font-family:var(--font-mono, monospace)}
+.br-sample-banner{margin-top:10px;padding:6px 10px;border-radius:6px;font-size:12px;font-weight:600;display:inline-block}
+.br-sample-early{background:rgba(245,158,11,0.12);color:#b45309}
+.br-sample-positive{background:rgba(15,169,88,0.12);color:#0b7a3f}
+.br-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:18px}
+.br-tile{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px}
+.br-tile-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px}
+.br-tile-value{font-family:var(--font-mono, monospace);font-size:20px;font-weight:600;color:var(--text)}
+.br-panel-title{font-family:var(--font-head);font-weight:600;font-size:14px;color:var(--text);margin:18px 0 8px}
+.br-metric-table{width:100%;border-collapse:collapse;font-size:13px}
+.br-metric-table th,.br-metric-table td{padding:8px 12px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap}
+.br-metric-table th:first-child,.br-metric-table td:first-child{text-align:left}
+.br-metric-table thead th{color:var(--text3);font-size:11px;text-transform:uppercase;letter-spacing:0.5px}
+.br-metric-label{color:var(--text3)}
+.br-trade-table{width:100%;border-collapse:collapse;font-size:12px;font-family:var(--font-mono, monospace)}
+.br-trade-table th,.br-trade-table td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--border);white-space:nowrap}
+.br-trade-table th:nth-child(1),.br-trade-table td:nth-child(1),
+.br-trade-table th:nth-child(2),.br-trade-table td:nth-child(2),
+.br-trade-table th:nth-child(3),.br-trade-table td:nth-child(3),
+.br-trade-table th:nth-child(8),.br-trade-table td:nth-child(8){text-align:left}
+.br-trade-table thead th{color:var(--text3);font-size:10px;text-transform:uppercase;letter-spacing:0.5px;font-family:var(--font-body)}
 
 /* ── PDF PRINT ── */
 @media print{

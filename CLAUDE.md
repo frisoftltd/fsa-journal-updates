@@ -7,7 +7,7 @@
 **Last Updated:** 2026-10-03 (housekeeping split — see below)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
-> "what changed and why" writeup (v3.9.x through v3.22.7, plus some retired reference
+> "what changed and why" writeup (v3.9.x through v3.22.8, plus some retired reference
 > material) was moved there verbatim on 2026-10-03 to keep this file under 600 lines.
 > This file only documents **current state** — what's true right now, not how it got
 > that way. If you need the story behind a design decision, check the archive first.
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.22.7 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.22.8 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -90,7 +90,7 @@ fill/P&L/drawdown math lives in `includes/backtest_engine.php`, self-tested via
 `php includes/backtest_engine.php`.
 
 The backtesting UI (order ticket, drawing tools, live trade display, price-axis
-auto-scale) has gone through many fix releases — see the archive's v3.21.x–v3.22.7
+auto-scale) has gone through many fix releases — see the archive's v3.21.x–v3.22.8
 entries for the full story if something there looks surprising.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
@@ -230,7 +230,7 @@ report_cards / report_card_blocks / report_card_templates / report_card_template
   full column lists + the AI review payload/tool schema are in the archive (v3.18.0).
 backtest_sessions / backtest_pending_orders / backtest_drawings / user_drawing_defaults /
   backtest_exit_time_repairs_log — see the Backtesting Replay Engine section above and
-  the archive's v3.19.0–v3.22.7 entries for full column lists and design history.
+  the archive's v3.19.0–v3.22.8 entries for full column lists and design history.
 ```
 
 ### Data Relationships
@@ -358,7 +358,7 @@ File uploads go through `fetch()` directly with `FormData`.
 | Strategy | `get_strategy_trades`, `get_strategy_stats`, `add_strategy_trade`, `delete_strategy_trade` |
 | Reviews | `get_reviews`, `save_review` (legacy); `ReviewEngineController` for the generated insights feed |
 | Report Card | `get_report_card`, `save_report_card`, `get_report_card_history`, block/template/mantra/ticker CRUD, `run_ai_review`, `run_weekly_ai_review`, `get_ai_reviews`, `acknowledge_ai_finding` |
-| Backtesting | `get_backtest_session`, `get_backtest_candles`, `backtest_advance`, `backtest_rewind`, `backtest_place_order`, `backtest_cancel_order`, `backtest_close_position`, drawing CRUD via `BacktestDrawingController` |
+| Backtesting | `get_backtest_session`, `get_backtest_results` (metrics/trade-list for the Results page), `get_backtest_candles`, `backtest_advance`, `backtest_rewind`, `backtest_place_order`, `backtest_cancel_order`, `backtest_close_position`, drawing CRUD via `BacktestDrawingController` |
 
 Full per-action method/controller/description table is in the archive if you need it —
 this condensed version is enough to know which controller owns a given feature.
@@ -580,7 +580,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.7
+Current Version: v3.22.8
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

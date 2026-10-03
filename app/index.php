@@ -141,7 +141,7 @@ if (localStorage.getItem('fc_sidebar_collapsed') === '1') document.body.classLis
 
   <?php
   // ── Load each page from its own file ──
-  $pages = ['dashboard','trades','reportcard','stats','backtest','saved-backtests','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
+  $pages = ['dashboard','trades','reportcard','stats','backtest','backtest-results','saved-backtests','bfimport','calculator','strategy','strategies','leaderboard','review','profile','challenges'];
   foreach ($pages as $p) {
       include "pages/{$p}.php";
   }
@@ -181,7 +181,7 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 <!-- ══ JS MODULES ══ -->
 <?php foreach ([
     'app', 'dashboard', 'trades', 'report-card', 'stats', 'chart', 'backtest',
-    'backtest-drawings', 'saved-backtests', 'calculator', 'strategy', 'strategies',
+    'backtest-drawings', 'backtest-results', 'saved-backtests', 'calculator', 'strategy', 'strategies',
     'leaderboard', 'review', 'profile', 'challenges', 'import', 'bfimport',
 ] as $__jsModule): ?>
 <script src="js/<?= $__jsModule ?>.js?v=<?= urlencode($__assetVer) ?>"></script>

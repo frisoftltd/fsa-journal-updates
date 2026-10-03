@@ -193,6 +193,11 @@
         <button class="bt-tool-btn" data-tool="trend_line" onclick="btSelectTool('trend_line')" title="Trend Line">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="19" r="1.6" fill="currentColor" stroke="none"/><line x1="5" y1="19" x2="19" y2="5"/><circle cx="19" cy="5" r="1.6" fill="currentColor" stroke="none"/></svg>
         </button>
+        <!-- v3.22.9 — S/R zones and order blocks. Own hand-drawn glyph, same convention
+             as every other icon in this toolbar (24x24, stroke-only, no traced artwork). -->
+        <button class="bt-tool-btn" data-tool="rectangle" onclick="btSelectTool('rectangle')" title="Rectangle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1"/></svg>
+        </button>
         <button class="bt-tool-btn" data-tool="horizontal_line" onclick="btSelectTool('horizontal_line')" title="Horizontal Line">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="12" r="1.6" fill="currentColor" stroke="none"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="20" cy="12" r="1.6" fill="currentColor" stroke="none"/></svg>
         </button>
@@ -222,6 +227,11 @@
              js/backtest-drawings.js::btPositionSelectionToolbar(), just above whichever
              position-tool box is currently selected. -->
         <div id="bt-pos-toolbar" class="bt-pos-toolbar" style="display:none"></div>
+        <!-- v3.22.9 — rectangle's own floating selection toolbar (colour/settings/delete
+             only — no Place trade/lock, per the briefing). Positioned each redraw by
+             js/backtest-drawings.js::btRectSelectionToolbar(), just above whichever
+             rectangle is currently selected. -->
+        <div id="bt-rect-toolbar" class="bt-pos-toolbar" style="display:none"></div>
         <!-- v3.22.3 Part C — one small real "✕" button per pending limit order,
              positioned over its own Limit pill by js/backtest-drawings.js::
              btSyncPendingCancelButtons() every redraw -- a real DOM click target over a

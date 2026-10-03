@@ -58,7 +58,9 @@ let btPendingMoveClientPos = null; // {clientX, clientY} of the latest mousemove
 // panel (v3.21.12). Fib retracement only this release, per the briefing's own scope —
 // btTemplateRowHtml()/btMergedToolDefaults() are already generic by tool, so adding
 // another tool here later needs no further plumbing change.
-const BT_TEMPLATE_TOOLS = ['fib_retracement'];
+// v3.22.9 — rectangle opts in too (its own panel shows the row inside a "Template ▾"
+// dropdown instead of inline, but reuses the exact same save/reset functions below).
+const BT_TEMPLATE_TOOLS = ['fib_retracement', 'rectangle'];
 
 const BT_TOOL_DEFAULTS = {
     position_long:   { color: '#26a69a', rr_ratio: 3, rr_locked: true },
@@ -100,6 +102,17 @@ const BT_TOOL_DEFAULTS = {
     trend_line:      { color: '#2962ff', width: 2, style: 'solid', extend_left: false, extend_right: false, show_price_label: true, show_angle_label: false },
     horizontal_line: { color: '#2962ff', width: 1, style: 'solid' },
     horizontal_ray:  { color: '#2962ff', width: 1, style: 'solid' },
+    // v3.22.9 — S/R zones and order blocks. `extend` reaches the chart's left/right edge
+    // horizontally only (never vertically) -- same "between its own anchors by default"
+    // convention the v3.21.2 fib/trend-line `extend` fields already established.
+    rectangle: {
+        extend: 'none', // 'none' | 'left' | 'right' | 'both'
+        border_color: '#2962ff', border_width: 1, border_style: 'solid',
+        middle_line: false, middle_color: '#2962ff', middle_style: 'dashed',
+        background: true, background_color: '#2962ff', background_opacity: 0.15,
+        label_text: '', label_position: 'top-left', // 'top-left' | 'center' | 'bottom-left'
+        label_font_size: 12, label_color: '#d1d4dc',
+    },
 };
 
 // ── OVERLAY SETUP ──────────────────────────────────────────
@@ -481,7 +494,11 @@ async function btDeleteDrawing(id) {
 }
 
 // ── TOOLBAR ────────────────────────────────────────────────
-const BT_DRAG_TOOLS = ['fib_retracement', 'position_long', 'position_short'];
+// v3.22.9 — rectangle is click-drag corner-to-corner, same placement gesture as fib/
+// position; the shared mouseup handler's existing "less than one handle-radius of real
+// movement cancels" guard (BT_HANDLE_RADIUS=7px) already satisfies the briefing's own
+// "releasing after less than 3px cancels" -- every sub-3px release is also sub-7px.
+const BT_DRAG_TOOLS = ['fib_retracement', 'position_long', 'position_short', 'rectangle'];
 const BT_TWO_CLICK_TOOLS = ['trend_line'];
 const BT_SINGLE_CLICK_TOOLS = ['horizontal_line', 'horizontal_ray'];
 
@@ -692,8 +709,18 @@ function btOnDrawMouseDown(e) {
         // a drag that never actually moves the cursor's own price at all.
         const startPoint = btIsPositionTool(hit.drawing.tool) ? btPixelToPointContinuous(x, y) : btPixelToPoint(x, y);
         btSelectedDrawingId = hit.drawing.id;
+        // v3.22.9 — the four scalar bounds a rectangle's corner/edge handles resize
+        // against (btApplyDrag()'s own 'rect-*' branch), computed once at drag start so a
+        // mid-drag flip (dragging a corner past its opposite) re-derives correctly from a
+        // fixed baseline rather than compounding on each frame's own already-dragged value.
+        const startBounds = hit.drawing.tool === 'rectangle' ? {
+            timeMin: Math.min(hit.drawing.points[0].time, hit.drawing.points[1].time),
+            timeMax: Math.max(hit.drawing.points[0].time, hit.drawing.points[1].time),
+            priceMin: Math.min(hit.drawing.points[0].price, hit.drawing.points[1].price),
+            priceMax: Math.max(hit.drawing.points[0].price, hit.drawing.points[1].price),
+        } : null;
         btDragState = {
-            drawingId: hit.drawing.id, handleIndex: hit.handleIndex, startPoint,
+            drawingId: hit.drawing.id, handleIndex: hit.handleIndex, startPoint, startBounds,
             startPoints: JSON.parse(JSON.stringify(hit.drawing.points)),
             startSettings: JSON.parse(JSON.stringify(hit.drawing.settings)),
         };
@@ -927,6 +954,30 @@ function btApplyDrag(dragState, newPoint) {
         d.points = dragState.startPoints.map((p, i) => i === dragState.handleIndex ? newPoint : p);
         return;
     }
+    // v3.22.9 — rectangle's 8 handles: corners move both axes, top/bottom move price
+    // only, left/right move time only. Always re-derived from the FIXED drag-start bounds
+    // (dragState.startBounds) plus only the one changed edge, then re-sorted into
+    // min/max -- a handle dragged past its own opposite edge flips the box rather than
+    // producing an inverted (negative-width) rectangle, and points[0] stays top-left by
+    // construction on every frame, not just at save time.
+    if (dragState.startBounds && typeof dragState.handleIndex === 'string' && dragState.handleIndex.indexOf('rect-') === 0) {
+        let { timeMin, timeMax, priceMin, priceMax } = dragState.startBounds;
+        switch (dragState.handleIndex) {
+            case 'rect-tl': timeMin = newPoint.time; priceMax = newPoint.price; break;
+            case 'rect-tr': timeMax = newPoint.time; priceMax = newPoint.price; break;
+            case 'rect-bl': timeMin = newPoint.time; priceMin = newPoint.price; break;
+            case 'rect-br': timeMax = newPoint.time; priceMin = newPoint.price; break;
+            case 'rect-top': priceMax = newPoint.price; break;
+            case 'rect-bottom': priceMin = newPoint.price; break;
+            case 'rect-left': timeMin = newPoint.time; break;
+            case 'rect-right': timeMax = newPoint.time; break;
+        }
+        d.points = [
+            { time: Math.min(timeMin, timeMax), price: Math.max(priceMin, priceMax) },
+            { time: Math.max(timeMin, timeMax), price: Math.min(priceMin, priceMax) },
+        ];
+        return;
+    }
     // v3.22.5 Fix F — the two edge handles: "dragging left handle moves points[0].time,
     // right handle moves points[1].time... minimum width 3 bars; prices unchanged."
     // points[0] is always the box's own left/earlier time and points[1] always the
@@ -984,6 +1035,19 @@ function btApplyDrag(dragState, newPoint) {
 function btComputeTpFromRatio(tool, entry, stop, ratio) {
     const dist = Math.abs(entry - stop);
     return tool === 'position_long' ? entry + dist * ratio : entry - dist * ratio;
+}
+
+/** v3.22.9 — a rectangle's two stored points are always [top-left, bottom-right]
+ *  (earliest time + highest price, then latest time + lowest price), regardless of which
+ *  corner the trader actually dragged from/to or which corner handle a resize moved.
+ *  Rendering/hit-testing both already take min/max of the two points independently, so
+ *  this is only needed to keep the STORED shape stable (and the "points[0] is top-left"
+ *  contract true) across saves -- it has no effect on what's drawn on screen. */
+function btNormalizeRectPoints(a, b) {
+    return [
+        { time: Math.min(a.time, b.time), price: Math.max(a.price, b.price) },
+        { time: Math.max(a.time, b.time), price: Math.min(a.price, b.price) },
+    ];
 }
 
 // v3.21.13 — the position tool never checked which side of entry the stop/TP should be
@@ -1110,6 +1174,11 @@ async function btFinalizeNewDrawing(tool, points) {
         settings.take_profit = btComputeTpFromRatio(tool, settings.entry, settings.stop_loss, settings.rr_ratio);
         const spanMs = btPositionCreationSpanMs(points[0].time, points[1].time);
         points = [{ time: points[0].time }, { time: points[0].time + spanMs / 1000 }];
+    } else if (tool === 'rectangle') {
+        // v3.22.9 — "normalised so points[0] is top-left": a trader can drag from any
+        // corner toward any other, so the raw drag start/end has no fixed relationship to
+        // which corner is actually top-left until sorted here.
+        points = btNormalizeRectPoints(points[0], points[1]);
     }
     const drawing = await btSaveNewDrawing(tool, points, settings);
     btActiveTool = null;
@@ -1709,6 +1778,72 @@ function btWirePositionToolbar(d) {
     }
 }
 
+// v3.22.9 — rectangle's own floating selection toolbar: "reuse the floating toolbar
+// pattern (colour · settings · delete), minus Place trade and lock." Deliberately a
+// separate, much simpler function from btPositionSelectionToolbar() above rather than
+// folding a third tool type into that one -- that function's own pill-bounds measurement
+// and R:R-lock/Place-trade state only make sense for a trade's own box; a rectangle just
+// needs to sit just above its own top-left corner.
+let btRectToolbarBuiltForId = null;
+function btRectSelectionToolbar() {
+    const el = document.getElementById('bt-rect-toolbar');
+    if (!el) return;
+    const d = btSelectedDrawingId ? btDrawings.find(x => x.id === btSelectedDrawingId) : null;
+    if (!d || d.tool !== 'rectangle' || btDragState || btTicketDragField || btDrawInProgress) {
+        el.style.display = 'none';
+        btRectToolbarBuiltForId = null;
+        return;
+    }
+    if (btRectToolbarBuiltForId !== d.id) {
+        el.innerHTML = btRectToolbarHtml(d);
+        btWireRectToolbar(d);
+        btRectToolbarBuiltForId = d.id;
+    } else {
+        const colorInput = document.getElementById('bt-rect-toolbar-color');
+        if (colorInput && document.activeElement !== colorInput) colorInput.value = d.settings.border_color || '#2962ff';
+    }
+    el.style.display = 'flex';
+
+    const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
+    const y1 = btPriceToY(d.points[0].price), y2 = btPriceToY(d.points[1].price);
+    if (x1 === null || x2 === null || y1 === null || y2 === null) { el.style.display = 'none'; return; }
+    const left = Math.min(x1, x2), right = Math.max(x1, x2);
+    const top = Math.min(y1, y2);
+    const toolbarW = el.offsetWidth || 110, toolbarH = el.offsetHeight || 32;
+    const margin = 4;
+    let elLeft = (left + right) / 2 - toolbarW / 2;
+    let elTop = top - toolbarH - 8;
+    if (elTop < margin) elTop = top + 8; // would sit above the chart area -- drop inside instead
+    const maxW = btDrawOverlay ? btDrawOverlay.width : 9999;
+    elLeft = Math.max(margin, Math.min(elLeft, maxW - toolbarW - margin));
+    el.style.left = elLeft + 'px';
+    el.style.top = Math.max(margin, elTop) + 'px';
+}
+function btRectToolbarHtml(d) {
+    return `
+        <input type="color" id="bt-rect-toolbar-color" value="${d.settings.border_color || '#2962ff'}" title="Border colour">
+        <div class="bt-pos-toolbar-sep"></div>
+        <button type="button" id="bt-rect-toolbar-settings" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M4 12h2m12 0h2M12 4v2m0 12v2M6.3 6.3l1.4 1.4m8.6 8.6l1.4 1.4M6.3 17.7l1.4-1.4m8.6-8.6l1.4-1.4"/></svg>
+        </button>
+        <div class="bt-pos-toolbar-sep"></div>
+        <button type="button" id="bt-rect-toolbar-delete" title="Delete">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        </button>`;
+}
+function btWireRectToolbar(d) {
+    const colorInput = document.getElementById('bt-rect-toolbar-color');
+    if (colorInput) colorInput.oninput = () => {
+        d.settings.border_color = colorInput.value;
+        btUpdateDrawing(d.id, { settings: d.settings });
+        btScheduleRedraw();
+    };
+    const settingsBtn = document.getElementById('bt-rect-toolbar-settings');
+    if (settingsBtn) settingsBtn.onclick = (e) => btShowDrawSettingsPopover(d, e.clientX, e.clientY);
+    const deleteBtn = document.getElementById('bt-rect-toolbar-delete');
+    if (deleteBtn) deleteBtn.onclick = () => btDeleteDrawing(d.id);
+}
+
 /** v3.22.7 — the position tool is now the trade's ONLY on-chart box (the v3.22.3
  *  auto-growing live box is gone), so one place has to answer "what state is this
  *  linked drawing's order/trade actually in" for hit-testing, rendering and the
@@ -1743,13 +1878,21 @@ function btDistToSegment(px, py, x1, y1, x2, y2) {
     return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 function btHitTest(x, y) {
-    for (let i = btDrawings.length - 1; i >= 0; i--) {
+    // v3.22.9 — "a rectangle never blocks clicking a position tool or the trade lines on
+    // top of it": rectangles always hit-test LAST (lowest priority), regardless of their
+    // position in btDrawings, by moving them to the front of this reversed-iteration
+    // order -- every other tool keeps its existing relative priority (array order, most
+    // recently added wins ties) among themselves.
+    const rects = btDrawings.filter(d => d.tool === 'rectangle');
+    const others = btDrawings.filter(d => d.tool !== 'rectangle');
+    const ordered = rects.concat(others);
+    for (let i = ordered.length - 1; i >= 0; i--) {
         // v3.22.7 — a linked drawing is the trade's own visual now (never hidden, never
         // superseded by a separate live box), so it stays hit-testable just like any
         // other drawing; btHitTestOne() itself is what locks the entry/stop/tp HANDLES
         // specifically while the order/trade is still live.
-        const handleIndex = btHitTestOne(btDrawings[i], x, y);
-        if (handleIndex !== null) return { drawing: btDrawings[i], handleIndex };
+        const handleIndex = btHitTestOne(ordered[i], x, y);
+        if (handleIndex !== null) return { drawing: ordered[i], handleIndex };
     }
     return null;
 }
@@ -1805,6 +1948,38 @@ function btHitTestOne(d, x, y) {
         }
         return null;
     }
+    if (d.tool === 'rectangle') {
+        const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
+        const y1 = btPriceToY(d.points[0].price), y2 = btPriceToY(d.points[1].price);
+        if (x1 === null || x2 === null || y1 === null || y2 === null) return null;
+        const left = Math.min(x1, x2), right = Math.max(x1, x2);
+        const top = Math.min(y1, y2), bottom = Math.max(y1, y2);
+        const midX = (left + right) / 2, midY = (top + bottom) / 2;
+        // 8 handles -- "when selected" only, same convention as the position tool's own
+        // edge-left/edge-right handles, so an unselected click near a corner just selects
+        // the rectangle (via the border/inside check below) instead of grabbing a handle.
+        if (d.id === btSelectedDrawingId) {
+            const handles = [
+                ['rect-tl', left, top], ['rect-tr', right, top],
+                ['rect-bl', left, bottom], ['rect-br', right, bottom],
+                ['rect-top', midX, top], ['rect-bottom', midX, bottom],
+                ['rect-left', left, midY], ['rect-right', right, midY],
+            ];
+            for (const [name, hx, hy] of handles) {
+                if (Math.hypot(x - hx, y - hy) <= BT_HANDLE_RADIUS) return name;
+            }
+        }
+        // "A selection click is accepted only near the border or inside the box" --
+        // clicking genuinely empty chart space elsewhere must keep panning the chart.
+        const nearBorder = (
+            btDistToSegment(x, y, left, top, right, top) <= BT_LINE_HIT_TOLERANCE ||
+            btDistToSegment(x, y, right, top, right, bottom) <= BT_LINE_HIT_TOLERANCE ||
+            btDistToSegment(x, y, right, bottom, left, bottom) <= BT_LINE_HIT_TOLERANCE ||
+            btDistToSegment(x, y, left, bottom, left, top) <= BT_LINE_HIT_TOLERANCE
+        );
+        const inside = x >= left && x <= right && y >= top && y <= bottom;
+        return (nearBorder || inside) ? 'move' : null;
+    }
     return null;
 }
 
@@ -1841,7 +2016,15 @@ function btRenderDrawings() {
     // the ticket's own live values, not its last-saved settings, so the box/pills and the
     // ticket panel/lines can never show two different trades at once. btTicketRenderValues()
     // (js/backtest.js) is null whenever no ticket is open or this isn't the linked drawing.
-    for (const d of btDrawings) {
+    // v3.22.9 — "rectangles draw beneath position tools and trade lines, so zones never
+    // cover a live trade": drawn in their own first pass, regardless of where they sit in
+    // btDrawings, so every other tool (including a position box added afterward) always
+    // paints on top. Live trade lines/pills (btDrawTicketLines/btDrawLiveTrades) already
+    // render after this whole loop, so they're covered by this same ordering for free.
+    for (const d of btDrawings.filter(dw => dw.tool === 'rectangle')) {
+        btDrawOne(ctx, d, d.id === btSelectedDrawingId, false, null);
+    }
+    for (const d of btDrawings.filter(dw => dw.tool !== 'rectangle')) {
         // v3.22.7 — a linked drawing is the trade's own box now (the v3.22.3 "superseded
         // by the running trade display" suppression is gone, per the trader's own report
         // that the box disappearing after Place Trade was the bug, not the fix). It
@@ -1922,6 +2105,7 @@ function btRenderDrawings() {
     // disappears").
     btDrawLiveTrades(ctx);
     btPositionSelectionToolbar();
+    btRectSelectionToolbar();
     btSyncPendingCancelButtons();
     btSyncEdgePinnedButtons();
     btSyncAutoScaleToggleButton();
@@ -1934,6 +2118,7 @@ function btDrawOne(ctx, d, selected, isPreview, override) {
     else if (d.tool === 'horizontal_ray') btDrawHLine(ctx, d, selected, true);
     else if (d.tool === 'fib_retracement') btDrawFib(ctx, d, selected);
     else if (d.tool === 'position_long' || d.tool === 'position_short') btDrawPosition(ctx, d, selected, override);
+    else if (d.tool === 'rectangle') btDrawRectangle(ctx, d, selected);
     ctx.restore();
 }
 function btLineDash(style) { return style === 'dashed' ? [6, 4] : style === 'dotted' ? [1, 3] : []; }
@@ -2299,6 +2484,78 @@ function btDrawPosition(ctx, d, selected, override) {
     }
 }
 
+/** v3.22.9 — S/R zones and order blocks. `extend` only reaches past the box's own
+ *  anchors horizontally (never vertically, never affecting the stored points or the
+ *  draggable/hit-testable geometry -- same "visual reach only" precedent trend_line's own
+ *  extend_left/extend_right and fib's `extend` already set). Handles/axis pills are drawn
+ *  at the UNEXTENDED corners, matching btHitTestOne()'s own geometry exactly. */
+function btDrawRectangle(ctx, d, selected) {
+    const s = d.settings;
+    const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
+    const y1 = btPriceToY(d.points[0].price), y2 = btPriceToY(d.points[1].price);
+    if (x1 === null || x2 === null || y1 === null || y2 === null) return;
+    const left = Math.min(x1, x2), right = Math.max(x1, x2);
+    const top = Math.min(y1, y2), bottom = Math.max(y1, y2);
+    const w = btDrawOverlay.width;
+    let drawLeft = left, drawRight = right;
+    if (s.extend === 'left' || s.extend === 'both') drawLeft = 0;
+    if (s.extend === 'right' || s.extend === 'both') drawRight = w;
+
+    if (s.background) {
+        ctx.fillStyle = btHexToRgba(s.background_color || '#2962ff', s.background_opacity ?? 0.15);
+        ctx.fillRect(drawLeft, top, drawRight - drawLeft, bottom - top);
+    }
+    ctx.strokeStyle = s.border_color || '#2962ff';
+    ctx.lineWidth = s.border_width || 1;
+    ctx.setLineDash(btLineDash(s.border_style));
+    ctx.strokeRect(drawLeft, top, drawRight - drawLeft, bottom - top);
+    ctx.setLineDash([]);
+
+    if (s.middle_line) {
+        const midY = (top + bottom) / 2;
+        ctx.strokeStyle = s.middle_color || s.border_color || '#2962ff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash(btLineDash(s.middle_style || 'dashed'));
+        ctx.beginPath(); ctx.moveTo(drawLeft, midY); ctx.lineTo(drawRight, midY); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    if (s.label_text) {
+        ctx.font = `${s.label_font_size || 12}px sans-serif`;
+        ctx.fillStyle = s.label_color || '#d1d4dc';
+        const pad = 4;
+        ctx.textAlign = 'left';
+        let lx = drawLeft + pad, ly = top + (s.label_font_size || 12);
+        if (s.label_position === 'center') { lx = (drawLeft + drawRight) / 2; ly = (top + bottom) / 2; ctx.textAlign = 'center'; }
+        else if (s.label_position === 'bottom-left') { ly = bottom - pad; }
+        ctx.fillText(s.label_text, lx, ly);
+        ctx.textAlign = 'left';
+    }
+
+    if (selected) {
+        const hc = s.border_color || '#2962ff';
+        const midX = (left + right) / 2, midY2 = (top + bottom) / 2;
+        btDrawHandle(ctx, left, top, hc); btDrawHandle(ctx, right, top, hc);
+        btDrawHandle(ctx, left, bottom, hc); btDrawHandle(ctx, right, bottom, hc);
+        btDrawHandle(ctx, midX, top, hc); btDrawHandle(ctx, midX, bottom, hc);
+        btDrawHandle(ctx, left, midY2, hc); btDrawHandle(ctx, right, midY2, hc);
+
+        // Price pills on the price axis (top/bottom), time pills on the time axis
+        // (start/end) -- "while selected," blue fill, per the briefing.
+        const priceAxisX = w - 36;
+        const topPrice = Math.max(d.points[0].price, d.points[1].price);
+        const bottomPrice = Math.min(d.points[0].price, d.points[1].price);
+        btDrawPill(ctx, priceAxisX, top, fmtPrice5(topPrice), '#2962ff');
+        btDrawPill(ctx, priceAxisX, bottom, fmtPrice5(bottomPrice), '#2962ff');
+        const axisY = ctx.canvas.height - 10;
+        const fmtAxisTime = t => new Date(t * 1000).toISOString().slice(11, 16);
+        const leftTime = Math.min(d.points[0].time, d.points[1].time);
+        const rightTime = Math.max(d.points[0].time, d.points[1].time);
+        btDrawPill(ctx, left, axisY, fmtAxisTime(leftTime), '#2962ff');
+        btDrawPill(ctx, right, axisY, fmtAxisTime(rightTime), '#2962ff');
+    }
+}
+
 // ── SETTINGS POPOVER (right-click, or double-click, on a drawing) ──
 // v3.21.4 — the settings panel is now a floating, draggable window instead of a fixed-
 // position popover. "Remembered position" only ever means a position the user actually
@@ -2336,7 +2593,16 @@ function btShowDrawSettingsPopover(d, clientX, clientY) {
         pop.className = 'bt-draw-popover';
         document.body.appendChild(pop);
     }
-    pop.innerHTML = btDrawSettingsHtml(d);
+    const isRect = d.tool === 'rectangle';
+    if (isRect) {
+        // v3.22.9 — "Cancel reverts to the values from when the panel opened": snapshot
+        // taken fresh every time the panel opens, so a prior OK's already-committed state
+        // is always the correct revert target, not whatever the drawing looked like the
+        // very first time it was ever opened.
+        d._rectSnapshot = JSON.parse(JSON.stringify({ points: d.points, settings: d.settings }));
+    }
+    pop.classList.toggle('bt-draw-popover-wide', isRect);
+    pop.innerHTML = isRect ? btRectSettingsHtml(d) : btDrawSettingsHtml(d);
     // Measure the ACTUAL rendered size before placing it on screen -- the previous
     // version clamped against a guessed ~300px height, which was already wrong for the
     // fib settings dialog (v3.21.2, easily 500+px of real content) and is exactly what
@@ -2366,8 +2632,10 @@ function btShowDrawSettingsPopover(d, clientX, clientY) {
     pop.style.left = left + 'px';
     pop.style.top = top + 'px';
 
-    btWireDrawSettingsPopover(d);
     btWireDrawPopoverDrag(pop);
+    // v3.22.9 — wired AFTER the drag wiring above so its own close-x rebinding (revert,
+    // not a plain hide) wins; every other tool keeps the plain-hide close-x.
+    if (isRect) btWireRectSettingsPopover(d); else btWireDrawSettingsPopover(d);
 }
 /** Drag-by-header, clamped to the viewport on every move (not just at drop) so the panel
  *  can never be dragged fully or partly off-screen. The final position is only persisted
@@ -2525,4 +2793,163 @@ function btWireDrawSettingsPopover(d) {
     if (saveDefaultBtn) saveDefaultBtn.onclick = () => btSaveDrawingDefault(d);
     const resetDefaultBtn = document.getElementById('bt-draw-reset-default-btn');
     if (resetDefaultBtn) resetDefaultBtn.onclick = () => btResetDrawingDefault(d.tool);
+}
+
+// ── RECTANGLE SETTINGS PANEL (v3.22.9) ──────────────────────
+// Tabbed (Style / Text / Coordinates), with explicit Cancel/OK semantics instead of this
+// file's usual "every field change saves immediately" convention: fields write straight
+// into d.points/d.settings and redraw live (so the chart always reflects the panel, per
+// the briefing's own "changes apply live"), but btUpdateDrawing() -- the actual SERVER
+// save -- only ever runs once, from OK. Cancel restores the snapshot taken the moment the
+// panel opened and never saves at all. Every other tool's panel has no such snapshot/
+// revert concept, which is why this is a parallel set of functions rather than new
+// branches inside btDrawSettingsHtml()/btWireDrawSettingsPopover() above.
+
+/** "Display seconds" (this file's own time domain -- see the architecture note at the top
+ *  of this file) formatted for a native <input type="datetime-local">, and back. Treats
+ *  the value's own Y/M/D/h/m components as the instant itself (no local-timezone
+ *  conversion in either direction) -- the exact same convention btDrawPosition()'s own
+ *  axis-pill time text already uses (`new Date(t*1000).toISOString().slice(11,16)`), just
+ *  extended to the full date for an editable field. */
+function btDisplaySecToDatetimeLocal(sec) {
+    return new Date(sec * 1000).toISOString().slice(0, 16);
+}
+function btDatetimeLocalToDisplaySec(value) {
+    return Math.floor(new Date(value + ':00Z').getTime() / 1000);
+}
+
+function btRectSettingsHtml(d) {
+    const s = d.settings;
+    const p0 = d.points[0], p1 = d.points[1];
+    return `<div class="bt-draw-popover-header" id="bt-draw-popover-header">
+            <span class="bt-draw-popover-header-title">Rectangle</span>
+            <button type="button" id="bt-draw-popover-close-x" class="bt-draw-popover-close-x" title="Close">✕</button>
+        </div>
+        <div class="bt-draw-popover-body">
+            <div class="bt-draw-popover-tabs">
+                <button type="button" class="bt-draw-popover-tab active" data-tab="style">Style</button>
+                <button type="button" class="bt-draw-popover-tab" data-tab="text">Text</button>
+                <button type="button" class="bt-draw-popover-tab" data-tab="coords">Coordinates</button>
+            </div>
+            <div class="bt-draw-popover-tabpanel active" data-tabpanel="style">
+                <label>Extend <select data-field="extend">
+                    <option value="none" ${(!s.extend || s.extend === 'none') ? 'selected' : ''}>Don't extend</option>
+                    <option value="left" ${s.extend === 'left' ? 'selected' : ''}>Left</option>
+                    <option value="right" ${s.extend === 'right' ? 'selected' : ''}>Right</option>
+                    <option value="both" ${s.extend === 'both' ? 'selected' : ''}>Both</option>
+                </select></label>
+                <label>Border colour <input type="color" data-field="border_color" value="${s.border_color || '#2962ff'}"></label>
+                <label>Border width <input type="number" data-field="border_width" value="${s.border_width || 1}" min="1" max="4"></label>
+                <label>Border style ${btStyleSelect('border_style', s.border_style || 'solid')}</label>
+                <label><input type="checkbox" data-field="middle_line" ${s.middle_line ? 'checked' : ''}> Middle line</label>
+                <label>Middle colour <input type="color" data-field="middle_color" value="${s.middle_color || '#2962ff'}"></label>
+                <label>Middle style ${btStyleSelect('middle_style', s.middle_style || 'dashed')}</label>
+                <label><input type="checkbox" data-field="background" ${s.background ? 'checked' : ''}> Background</label>
+                <label>Background colour <input type="color" data-field="background_color" value="${s.background_color || '#2962ff'}"></label>
+                <label>Opacity <input type="range" data-field="background_opacity" value="${s.background_opacity ?? 0.15}" min="0" max="1" step="0.05"></label>
+            </div>
+            <div class="bt-draw-popover-tabpanel" data-tabpanel="text">
+                <label>Label <input type="text" data-field="label_text" value="${escapeHtml(s.label_text || '')}" placeholder="optional"></label>
+                <label>Position <select data-field="label_position">
+                    <option value="top-left" ${(!s.label_position || s.label_position === 'top-left') ? 'selected' : ''}>Top-left</option>
+                    <option value="center" ${s.label_position === 'center' ? 'selected' : ''}>Centre</option>
+                    <option value="bottom-left" ${s.label_position === 'bottom-left' ? 'selected' : ''}>Bottom-left</option>
+                </select></label>
+                <label>Font size <input type="number" data-field="label_font_size" value="${s.label_font_size || 12}" min="8" max="24"></label>
+                <label>Text colour <input type="color" data-field="label_color" value="${s.label_color || '#d1d4dc'}"></label>
+            </div>
+            <div class="bt-draw-popover-tabpanel" data-tabpanel="coords">
+                <label>Price 1 <input type="number" step="any" data-coord="0-price" value="${p0.price}"></label>
+                <label>Time 1 <input type="datetime-local" data-coord="0-time" value="${btDisplaySecToDatetimeLocal(p0.time)}"></label>
+                <label>Price 2 <input type="number" step="any" data-coord="1-price" value="${p1.price}"></label>
+                <label>Time 2 <input type="datetime-local" data-coord="1-time" value="${btDisplaySecToDatetimeLocal(p1.time)}"></label>
+            </div>
+            <div class="bt-draw-popover-actions bt-rect-popover-footer">
+                <div class="bt-rect-template-dropdown">
+                    <button type="button" id="bt-rect-template-btn" class="btn btn-ghost btn-sm">Template ▾</button>
+                    <div class="bt-rect-template-menu" id="bt-rect-template-menu">
+                        <button type="button" id="bt-rect-template-save">Save as default</button>
+                        <button type="button" id="bt-rect-template-reset">Reset to default</button>
+                    </div>
+                </div>
+                <div class="bt-rect-popover-footer-right">
+                    <button type="button" id="bt-rect-cancel-btn" class="btn btn-ghost btn-sm">Cancel</button>
+                    <button type="button" id="bt-rect-ok-btn" class="btn btn-primary btn-sm">OK</button>
+                </div>
+            </div>
+        </div>`;
+}
+
+function btWireRectSettingsPopover(d) {
+    const pop = document.getElementById('bt-draw-settings-popover');
+
+    pop.querySelectorAll('.bt-draw-popover-tab').forEach(tabBtn => {
+        tabBtn.onclick = () => {
+            pop.querySelectorAll('.bt-draw-popover-tab').forEach(b => b.classList.toggle('active', b === tabBtn));
+            pop.querySelectorAll('.bt-draw-popover-tabpanel').forEach(p => p.classList.toggle('active', p.dataset.tabpanel === tabBtn.dataset.tab));
+        };
+    });
+
+    // Style/Text fields -- "changes apply live" to the chart, but NOT saved to the server
+    // until OK (see this section's own doc comment above).
+    pop.querySelectorAll('[data-field]').forEach(input => {
+        const handler = () => {
+            const value = input.type === 'checkbox' ? input.checked : ((input.type === 'number' || input.type === 'range') ? parseFloat(input.value) : input.value);
+            d.settings[input.dataset.field] = value;
+            btScheduleRedraw();
+        };
+        input.addEventListener('input', handler);
+        input.addEventListener('change', handler);
+    });
+
+    // Coordinates fields -- same live-preview/no-save-until-OK treatment, writing
+    // straight into d.points. Deliberately NOT renormalized while typing (a trader mid-
+    // edit of Price 1 may briefly have it below Price 2) -- OK's own btUpdateDrawing()
+    // call persists whatever the two points end up as; nothing here assumes points[0] is
+    // still top-left until the panel closes.
+    pop.querySelectorAll('[data-coord]').forEach(input => {
+        const handler = () => {
+            const [idxStr, field] = input.dataset.coord.split('-');
+            const i = +idxStr;
+            const v = field === 'price' ? parseFloat(input.value) : btDatetimeLocalToDisplaySec(input.value);
+            if (!isNaN(v)) d.points[i][field] = v;
+            btScheduleRedraw();
+        };
+        input.addEventListener('input', handler);
+        input.addEventListener('change', handler);
+    });
+
+    const templateBtn = document.getElementById('bt-rect-template-btn');
+    const templateMenu = document.getElementById('bt-rect-template-menu');
+    if (templateBtn && templateMenu) {
+        templateBtn.onclick = (e) => { e.stopPropagation(); templateMenu.classList.toggle('open'); };
+        document.getElementById('bt-rect-template-save').onclick = () => { btSaveDrawingDefault(d); templateMenu.classList.remove('open'); };
+        document.getElementById('bt-rect-template-reset').onclick = () => { btResetDrawingDefault(d.tool); templateMenu.classList.remove('open'); };
+    }
+
+    // Cancel (and the header's own ✕, rebound here to match) — revert every live-preview
+    // edit back to what the panel opened with, discard the snapshot, never touch the
+    // server (nothing was saved to it while editing).
+    const revert = () => {
+        if (d._rectSnapshot) {
+            d.points = JSON.parse(JSON.stringify(d._rectSnapshot.points));
+            d.settings = JSON.parse(JSON.stringify(d._rectSnapshot.settings));
+        }
+        delete d._rectSnapshot;
+        btScheduleRedraw();
+        btHideDrawSettingsPopover();
+    };
+    document.getElementById('bt-draw-popover-close-x').onclick = revert;
+    document.getElementById('bt-rect-cancel-btn').onclick = revert;
+
+    // OK — the one and only server save for this whole editing session, of whatever the
+    // live preview currently holds; points are re-normalised now (not while typing/
+    // dragging), restoring the "points[0] is top-left" contract before it's persisted.
+    document.getElementById('bt-rect-ok-btn').onclick = () => {
+        d.points = btNormalizeRectPoints(d.points[0], d.points[1]);
+        delete d._rectSnapshot;
+        btUpdateDrawing(d.id, { points: d.points, settings: d.settings });
+        btScheduleRedraw();
+        btHideDrawSettingsPopover();
+    };
 }

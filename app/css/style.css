@@ -486,6 +486,26 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-draw-popover-template-row{display:flex;justify-content:space-between;gap:8px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #232733}
 .bt-draw-popover-template-row .btn{flex:1 1 auto}
 
+/* v3.22.9 — rectangle's own settings panel: wider (room for the Coordinates tab's
+   datetime-local fields, which don't compress well), tabbed, with a Template dropdown +
+   Cancel/OK footer instead of the Delete/Done row every other tool's panel uses. */
+.bt-draw-popover.bt-draw-popover-wide{width:270px}
+.bt-draw-popover-tabs{display:flex;gap:2px;margin-bottom:10px;border-bottom:1px solid #232733}
+.bt-draw-popover-tab{flex:1 1 auto;background:transparent;border:none;border-bottom:2px solid transparent;color:#8b93a7;font-size:11px;padding:6px 4px;cursor:pointer;font-family:var(--font-body)}
+.bt-draw-popover-tab:hover{color:#d1d4dc}
+.bt-draw-popover-tab.active{color:#5b8dff;border-bottom-color:#2962ff}
+.bt-draw-popover-tabpanel{display:none}
+.bt-draw-popover-tabpanel.active{display:block}
+.bt-draw-popover-body input[type=datetime-local]{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;width:150px;padding:3px 6px;font-size:11px}
+.bt-draw-popover-body input[type=text]{background:#1c2030;border:1px solid #2a2e39;color:#d1d4dc;width:120px;padding:3px 6px;font-size:12px}
+.bt-rect-popover-footer{align-items:center;flex-wrap:wrap;gap:8px}
+.bt-rect-popover-footer-right{display:flex;gap:6px}
+.bt-rect-template-dropdown{position:relative}
+.bt-rect-template-menu{display:none;position:absolute;bottom:100%;left:0;margin-bottom:4px;background:#1c2030;border:1px solid #2a2e39;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.35);flex-direction:column;min-width:140px;z-index:1}
+.bt-rect-template-menu.open{display:flex}
+.bt-rect-template-menu button{background:transparent;border:none;color:#d1d4dc;text-align:left;padding:7px 10px;font-size:12px;cursor:pointer;font-family:var(--font-body)}
+.bt-rect-template-menu button:hover{background:#232733}
+
 /* ── ORDER TICKET (v3.22.1) — floating selection toolbar + docked "New Trade" panel ──
    Both are real DOM elements (not canvas-drawn, unlike the drawing tools themselves) so
    they get genuine hover/focus/click targets instead of hand-rolled hit-testing — the

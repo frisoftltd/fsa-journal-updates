@@ -234,6 +234,10 @@ function initMockSessionState(int $id, array $cfg): array {
         'trades_today' => 0, 'max_trades_per_day' => null,
         'open_positions' => [], 'pending_orders' => [], 'closed_trades' => [],
         'next_id' => 1000, 'rewind_count' => 0,
+        // v3.22.9 — persisted so a rectangle drawn in one request is still there on the
+        // next get_backtest_drawings call (including a real page reload), the same
+        // round-trip a real session gives via backtest_drawings.
+        'drawings' => [],
     ];
     if ($cfg['scenario'] === 'preseeded') {
         $entryIdx = 440;
@@ -267,6 +271,37 @@ function getMockSessionState(int $id): ?array {
 function putMockSessionState(int $id, array $st): void {
     $store = loadMockStateStore();
     $store[$id] = $st;
+    saveMockStateStore($store);
+}
+
+// v3.22.9 — update_backtest_drawing/delete_backtest_drawing are called with only a
+// drawing id (js/backtest-drawings.js never sends session_id on those, matching the real
+// API's own contract — ownership there is resolved through backtest_drawings' own
+// session_id column, not re-sent by the client). This mock has no such row to look
+// ownership up through, so it keeps its own id -> session_id map instead, written once
+// at add_backtest_drawing time. Stored under a top-level key (not nested in any one
+// session's own state) since a drawing id must be resolvable before its owning session is
+// even known.
+function mockDrawingOwner(int $drawingId): ?int {
+    $store = loadMockStateStore();
+    return isset($store['_drawing_owner'][$drawingId]) ? (int) $store['_drawing_owner'][$drawingId] : null;
+}
+function setMockDrawingOwner(int $drawingId, int $sessionId): void {
+    $store = loadMockStateStore();
+    $store['_drawing_owner'][$drawingId] = $sessionId;
+    saveMockStateStore($store);
+}
+
+// v3.22.9 — user_drawing_defaults equivalent ("Save as default"/"Reset to default"):
+// one flat {tool: settings} map, user-scoped in the real app but this harness only ever
+// has one user, so a single top-level key is enough.
+function loadMockDrawingDefaults(): array {
+    $store = loadMockStateStore();
+    return $store['_drawing_defaults'] ?? [];
+}
+function saveMockDrawingDefaults(array $defaults): void {
+    $store = loadMockStateStore();
+    $store['_drawing_defaults'] = $defaults;
     saveMockStateStore($store);
 }
 
@@ -503,18 +538,68 @@ switch ($action) {
         out(['candles' => mockCandles($limit, $before, $timeframe)]);
 
     case 'get_backtest_drawings':
+        if ($statefulCfg) {
+            $st = getMockSessionState($sessionIdParam);
+            out($st['drawings'] ?? []);
+        }
         out([]);
 
     case 'get_drawing_defaults':
-        out((object) []); // {} not [] -- loadBtDrawingDefaults() requires a real object
+        out((object) loadMockDrawingDefaults()); // {} not [] -- loadBtDrawingDefaults() requires a real object
 
     case 'add_backtest_drawing':
+        if ($statefulCfg) {
+            $st = getMockSessionState($sessionIdParam);
+            $newId = $st['next_id']++;
+            $st['drawings'][] = [
+                'id' => $newId, 'tool' => $body['tool'] ?? '', 'points' => $body['points'] ?? [],
+                'settings' => $body['settings'] ?? [], 'linked_trade_id' => null, 'linked_order_id' => null,
+            ];
+            putMockSessionState($sessionIdParam, $st);
+            setMockDrawingOwner($newId, $sessionIdParam);
+            out(['success' => true, 'id' => $newId]);
+        }
         out(['success' => true, 'id' => random_int(1000, 999999)]);
 
     case 'update_backtest_drawing':
+        $drawingId = (int) ($body['id'] ?? 0);
+        $ownerSession = mockDrawingOwner($drawingId);
+        if ($ownerSession !== null) {
+            $st = getMockSessionState($ownerSession);
+            foreach ($st['drawings'] as &$dw) {
+                if ($dw['id'] === $drawingId) {
+                    if (array_key_exists('points', $body)) $dw['points'] = $body['points'];
+                    if (array_key_exists('settings', $body)) $dw['settings'] = $body['settings'];
+                    if (array_key_exists('linked_trade_id', $body)) $dw['linked_trade_id'] = $body['linked_trade_id'];
+                    if (array_key_exists('linked_order_id', $body)) $dw['linked_order_id'] = $body['linked_order_id'];
+                    break;
+                }
+            }
+            unset($dw);
+            putMockSessionState($ownerSession, $st);
+        }
+        out(['success' => true]);
+
     case 'delete_backtest_drawing':
+        $deleteId = (int) ($body['id'] ?? 0);
+        $deleteOwner = mockDrawingOwner($deleteId);
+        if ($deleteOwner !== null) {
+            $st = getMockSessionState($deleteOwner);
+            $st['drawings'] = array_values(array_filter($st['drawings'], fn($dw) => $dw['id'] !== $deleteId));
+            putMockSessionState($deleteOwner, $st);
+        }
+        out(['success' => true]);
+
     case 'save_drawing_default':
+        $defaults = loadMockDrawingDefaults();
+        $defaults[$body['tool'] ?? ''] = $body['settings'] ?? [];
+        saveMockDrawingDefaults($defaults);
+        out(['success' => true]);
+
     case 'reset_drawing_default':
+        $defaults = loadMockDrawingDefaults();
+        unset($defaults[$body['tool'] ?? '']);
+        saveMockDrawingDefaults($defaults);
         out(['success' => true]);
 
     case 'backtest_place_order':

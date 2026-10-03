@@ -41,12 +41,19 @@
  *   horizontal_line / horizontal_ray — points=[{time,price}] (one anchor — a ray starts
  *     there and extends right; a line's own time is otherwise unused, decorative only);
  *     settings={color, width, style}
+ *   rectangle (v3.22.9) — points=[{time,price},{time,price}], normalised client-side so
+ *     points[0] is top-left (earliest time, highest price) and points[1] is bottom-right;
+ *     settings={extend ('none'/'left'/'right'/'both'), border_color, border_width,
+ *       border_style, middle_line, middle_color, middle_style, background,
+ *       background_color, background_opacity, label_text, label_position
+ *       ('top-left'/'center'/'bottom-left'), label_font_size, label_color}. An annotation
+ *       only, same as every other tool here — never read by the replay/order engine.
  */
 class BacktestDrawingController {
     private $db;
     private $uid;
 
-    const TOOLS = ['position_long', 'position_short', 'fib_retracement', 'trend_line', 'horizontal_line', 'horizontal_ray'];
+    const TOOLS = ['position_long', 'position_short', 'fib_retracement', 'trend_line', 'horizontal_line', 'horizontal_ray', 'rectangle'];
 
     public function __construct() {
         $this->db = getDB();

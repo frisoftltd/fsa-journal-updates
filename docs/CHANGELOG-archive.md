@@ -4471,6 +4471,151 @@ file, duplicate-name scan clean.
 
 ---
 
+### v3.22.9: Rectangle Drawing Tool
+
+**Why.** The trader marks S/R zones and order blocks (FSA gate 3) and supplied a
+TradingView screenshot of its Rectangle tool as the behavioural reference — built fresh
+in FundedControl's own style, no traced artwork. Renumbering per this briefing: v3.22.9
+is the rectangle (was going to be the risk-ladder slot), risk ladder moves to v3.22.10,
+gate checklist stays v3.23.0.
+
+#### Behaviour
+
+Click-drag corner to corner (`BT_DRAG_TOOLS`, same placement gesture as fib/position);
+releasing under ~7px (`BT_HANDLE_RADIUS`, the same guard every drag-tool already uses)
+cancels, comfortably covering the briefing's own "under 3px cancels." Stored as
+`points=[{time,price},{time,price}]`, **normalised so `points[0]` is top-left**
+(earliest time, highest price) both at creation (`btNormalizeRectPoints()`, called from
+`btFinalizeNewDrawing()`) and after every settings-panel OK (coordinates can be typed in
+any order; OK re-sorts before saving).
+
+**8 handles, only while selected** (same "handles register only when `d.id ===
+btSelectedDrawingId`" convention the position tool's own edge-left/edge-right already
+established): 4 corners (`rect-tl`/`rect-tr`/`rect-bl`/`rect-br`, free resize — both
+axes), top/bottom edge midpoints (`rect-top`/`rect-bottom`, price only), left/right edge
+midpoints (`rect-left`/`rect-right`, time only). Implemented in `btApplyDrag()` against a
+**fixed drag-start baseline** (`dragState.startBounds` — the four scalar bounds computed
+once at mousedown, not the previous frame's own output) so a handle dragged past its own
+opposite edge **flips the rectangle** rather than producing a negative-width box;
+`points[0]` stays top-left on every single frame, not just at save time, by re-deriving
+both points from `Math.min`/`Math.max` of the four bounds after every handle move.
+Dragging inside the box (not near any handle/border) moves the whole rectangle — the
+existing generic `'move'` branch in `btApplyDrag()` already shifts both points' time and
+price by the same delta; no rectangle-specific code needed there.
+
+**Hit-testing** (`btHitTestOne()`): "a selection click is accepted only near the border
+or inside the box" — `btDistToSegment()` against all four sides, or a plain bounding-box
+containment check, either returns `'move'`; genuinely empty chart space elsewhere is left
+untouched for the chart's own pan to handle, same as every other tool.
+
+**Rendering order — beneath position tools and trade lines.** `btRenderDrawings()` now
+draws in two passes: every `rectangle` first, then everything else (`btDrawings.filter`),
+so a zone can never visually cover a live trade regardless of which array index it
+happens to occupy. **Hit-test priority matches**: `btHitTest()` reorders so every
+non-rectangle drawing is checked before any rectangle, regardless of array order — a
+rectangle drawn (and therefore array-appended) AFTER a position box still never steals a
+click meant for that box. The order ticket's own full-width lines
+(`btTicketLineHitTest()`) already run before any drawing hit-test at all in
+`btOnDrawMouseDown()`, so they were never at risk — confirmed, not just assumed, by
+drive-v3229.mjs's own Verify 6.
+
+**Axis pills** (price top/bottom on the price axis, time start/end on the time axis, blue
+fill) draw only inside the `if (selected)` branch of `btDrawRectangle()` — gone entirely
+on deselect, verified via the same `fillText`-patching technique v3.22.7's driver
+introduced.
+
+#### Settings panel — a new pattern for this file
+
+Every prior tool's settings popover applies each field change **immediately** to the
+server (no Cancel/OK). The briefing's own rectangle spec needs tabs (Style/Text/
+Coordinates) and explicit Cancel (revert)/OK (commit) semantics, so this release adds a
+**parallel set of functions** rather than branching the existing ones:
+`btRectSettingsHtml()`/`btWireRectSettingsPopover()`, dispatched from
+`btShowDrawSettingsPopover()` by `d.tool === 'rectangle'`.
+
+**Snapshot-and-revert, not live-save-on-every-field.** Opening the panel snapshots
+`{points, settings}` onto the drawing object itself (`d._rectSnapshot`). Every field
+(Style/Text tabs: `data-field` → `d.settings`; Coordinates tab: `data-coord="0-price"` /
+`"0-time"` / `"1-price"` / `"1-time"` → `d.points[i][field]`) writes straight into the
+live drawing and redraws — "changes apply live" on the chart — but **never calls
+`btUpdateDrawing()`** (the actual server save) until OK. Cancel (and the header's own ✕,
+rebound specifically for this tool) restores the snapshot and discards it; nothing was
+ever sent to the server for a cancelled edit. OK re-normalises the points
+(`btNormalizeRectPoints()`), persists once, discards the snapshot.
+
+**Coordinates tab** uses a native `<input type="datetime-local">` for Time 1/Time 2 —
+`btDisplaySecToDatetimeLocal()`/`btDatetimeLocalToDisplaySec()` treat the field's own Y/M/
+D/h/m components as the instant itself (no local-browser-timezone conversion either
+way), the same convention the axis pills' own `new Date(t*1000).toISOString().slice(...)`
+formatting already uses elsewhere in this file.
+
+**Template ▾ dropdown**, not the inline two-button row every other `BT_TEMPLATE_TOOLS`
+entry shows — `'rectangle'` added to that list (reusing `btSaveDrawingDefault()`/
+`btResetDrawingDefault()` unchanged), just presented as a button that toggles a small
+menu, per the briefing's own footer spec.
+
+**Floating selection toolbar** (`#bt-rect-toolbar`, `btRectSelectionToolbar()`) — colour/
+settings/delete only, no Place trade or R:R lock (those are the position tool's own
+planning-only controls and don't apply to an annotation). A separate, much simpler
+function from `btPositionSelectionToolbar()` rather than folding a third tool into that
+one — that function's pill-bounds measurement and link-state logic only make sense for a
+trade's own box.
+
+#### Defaults
+
+`border_color` `#2962ff`, `border_width` 1, `border_style` solid; `background` on,
+`background_color` `#2962ff`, `background_opacity` 0.15; `middle_line` off; `extend`
+`'none'`. `extend` (`'none'`/`'left'`/`'right'`/`'both'`) only reaches the chart's left/
+right edge **horizontally** and is **rendering-only** — it never changes the stored
+points or the draggable/hit-testable geometry, same "visual reach only" precedent
+trend_line's `extend_left`/`extend_right` and fib's own `extend` already set.
+
+#### Schema
+
+Migration `2026_10_03_0001_add_rectangle_drawing_tool.sql` — `'rectangle'` added to the
+`tool` ENUM of both `backtest_drawings` and `user_drawing_defaults` via guarded `MODIFY
+COLUMN` (full value list, since MySQL has no partial-enum `ALTER`), each guarded by an
+`information_schema.COLUMNS.COLUMN_TYPE LIKE '%rectangle%'` check + `PREPARE`/`EXECUTE`
+(CLAUDE.md §3A) so a retry is a no-op. `'rectangle'` added to
+`BacktestDrawingController::TOOLS`; the controller does no tool-specific shape validation
+(same as every other tool there), so no further server change was needed.
+
+#### Verification
+
+New harness driver `tools/ui-harness/drive-v3229.mjs` (39 assertions, all passing)
+against the stateful mock session 20 — required `stubs/api.php` itself to gain real
+persistence it didn't have before this release: `get_backtest_drawings`/
+`add_backtest_drawing`/`update_backtest_drawing`/`delete_backtest_drawing` previously
+always returned a canned stub response (no actual storage), which would have silently
+passed a reload-persistence test without the drawing really being saved anywhere. Fixed
+by adding a `drawings` array to each stateful session's own state file, plus a top-level
+drawing-id → owning-session map (`update`/`delete` are called with only a drawing id, no
+session id, matching the real API's own contract) and a flat `{tool: settings}} store for
+`user_drawing_defaults`, so "Save as default, then draw a new rectangle" is a genuine
+round trip, not a trusted stub.
+
+Covers: draw → real page reload → byte-identical normalised points; all 8 handles
+hit-test to the correct name, then (real mouse drags, not just hit-test calls) a corner
+changes both axes, top/bottom changes price only (time endpoints provably unchanged),
+left/right changes time only (price endpoints provably unchanged), and dragging inside
+shifts both points' time AND price by the identical delta; axis pills present only while
+selected (fillText-log sampling); Extend Right/Middle line/Background off verified via
+real `getImageData()` pixel sampling on `#bt-draw-overlay`, not just reading the settings
+flag back; Cancel reverts three separately-changed fields to their pre-open values;
+Coordinates-tab edit live-moves the box and OK persists it (`waitForResponse` on
+`update_backtest_drawing`); Save-as-default then a freshly-drawn second rectangle starts
+from the saved border colour/background toggle; and — the requirement most likely to
+regress silently — a rectangle drawn directly over an existing position-tool box, and
+then across the entire chart including the ticket's own lines, never intercepts a click
+meant for the position's entry line or the ticket's Stop Loss line, while a click on the
+rectangle's own non-overlapping area still selects the rectangle.
+
+`drive.mjs`, `drive-v3223.mjs`, `drive-v3225.mjs`, `drive-v3226.mjs`, `drive-v3227.mjs`
+and `drive-v3228.mjs` all pass unmodified. `php -l`/`node --check` clean on every changed
+file, duplicate-name scan clean.
+
+---
+
 ## Part 2 — Other Retired Reference Material
 
 ### Brand Identity — Full Type Scale Detail

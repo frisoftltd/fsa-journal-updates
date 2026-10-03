@@ -1069,9 +1069,17 @@ document.addEventListener('DOMContentLoaded', () => {
 function btNewTradeClick() {
     if (!btSession || btSession.status !== 'active') { toast('Session is not active.', 'error'); return; }
     const isPositionTool = d => d.tool === 'position_long' || d.tool === 'position_short';
-    let source = btSelectedDrawingId ? btDrawings.find(d => d.id === btSelectedDrawingId && isPositionTool(d)) : null;
+    // v3.22.7 — also requires the SELECTED drawing to be unlinked: the toolbar's own
+    // "Place trade" button is already gone once a drawing is linked, but New Trade is a
+    // separate entry point and must not be able to hijack an already-live box either.
+    let source = btSelectedDrawingId ? btDrawings.find(d => d.id === btSelectedDrawingId && isPositionTool(d) && !btLinkedState(d)) : null;
     if (!source) {
-        const candidates = btDrawings.filter(d => isPositionTool(d) && !d._linkedTrade);
+        // v3.22.7 — was `!d._linkedTrade`, a property nothing in this codebase ever set
+        // (confirmed while removing its one dead reference in btDrawPosition()), so this
+        // always matched EVERY position drawing, including ones already linked to a live
+        // order — a second New Trade could have hijacked an already-placed trade's own
+        // box. btLinkedState() is the real "is this drawing actually free" check.
+        const candidates = btDrawings.filter(d => isPositionTool(d) && !btLinkedState(d));
         source = candidates.length ? candidates[candidates.length - 1] : null;
     }
     if (source) {
@@ -1562,16 +1570,29 @@ async function btSubmitTicket() {
     // values before closing, so what's left on the chart after Place Trade matches what
     // was actually submitted, not whatever the drawing happened to say before the ticket
     // was opened.
-    if (btTicket.sourceDrawingId) {
-        await btUpdateDrawing(btTicket.sourceDrawingId, { settings: { entry: c.entry, stop_loss: btTicket.stopLoss, take_profit: btTicket.takeProfit } });
-        // v3.22.3 Part C — links the drawing to whatever this order became, so the live
-        // server-state lines (btSession.open_positions/pending_orders) take over as the
-        // one on-chart representation of this trade and the original drawing's own box
-        // never shows a second, duplicate one alongside it.
-        await btLinkDrawingToOrder(btTicket.sourceDrawingId, res.filled ? { trade_id: res.trade_id } : { order_id: res.pending_order_id });
+    let sourceDrawingId = btTicket.sourceDrawingId;
+    if (sourceDrawingId) {
+        await btUpdateDrawing(sourceDrawingId, { settings: { entry: c.entry, stop_loss: btTicket.stopLoss, take_profit: btTicket.takeProfit } });
+    } else {
+        // v3.22.7 requirement 6 — New Trade with nothing drawn/selected still gets a
+        // real, fixed-width box now (every trade has one), not just the ticket's own
+        // temporary render that vanished the moment the ticket closed.
+        const created = await btCreateLinkedPositionDrawing(btTicket.direction, c.entry, btTicket.stopLoss, btTicket.takeProfit);
+        if (created) { sourceDrawingId = created.id; btSelectedDrawingId = created.id; }
     }
-    btCloseTicket();
+    if (sourceDrawingId) {
+        // v3.22.3 Part C — links the drawing to whatever this order became. v3.22.7 — the
+        // drawing stays visible as the trade's own box from here on; it's never hidden.
+        await btLinkDrawingToOrder(sourceDrawingId, res.filled ? { trade_id: res.trade_id } : { order_id: res.pending_order_id });
+    }
+    // v3.22.7 — refresh BEFORE closing the ticket, not after: closing hides the ticket
+    // UI immediately, and a caller (or a test) reading btSession.open_positions right
+    // after that hide event is otherwise racing this very function's own pending
+    // refresh. Pre-existing ordering risk, surfaced by this release's own extra await
+    // (creating the auto-linked drawing) shifting the timing enough to matter in
+    // practice -- fixed at the root rather than papered over with a delay.
     await refreshBtSession();
+    btCloseTicket();
 }
 async function cancelBtOrder(orderId) {
     const res = await btApi('backtest_cancel_order', 'POST', { order_id: orderId });

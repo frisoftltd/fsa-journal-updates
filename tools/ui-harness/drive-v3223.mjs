@@ -249,8 +249,15 @@ async function main() {
         assert(true, 'Verify 1: the x button cancelled the order and its lines are gone');
 
         console.log('\n[Verify 2] Market order: lines + box + live Open P&L pill appear and update');
+        await page.evaluate(() => { btSelectedDrawingId = null; });
         await page.click('button[onclick="btNewTradeClick()"]');
         await page.waitForSelector('#bt-ticket', { state: 'visible' });
+        // v3.22.7 — Verify 1's cancelled limit order now leaves a real, freed-up drawing
+        // behind (every order gets a real one as of this release), which New Trade's own
+        // "else, the most recent drawing with no trade yet" fallback correctly reuses —
+        // intended behavior, not a bug, but it prefills this ticket as a Limit at the old
+        // price. This step is about the Market path specifically, so switch explicitly.
+        await page.click('[data-seg-group="orderType"] [data-seg-val="market"]');
         await page.fill('#bt-ticket-sl', '8600');
         await page.dispatchEvent('#bt-ticket-sl', 'change');
         const tpOnChecked = await page.isChecked('#bt-ticket-tp-on');

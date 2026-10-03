@@ -170,42 +170,43 @@ async function main() {
         assert(fitResult === true, 'Fix A: clicking the pinned pill re-enables price-axis auto-scale (the stored range already includes every registered level)');
 
         // ════════════════════════════════════════════════════════════════
-        // Verify 2 / Fix B — the fill-bar-to-cursor box: real pixels present after a
-        // fill (not just a screenshot), and it grows with each Next Bar.
+        // Verify 2 / Fix B — SUPERSEDED by v3.22.7: the fill-bar-to-cursor box this
+        // block tested is gone by design (the linked drawing is the trade's fixed-width
+        // box now, never growing) — asserting the old "grows with Next Bar" behavior
+        // here would assert something now false on purpose. Updated to check real
+        // pixels are present at the LINKED DRAWING's own (fixed) span, and that the
+        // width genuinely does NOT change across Next Bar steps — drive-v3227.mjs
+        // covers this fully; this just keeps drive-v3225.mjs honest about current
+        // behavior rather than silently dropping the assertion.
         // ════════════════════════════════════════════════════════════════
-        console.log('\n[Verify 2 / Fix B] fill-bar-to-cursor box: real pixels present, grows with Next Bar');
+        console.log('\n[Verify 2 / Fix B] linked drawing is a fixed-width box: real pixels present, width does NOT grow with Next Bar');
         const samplePixel = async () => page.evaluate(() => {
             const p = btSession.open_positions[0];
-            const xFill = btTimeToX(toDisplaySeconds(p.time_in, chartState.timezone));
-            const xNow = btTimeToX(toDisplaySeconds(btSession.replay_cursor_ms, chartState.timezone));
+            const d = btDrawings.find(dw => dw.linked_trade_id === p.id);
+            const x1 = btTimeToX(d.points[0].time), x2 = btTimeToX(d.points[1].time);
             const yEntry = btPriceToY(p.entry_price), yStop = btPriceToY(p.stop_loss);
-            const sx = Math.round((xFill + xNow) / 2), sy = Math.round((yEntry + yStop) / 2);
+            const sx = Math.round((x1 + x2) / 2), sy = Math.round((yEntry + yStop) / 2);
             const ctx = document.getElementById('bt-draw-overlay').getContext('2d');
-            const d = ctx.getImageData(sx, sy, 1, 1).data;
-            return { xFill, xNow, sx, sy, r: d[0], g: d[1], b: d[2], a: d[3] };
+            const px = ctx.getImageData(sx, sy, 1, 1).data;
+            return { width: Math.abs(x2 - x1), sx, sy, r: px[0], g: px[1], b: px[2], a: px[3] };
         });
         const isRedFill = px => px.a > 10 && px.r > 180 && px.g < 150 && px.b < 150;
-        // The box is genuinely zero-width the instant a position fills (xFill === xNow,
-        // nothing to sample a pixel from yet) -- that's correct, not a bug, so the real
-        // "pixels exist" assertion starts after the first Next Bar, once the box actually
-        // has area; the second Next Bar then proves it keeps growing.
         await shot(page, 'fixB-before-advance');
+        const boxBefore = await samplePixel();
+        assert(isRedFill(boxBefore), `Fix B: the linked drawing's own box fill is present between entry/stop, read directly off the canvas (${JSON.stringify(boxBefore)})`);
         await advanceBars(page, 1); // cursor 400 -> 401
         const boxAfterFirst = await samplePixel();
-        assert(isRedFill(boxAfterFirst), `Fix B: fill-bar-to-cursor box pixel is actually present between entry/stop, read directly off the canvas (not just a screenshot) (${JSON.stringify(boxAfterFirst)})`);
         await shot(page, 'fixB-after-first-advance');
-
         await advanceBars(page, 1); // cursor 401 -> 402
         const boxAfterSecond = await samplePixel();
-        // v3.20.10's own fixed-width replay window keeps "now" (xNow) pinned at a
-        // constant screen position every step (by design -- the cursor's own on-screen
-        // position stays consistent while stepping); it's the FILL bar's own x (xFill)
-        // that moves LEFT each advance as the window shifts underneath it, so the box's
-        // own on-screen WIDTH (xNow - xFill), not xNow alone, is what actually grows.
-        const widthFirst = boxAfterFirst.xNow - boxAfterFirst.xFill, widthSecond = boxAfterSecond.xNow - boxAfterSecond.xFill;
-        assert(widthSecond > widthFirst, `Fix B: the box's own on-screen width grew after another Next Bar (${widthFirst} -> ${widthSecond})`);
-        assert(isRedFill(boxAfterSecond), `Fix B: box fill pixel is still present at the new midpoint after growing (${JSON.stringify(boxAfterSecond)})`);
-        await shot(page, 'fixB-after-second-advance-box-grew');
+        // Sub-pixel tolerance, not exact equality: logicalToCoordinate()'s own bar-
+        // spacing math can shift a fixed TIME span by a fraction of a pixel as the
+        // visible window scrolls underneath it -- real, but not the "stretches with the
+        // candles" bug this checks for (which moved the width by tens of pixels per bar).
+        const widthDrift = Math.max(Math.abs(boxAfterFirst.width - boxBefore.width), Math.abs(boxAfterSecond.width - boxBefore.width));
+        assert(widthDrift < 3, `Fix B (v3.22.7): the box's own on-screen width stays fixed across Next Bar (${boxBefore.width} -> ${boxAfterFirst.width} -> ${boxAfterSecond.width}, drift ${widthDrift}px)`);
+        assert(isRedFill(boxAfterSecond), `Fix B: box fill pixel is still present after advancing (${JSON.stringify(boxAfterSecond)})`);
+        await shot(page, 'fixB-after-second-advance-box-fixed-width');
 
         // ════════════════════════════════════════════════════════════════
         // Verify 3 / Fix C — a small POSITIVE gross price move whose fee-adjusted P&L is

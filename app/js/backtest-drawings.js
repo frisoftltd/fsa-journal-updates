@@ -912,7 +912,11 @@ function btApplyDrag(dragState, newPoint) {
             time: p.time + dt,
             ...(p.price !== undefined ? { price: p.price + dp } : {}),
         }));
-        if (d.tool === 'position_long' || d.tool === 'position_short') {
+        const isPosition = d.tool === 'position_long' || d.tool === 'position_short';
+        // v3.22.7 — moving a LOCKED box (linked, pending/open) shifts it in TIME only;
+        // also shifting price here would be the same "drag entry/SL/TP" the lock forbids.
+        const priceLocked = isPosition && (btLinkedState(d) === 'pending' || btLinkedState(d) === 'open');
+        if (isPosition && !priceLocked) {
             d.settings.entry = dragState.startSettings.entry + dp;
             d.settings.stop_loss = dragState.startSettings.stop_loss + dp;
             d.settings.take_profit = dragState.startSettings.take_profit + dp;
@@ -1114,6 +1118,20 @@ async function btFinalizeNewDrawing(tool, points) {
     btScheduleRedraw();
 }
 
+/** v3.22.7 requirement 6 — a trade placed from the sidebar's New Trade with nothing
+ *  drawn/selected gets a real box now, not just the ticket-only temporary render: same
+ *  fixed 20-bar width as any freshly-drawn position tool, anchored at the fill bar. */
+async function btCreateLinkedPositionDrawing(direction, entry, stopLoss, takeProfit) {
+    const lastCandle = chartState.candles[chartState.candles.length - 1];
+    if (!lastCandle) return null;
+    const tool = direction === 'Long' ? 'position_long' : 'position_short';
+    const anchorSec = toDisplaySeconds(lastCandle.time, chartState.timezone);
+    const spanMs = (backtestStepMsFor(chartState.timeframe) || 3600000) * BT_POSITION_TOOL_SPAN_BARS;
+    const settings = { ...btMergedToolDefaults(tool), entry, stop_loss: stopLoss, take_profit: takeProfit };
+    const points = [{ time: anchorSec }, { time: anchorSec + spanMs / 1000 }];
+    return btSaveNewDrawing(tool, points, settings);
+}
+
 /** v3.22.1 — "Place trade" (the selection toolbar's own primary button, Part B1) now
  *  OPENS THE TICKET instead of submitting directly — one-click submit with no
  *  confirmation is exactly the behavior this whole release replaces. The drawing itself
@@ -1123,6 +1141,10 @@ async function btFinalizeNewDrawing(tool, points) {
  *  whatever entry this drawing already has — not duplicated here. */
 function btOpenTicketFromDrawing(d) {
     if (!btSession || btSession.status !== 'active') { toast('Session is not active.', 'error'); return; }
+    // v3.22.7 — guarded here too, not just at the two call sites (the toolbar's own
+    // "Place trade" is already gone once linked; btNewTradeClick() already filters) —
+    // re-submitting from an already-live drawing would overwrite its existing link.
+    if (btLinkedState(d)) { toast('This box is already a live order or trade.', 'error'); return; }
     btOpenTicket({
         sourceDrawingId: d.id,
         direction: d.tool === 'position_long' ? 'Long' : 'Short',
@@ -1296,39 +1318,16 @@ function btDrawLiveTrades(ctx) {
         }
     });
 
-    // ── Open positions: solid blue Entry / red SL / green TP + a fill-to-cursor box ──
+    // ── Open positions: solid blue Entry / red SL / green TP full-width lines + pills.
+    // v3.22.7 — the fill-to-cursor box that used to render here is gone; the linked
+    // position-tool drawing (btDrawPosition()) IS the trade's box now, fixed at the
+    // width the trader drew it, not stretching with every Next Bar. ──
     (btSession.open_positions || []).forEach(p => {
         const entry = parseFloat(p.entry_price), stopLoss = parseFloat(p.stop_loss);
         const takeProfit = p.take_profit !== null ? parseFloat(p.take_profit) : null;
         const lotSize = parseFloat(p.lot_size);
         const stopDist = Math.abs(entry - stopLoss);
-
-        // v3.22.5 Fix B — a long-running position's own fill bar (p.time_in) can sit
-        // BEFORE the currently loaded candle window (BT_LEAD_IN_BARS, a fixed 300-bar
-        // lookback) once a session has been open for a while -- confirmed on live
-        // (session 6, two trades that had been open since 2020-03). btTimeToX()'s own
-        // off-range extrapolation (logicalToCoordinate() on a projected logical index)
-        // returns null for an extrapolation this extreme, which made xFill null and
-        // skipped the ENTIRE box below outright (the `xFill !== null` guard), even
-        // though the box only actually needs an x coordinate to clip against -- the
-        // chart's own left edge (0) is exactly where a box whose start predates the
-        // loaded window should visually begin anyway. xNow gets the same treatment for
-        // the (much rarer) symmetrical case, clamped to the right edge.
-        const xFillRaw = btTimeToX(toDisplaySeconds(p.time_in, chartState.timezone));
-        const xNowRaw = btTimeToX(toDisplaySeconds(btSession.replay_cursor_ms, chartState.timezone));
-        const xFill = xFillRaw !== null ? xFillRaw : 0;
-        const xNow = xNowRaw !== null ? xNowRaw : w;
-        const yEntry = btPriceToY(entry), yStop = btPriceToY(stopLoss);
-        const yTpBox = takeProfit !== null ? btPriceToY(takeProfit) : null;
-        if (yEntry !== null && yStop !== null) {
-            const left = Math.min(xFill, xNow), right = Math.max(xFill, xNow);
-            ctx.fillStyle = 'rgba(239,83,80,0.18)';
-            ctx.fillRect(left, Math.min(yEntry, yStop), right - left, Math.abs(yStop - yEntry));
-            if (yTpBox !== null) {
-                ctx.fillStyle = 'rgba(38,166,154,0.18)';
-                ctx.fillRect(left, Math.min(yEntry, yTpBox), right - left, Math.abs(yTpBox - yEntry));
-            }
-        }
+        const yEntry = btPriceToY(entry);
 
         const yE = btDrawFullWidthLine(ctx, w, entry, '#2962ff', false);
         if (yE !== null) btDrawLevelPill(ctx, pillX, yE, h, `Entry ${fmtPrice5(entry)}`, 'Entry', entry, null, '#2962ff');
@@ -1377,7 +1376,15 @@ function btDrawLiveTrades(ctx) {
             const rMultiple = riskUsd > 0 ? p.floating_pnl / riskUsd : null;
             const rTxt = rMultiple !== null ? `${rMultiple > 0 ? '+' : (rMultiple < 0 ? '−' : '')}${Math.abs(rMultiple).toFixed(2)}R` : '—';
             const pnlColor = p.floating_pnl < 0 ? '#ef5350' : '#26a69a';
-            btDrawPill(ctx, (Math.min(xFill, xNow) + Math.max(xFill, xNow)) / 2, yEntry,
+            // v3.22.7 — centred on the linked drawing's own (fixed-width) box, not the
+            // old growing fill-to-cursor span. Falls back to the current bar if a trade
+            // somehow has no linked drawing (shouldn't happen — see requirement 6/7).
+            const linkedBox = btDrawings.find(dw => dw.linked_trade_id === p.id);
+            const boxX1 = linkedBox ? btTimeToX(linkedBox.points[0].time) : null;
+            const boxX2 = linkedBox ? btTimeToX(linkedBox.points[1].time) : null;
+            const pillCx = (boxX1 !== null && boxX2 !== null) ? (boxX1 + boxX2) / 2
+                : btTimeToX(toDisplaySeconds(btSession.replay_cursor_ms, chartState.timezone)) || w;
+            btDrawPill(ctx, pillCx, yEntry,
                 `Open P&L: ${fmt(p.floating_pnl)} (${rTxt}) · Qty ${lotSize.toFixed(4)}`, pnlColor);
         }
     });
@@ -1532,6 +1539,7 @@ function btSyncAutoScaleToggleButton() {
 // treatment) — reset the moment a different drawing becomes selected.
 let btToolbarOffset = { dx: 0, dy: 0 };
 let btToolbarBuiltForId = null;
+let btToolbarBuiltForLinkState = null; // v3.22.7 — forces a rebuild on pending→open→closed
 
 /**
  * v3.22.1 Part B1 — replaces the old canvas-drawn "Place Order" button
@@ -1555,11 +1563,13 @@ function btPositionSelectionToolbar() {
         return;
     }
 
-    if (btToolbarBuiltForId !== d.id) {
+    const linkState = btLinkedState(d);
+    if (btToolbarBuiltForId !== d.id || btToolbarBuiltForLinkState !== linkState) {
         btToolbarOffset = { dx: 0, dy: 0 };
         el.innerHTML = btPositionToolbarHtml(d);
         btWirePositionToolbar(d);
         btToolbarBuiltForId = d.id;
+        btToolbarBuiltForLinkState = linkState;
     } else {
         // Same drawing still selected -- just refresh the two bits of toolbar state
         // that can change without the selection itself changing (the lock state via
@@ -1604,8 +1614,14 @@ function btPositionSelectionToolbar() {
  *  existing v3.21.1 toolbar icon set — no tracing of any reference tool's artwork,
  *  same convention that toolbar's own docblock already establishes. */
 function btPositionToolbarHtml(d) {
-    const locked = !!d.settings.rr_locked;
-    return `
+    const rrLocked = !!d.settings.rr_locked;
+    // v3.22.7 — once placed (pending/open/closed), re-submitting from this box no
+    // longer makes sense, so Place Trade and the R:R lock (planning-only controls) are
+    // dropped entirely rather than shown disabled.
+    const linkState = btLinkedState(d);
+    const isPlaced = !!linkState;
+    const isLive = linkState === 'pending' || linkState === 'open';
+    let html = `
         <span class="bt-pos-toolbar-handle" id="bt-pos-toolbar-handle" title="Move toolbar">
             <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>
         </span>
@@ -1613,16 +1629,31 @@ function btPositionToolbarHtml(d) {
         <input type="color" id="bt-pos-toolbar-color" value="${d.settings.color || '#26a69a'}" title="Colour">
         <button type="button" id="bt-pos-toolbar-settings" title="Settings">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M4 12h2m12 0h2M12 4v2m0 12v2M6.3 6.3l1.4 1.4m8.6 8.6l1.4 1.4M6.3 17.7l1.4-1.4m8.6-8.6l1.4-1.4"/></svg>
-        </button>
+        </button>`;
+    if (!isPlaced) {
+        html += `
         <div class="bt-pos-toolbar-sep"></div>
         <button type="button" class="bt-pos-toolbar-place" id="bt-pos-toolbar-place">Place trade</button>
         <div class="bt-pos-toolbar-sep"></div>
-        <button type="button" id="bt-pos-toolbar-lock" data-toolbar-lock class="${locked ? 'active' : ''}" title="Lock R:R ratio">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="1"/>${locked ? '<path d="M8 11V7a4 4 0 0 1 8 0v4"/>' : '<path d="M8 11V7a4 4 0 0 1 7.6-1.8"/>'}</svg>
-        </button>
-        <button type="button" id="bt-pos-toolbar-delete" title="Delete">
+        <button type="button" id="bt-pos-toolbar-lock" data-toolbar-lock class="${rrLocked ? 'active' : ''}" title="Lock R:R ratio">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="1"/>${rrLocked ? '<path d="M8 11V7a4 4 0 0 1 8 0v4"/>' : '<path d="M8 11V7a4 4 0 0 1 7.6-1.8"/>'}</svg>
+        </button>`;
+    }
+    if (isLive) {
+        // "A small lock icon in the toolbar" — entry/SL/TP can't be dragged while the
+        // linked order/trade is pending or open; the box can still move in time/stretch.
+        html += `
+        <div class="bt-pos-toolbar-sep"></div>
+        <span id="bt-pos-toolbar-pricelock" title="Prices locked -- this order is live. Move or stretch the box in time instead.">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="1"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        </span>`;
+    }
+    html += `
+        <div class="bt-pos-toolbar-sep"></div>
+        <button type="button" id="bt-pos-toolbar-delete" ${isLive ? `disabled title="Can't delete a live order's box"` : 'title="Delete"'}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
         </button>`;
+    return html;
 }
 
 function btWirePositionToolbar(d) {
@@ -1678,6 +1709,20 @@ function btWirePositionToolbar(d) {
     }
 }
 
+/** v3.22.7 — the position tool is now the trade's ONLY on-chart box (the v3.22.3
+ *  auto-growing live box is gone), so one place has to answer "what state is this
+ *  linked drawing's order/trade actually in" for hit-testing, rendering and the
+ *  toolbar to agree. 'pending'/'open' come from checking THIS render's own session
+ *  state (never trusting the id's mere presence — a cancelled order leaves
+ *  linked_order_id sitting unused, which correctly falls through to null here, not
+ *  a false 'pending'). 'closed' means a trade id is linked but no longer open. */
+function btLinkedState(d) {
+    if (!btSession) return null;
+    if (d.linked_order_id && (btSession.pending_orders || []).some(o => o.id === d.linked_order_id)) return 'pending';
+    if (d.linked_trade_id) return (btSession.open_positions || []).some(p => p.id === d.linked_trade_id) ? 'open' : 'closed';
+    return null;
+}
+
 // ── HIT-TESTING ────────────────────────────────────────────
 const BT_HANDLE_RADIUS = 7;
 const BT_LINE_HIT_TOLERANCE = 5;
@@ -1699,13 +1744,10 @@ function btDistToSegment(px, py, x1, y1, x2, y2) {
 }
 function btHitTest(x, y) {
     for (let i = btDrawings.length - 1; i >= 0; i--) {
-        // v3.22.3 Part C — a drawing that actually placed an order is superseded by the
-        // running trade display (drawn from btSession's own open_positions/
-        // pending_orders); its own box is never rendered any more (btRenderDrawings()),
-        // so it must never be hit-testable either -- a leftover toolbar for a drawing
-        // the trader can no longer even see would be a worse bug than the duplicate box
-        // this whole feature exists to remove.
-        if (btDrawings[i].linked_trade_id || btDrawings[i].linked_order_id) continue;
+        // v3.22.7 — a linked drawing is the trade's own visual now (never hidden, never
+        // superseded by a separate live box), so it stays hit-testable just like any
+        // other drawing; btHitTestOne() itself is what locks the entry/stop/tp HANDLES
+        // specifically while the order/trade is still live.
         const handleIndex = btHitTestOne(btDrawings[i], x, y);
         if (handleIndex !== null) return { drawing: btDrawings[i], handleIndex };
     }
@@ -1748,9 +1790,15 @@ function btHitTestOne(d, x, y) {
             }
         }
         if (x < left || x > right) return null;
-        if (yEntry !== null && Math.abs(y - yEntry) <= BT_LINE_HIT_TOLERANCE) return 'entry';
-        if (yStop !== null && Math.abs(y - yStop) <= BT_LINE_HIT_TOLERANCE) return 'stop';
-        if (yTp !== null && Math.abs(y - yTp) <= BT_LINE_HIT_TOLERANCE) return 'tp';
+        // v3.22.7 — "entry, SL and TP can't be dragged while the linked order/trade is
+        // pending or open; changing a live order isn't supported." The box itself (move/
+        // edge-stretch, checked above/below this) stays draggable either way.
+        const linkState = btLinkedState(d);
+        if (linkState !== 'pending' && linkState !== 'open') {
+            if (yEntry !== null && Math.abs(y - yEntry) <= BT_LINE_HIT_TOLERANCE) return 'entry';
+            if (yStop !== null && Math.abs(y - yStop) <= BT_LINE_HIT_TOLERANCE) return 'stop';
+            if (yTp !== null && Math.abs(y - yTp) <= BT_LINE_HIT_TOLERANCE) return 'tp';
+        }
         if (yEntry !== null && yStop !== null && yTp !== null) {
             const top = Math.min(yEntry, yStop, yTp), bottom = Math.max(yEntry, yStop, yTp);
             if (y >= top && y <= bottom) return 'move';
@@ -1794,11 +1842,11 @@ function btRenderDrawings() {
     // ticket panel/lines can never show two different trades at once. btTicketRenderValues()
     // (js/backtest.js) is null whenever no ticket is open or this isn't the linked drawing.
     for (const d of btDrawings) {
-        // v3.22.3 Part C — a drawing that placed a real order is superseded by the
-        // running trade display drawn below (btDrawLiveTrades(), from btSession's own
-        // open_positions/pending_orders) -- never render its own box too, or the chart
-        // shows the same trade twice.
-        if (d.linked_trade_id || d.linked_order_id) continue;
+        // v3.22.7 — a linked drawing is the trade's own box now (the v3.22.3 "superseded
+        // by the running trade display" suppression is gone, per the trader's own report
+        // that the box disappearing after Place Trade was the bug, not the fix). It
+        // renders every render pass just like any other drawing; btDrawPosition() itself
+        // reads the link state to colour/fade it and suppress its own estimate pills.
         const override = (typeof btTicket !== 'undefined' && btTicket && btTicket.sourceDrawingId === d.id) ? btTicketRenderValues() : null;
         btDrawOne(ctx, d, d.id === btSelectedDrawingId, false, override);
     }
@@ -2138,6 +2186,15 @@ function btDrawPosition(ctx, d, selected, override) {
     const yEntry = btPriceToY(entry), yStop = btPriceToY(stopLoss), yTp = takeProfit !== null ? btPriceToY(takeProfit) : null;
     if (yEntry === null || yStop === null) return;
 
+    // v3.22.7 — this box IS the trade's visual now (never hidden, never superseded by a
+    // separate live box), so its own styling has to say what state the linked order/
+    // trade is in: pending (dashed orange entry), open (solid blue entry), closed
+    // (faded 40% — the exit marker, btDrawClosedTradeMarkers(), carries the outcome).
+    const linkState = btLinkedState(d);
+    if (linkState === 'closed') ctx.globalAlpha *= 0.4;
+    const entryColor = linkState === 'pending' ? '#f59e0b' : linkState === 'open' || linkState === 'closed' ? '#2962ff' : '#d1d4dc';
+    const entryDashed = linkState === 'pending';
+
     // v3.21.13 — the red (entry↔stop) and teal (entry↔TP) fills already share the same
     // 0.18 alpha; no change needed here. What made a broken Short look "pale greyish-red
     // instead of solid red" was never the alpha — it was the two zones OVERLAPPING (stop
@@ -2151,8 +2208,8 @@ function btDrawPosition(ctx, d, selected, override) {
         ctx.fillRect(left, Math.min(yEntry, yTp), right - left, Math.abs(yTp - yEntry));
     }
 
-    const line = (y, color) => { ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke(); };
-    line(yEntry, '#d1d4dc'); line(yStop, '#ef5350'); if (yTp !== null) line(yTp, '#26a69a');
+    const line = (y, color, dashed) => { ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.setLineDash(dashed ? [6, 4] : []); ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke(); ctx.setLineDash([]); };
+    line(yEntry, entryColor, entryDashed); line(yStop, '#ef5350', false); if (yTp !== null) line(yTp, '#26a69a', false);
 
     const stopDist = Math.abs(entry - stopLoss);
     const tpDist = takeProfit !== null ? Math.abs(takeProfit - entry) : null;
@@ -2188,31 +2245,37 @@ function btDrawPosition(ctx, d, selected, override) {
     // Target/Stop pill: those pills are drawn OFFSET outside their line, so the line's
     // own y is not the pill's top edge). btPositionSelectionToolbar() reads this same
     // frame's value right after this draw call, in the same render pass.
-    let pillTop = Infinity, pillBottom = -Infinity;
-    const trackPill = b => { pillTop = Math.min(pillTop, b.y); pillBottom = Math.max(pillBottom, b.y + b.h); };
-    const stopPillY = yStop + Math.sign(yStop - yEntry || 1) * 16;
-    trackPill(btDrawPill(ctx, cx, stopPillY, `Stop: ${fmtPrice5(stopLoss)}, ${stopDist.toFixed(2)} pts (${stopPct}%), Amount: $${riskUsdNet.toFixed(2)}`, '#ef5350'));
-    if (yTp !== null) {
-        const tpPillY = yTp + Math.sign(yTp - yEntry || -1) * 16;
-        trackPill(btDrawPill(ctx, cx, tpPillY, `Target: ${fmtPrice5(takeProfit)}, ${tpDist.toFixed(2)} pts (${tpPct}%), Amount: $${rewardUsdNet.toFixed(2)}`, '#26a69a'));
+    // v3.22.7 — once linked (pending/open/closed), these estimate pills are suppressed
+    // entirely: btDrawLiveTrades() already shows the REAL Stop/TP $ amounts and the
+    // real Open P&L (full-width lines + a centre pill of its own), computed from actual
+    // session data rather than this box's own session-risk_pct estimate. Drawing both
+    // would show two different numbers for the same thing. Bounds default to the three
+    // lines' own extent so the toolbar still has something sane to measure from.
+    let pillTop = Math.min(yEntry, yStop, ...(yTp !== null ? [yTp] : []));
+    let pillBottom = Math.max(yEntry, yStop, ...(yTp !== null ? [yTp] : []));
+    if (!linkState) {
+        const trackPill = b => { pillTop = Math.min(pillTop, b.y); pillBottom = Math.max(pillBottom, b.y + b.h); };
+        const stopPillY = yStop + Math.sign(yStop - yEntry || 1) * 16;
+        trackPill(btDrawPill(ctx, cx, stopPillY, `Stop: ${fmtPrice5(stopLoss)}, ${stopDist.toFixed(2)} pts (${stopPct}%), Amount: $${riskUsdNet.toFixed(2)}`, '#ef5350'));
+        if (yTp !== null) {
+            const tpPillY = yTp + Math.sign(yTp - yEntry || -1) * 16;
+            trackPill(btDrawPill(ctx, cx, tpPillY, `Target: ${fmtPrice5(takeProfit)}, ${tpDist.toFixed(2)} pts (${tpPct}%), Amount: $${rewardUsdNet.toFixed(2)}`, '#26a69a'));
+        }
+        const centreLines = [`Entry: ${fmtPrice5(entry)}, RR 1:${rr}${s.rr_locked ? ' (locked)' : ''}`];
+        trackPill(btDrawPill(ctx, cx, yEntry, centreLines, '#4b5563'));
     }
-    // Centre pill: neutral grey until a real trade is linked (v3.22.3's
-    // linked_trade_id) — d._linkedTrade doesn't exist yet in this release, so this
-    // always takes the neutral branch today; the floating-P&L branch is wired in
-    // structurally now so v3.22.3 only has to set d._linkedTrade, not touch this
-    // function again.
-    const linked = d._linkedTrade || null;
-    const centreColor = !linked ? '#4b5563' : (linked.floating_pnl < 0 ? '#ef5350' : '#26a69a');
-    const centreLines = linked
-        ? [`Open P&L: ${linked.floating_pnl >= 0 ? '+' : ''}${fmt(linked.floating_pnl)}, Qty: ${linked.lot_size}`, `Entry: ${fmtPrice5(entry)}, RR 1:${rr}`]
-        : [`Entry: ${fmtPrice5(entry)}, RR 1:${rr}${s.rr_locked ? ' (locked)' : ''}`];
-    trackPill(btDrawPill(ctx, cx, yEntry, centreLines, centreColor));
     d._btPillBounds = { top: pillTop, bottom: pillBottom };
 
     if (selected) {
-        btDrawHandle(ctx, left, yEntry, '#d1d4dc');
-        btDrawHandle(ctx, left, yStop, '#ef5350');
-        if (yTp !== null) btDrawHandle(ctx, left, yTp, '#26a69a');
+        // v3.22.7 — price handles (entry/stop/tp) are never drawn while locked (pending/
+        // open): btHitTestOne() already refuses to let them be grabbed, so showing a
+        // draggable-looking handle that doesn't actually drag would be misleading.
+        const priceLocked = linkState === 'pending' || linkState === 'open';
+        if (!priceLocked) {
+            btDrawHandle(ctx, left, yEntry, '#d1d4dc');
+            btDrawHandle(ctx, left, yStop, '#ef5350');
+            if (yTp !== null) btDrawHandle(ctx, left, yTp, '#26a69a');
+        }
         // v3.22.5 Fix F — the two edge handles, vertical centre of the box's own left/
         // right edges, shown only while selected — same centre-Y math btHitTestOne()
         // uses for these same handles, so the drawn position and the clickable area

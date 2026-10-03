@@ -498,7 +498,12 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-pos-toolbar button{width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:5px;color:#8b93a7;cursor:pointer;padding:0}
 .bt-pos-toolbar button:hover{background:#1c2030;color:#d1d4dc}
 .bt-pos-toolbar button.active{background:rgba(41,98,255,0.18);color:#5b8dff}
+.bt-pos-toolbar button:disabled{color:#4b5563;cursor:not-allowed}
+.bt-pos-toolbar button:disabled:hover{background:transparent}
 .bt-pos-toolbar svg{width:15px;height:15px;pointer-events:none}
+/* v3.22.7 — the price-lock indicator: not a button, nothing to click, just a state cue
+   while the linked order/trade is live. */
+#bt-pos-toolbar-pricelock{width:26px;height:26px;display:flex;align-items:center;justify-content:center;color:#f59e0b}
 .bt-pos-toolbar input[type=color]{width:20px;height:20px;padding:0;border:1px solid #2a2e39;background:none;cursor:pointer}
 /* "Place trade" — the one primary action in this toolbar, so it's the one button that
    looks like a button rather than an icon: green-outlined, per the briefing. */

@@ -4197,6 +4197,142 @@ overlap (which would produce distinct, *not* identical, duplicate positions).
 No PHP changed this release, no migration — `php -l`/`node --check` clean on every changed
 file, duplicate-name scan clean.
 
+### v3.22.7: The Position Tool Stays Put as the Trade's Visual
+
+**Renumbering:** session results/statistics is now **v3.22.8**, the risk-ladder engine
+(previously slated as v3.22.7) is now **v3.22.9**, and the gate checklist is **v3.23.0**.
+
+**Trader report, live (session 6):**
+
+1. **After Place Trade, the position tool disappears.** It reappears only when the order
+   fills or is hit. Cause: v3.22.3 hid the linked drawing while its order or trade
+   existed (`linked_order_id`/`linked_trade_id`) and drew a separate live box instead.
+2. **"The candlesticks are going along with the risk:reward tool."** The live box grew
+   from the fill bar to the current cursor on every Next Bar, so the box stretched with
+   the candles. The trader wanted the reference-tool behaviour instead: the box they
+   drew stays exactly where and how wide they drew it.
+
+#### The fix
+
+**Never hide a linked drawing.** `btRenderDrawings()`'s and `btHitTest()`'s own
+`if (d.linked_trade_id || d.linked_order_id) continue;` suppressions (v3.22.3) are gone
+— the trader's own drawing stays visible and selectable the whole time: before, while
+pending, while open, and after close.
+
+**The auto-growing live box is gone.** `btDrawLiveTrades()`'s own fill-to-cursor
+`fillRect()` box (the `xFill`/`xNow` computation, confirmed on live as exactly what grew
+every Next Bar) is removed entirely. The linked drawing *is* the trade's box now, fixed
+at the width the trader drew it (still stretchable via the v3.22.5 edge handles). The
+full-width Entry/SL/TP lines + $ pills and the pending-order "×" cancel, both computed
+from real session data (fees paid, lot size, floating P&L) rather than a drawing's own
+session-risk_pct estimate, are unchanged — only the box itself moved ownership. The
+Open P&L pill is still drawn by `btDrawLiveTrades()` (so it keeps reading real session
+data), just repositioned to the centre of the *linked drawing's own* box span instead of
+the old growing `xFill`-to-`xNow` midpoint.
+
+**One function answers "what state is this drawing's order/trade in," everywhere.**
+`btLinkedState(d)` (`js/backtest-drawings.js`) returns `'pending'`/`'open'`/`'closed'`/
+`null` by checking THIS render's own live session state — never trusting a stale id's
+mere presence. A cancelled order leaves `linked_order_id` sitting unused on the drawing
+(`cancelBtOrder()` was not changed to clear it), which correctly falls through to `null`
+here rather than a false `'pending'` — the drawing becomes free again, exactly as if it
+had never been submitted. `btDrawPosition()`, `btHitTestOne()`, `btApplyDrag()`, and the
+toolbar all call this one function rather than keeping their own copies.
+
+**State colouring (`btDrawPosition()`).** Pending: normal opacity, dashed orange entry
+edge. Open: solid blue entry edge. Closed: the whole box (fills, lines, any pills) faded
+via `ctx.globalAlpha *= 0.4` — the exit marker (`btDrawClosedTradeMarkers()`, unchanged)
+carries the outcome, so nothing else needs to. Once linked (any of the three states),
+the box's own Stop/Target/Centre estimate pills (the v3.22.1 Part A design, sized from
+`btSession.risk_pct`) are suppressed entirely — `btDrawLiveTrades()`'s real-data pills
+already cover that ground, and showing both would show two different numbers for the
+same thing. `d._btPillBounds` (which the floating toolbar positions itself from) falls
+back to the three lines' own extent when no pills are drawn, so the toolbar still has
+something sane to measure from once linked.
+
+**Prices locked while live.** `btHitTestOne()` refuses to return `'entry'`/`'stop'`/
+`'tp'` for a drawing whose `btLinkedState()` is `'pending'` or `'open'` — the box's
+`'move'`/`'edge-left'`/`'edge-right'` handles are untouched, so the box can still move in
+time and stretch. **A real, independent bug caught while building this, not shipped
+separately:** the box's own `'move'` drag (dragging inside the box body) shifted BOTH
+time and price together (`btApplyDrag()`'s `dp` delta applied to `d.settings.entry`/
+`stop_loss`/`take_profit`) — moving a locked box this way would have silently dragged
+its price too, the exact thing the lock exists to prevent. Fixed by skipping the price
+shift specifically when locked; the box still slides freely in time via the same drag.
+
+**Toolbar.** Once a drawing is linked (any state), "Place Trade" and the R:R-lock toggle
+are dropped entirely (re-submitting from an already-placed box doesn't make sense,
+whether it's live or already closed) rather than shown disabled. A new price-lock icon
+(`#bt-pos-toolbar-pricelock`, a plain indicator, nothing to click) shows only while
+`isLive` (pending/open). Delete is disabled while live, enabled again once closed (a
+closed trade's box is just an annotation at that point — the exit marker, not the box,
+is what independently carries the historical record). `btToolbarBuiltForLinkState` (new,
+alongside the existing `btToolbarBuiltForId`) forces a full toolbar rebuild on a
+pending→open→closed transition, not just a drawing-id change — otherwise the cheap
+"same drawing, just reposition" path would have kept showing a stale Place Trade button
+after a fill.
+
+**New Trade with nothing drawn/selected.** `btCreateLinkedPositionDrawing()` (new,
+`js/backtest-drawings.js`) creates a real drawing — same fixed 20-bar width every
+freshly-drawn position tool gets, anchored at the fill bar — and `btSubmitTicket()` now
+calls it whenever `btTicket.sourceDrawingId` is empty, linking the result exactly like an
+existing drawing would be. Every trade has a box now, not just ones started from a
+hand-drawn tool.
+
+**Existing linked drawings in the live DB simply become visible again.** No migration —
+this is purely a client-side rendering/hit-testing change.
+
+#### Two real, independent bugs found and fixed while implementing this
+
+1. **`btNewTradeClick()`'s fallback search for a reusable drawing checked
+   `!d._linkedTrade`** — a property nothing in this codebase ever actually set (confirmed
+   while removing its one dead reference inside `btDrawPosition()`, left over from a
+   v3.22.1 comment that said as much: "`d._linkedTrade` doesn't exist yet in this
+   release"). Since `undefined` is always falsy, `!d._linkedTrade` was always `true` —
+   this fallback matched *every* position drawing, including ones already linked to a
+   live order. A second New Trade click could have hijacked an already-placed trade's
+   own box, overwriting its link. Both of `btNewTradeClick()`'s lookup paths (the
+   selected drawing, and the fallback search over all drawings) now use the real
+   `btLinkedState(d)` check. `btOpenTicketFromDrawing()` itself gained the same guard as
+   a third, defense-in-depth layer, consistent with this codebase's own standing practice
+   of guarding at the function itself, not just its call sites.
+2. **`btSubmitTicket()` closed the order ticket's UI before its own session refresh
+   completed** — `btCloseTicket()` ran before `await refreshBtSession()`, so anything
+   reading `btSession.open_positions` immediately after the ticket visually closed was
+   racing this function's own in-flight refresh. Pre-existing before this release; this
+   release's own extra await (creating the new auto-linked drawing, item above) added
+   just enough latency to make the race reproducible in practice, caught by this
+   release's own harness. Fixed at the root — `refreshBtSession()` now runs before
+   `btCloseTicket()`, not after — rather than papered over with an arbitrary delay.
+
+#### Verification
+
+New harness driver `tools/ui-harness/drive-v3227.mjs` (26 assertions, all passing)
+against the stateful mock session 20: a Limit order's box staying byte-identical (same
+`points[].time`) across its own fill; New Trade's own 20-bar auto-creation confirmed by
+width; a TP close fading the box (`btLinkedState` → `'closed'`) while it stays in
+`btDrawings`; 20 Next Bar steps leaving the open box's own time span exact and its
+on-screen width within a few sub-pixel-rounding px (never the tens-of-pixels-per-bar
+drift the old growing box had); the lock itself proven directly via `btHitTestOne()`
+rather than a pixel-perfect mouse drag (same "drive the mechanism directly" choice this
+project's own harness has used since v3.22.5); and a real mouse-driven move + edge-drag
+confirming the box still slides in time and stretches while locked, with price
+confirmed byte-unchanged by the move.
+
+`drive.mjs` and `drive-v3226.mjs` pass unmodified. `drive-v3223.mjs` and
+`drive-v3225.mjs` each needed one small, clearly-commented update where their own PRIOR
+subject matter was directly superseded by this release, not a regression in what those
+releases actually shipped: `drive-v3223.mjs`'s own Verify 2 now explicitly switches the
+ticket to Market (its cancelled Verify 1 limit order leaves a real, reusable drawing
+behind now, which New Trade correctly — per the bug fix above — offers back, exactly the
+documented "else, the most recent drawing with no trade yet" priority, just not what that
+one step wanted to test); `drive-v3225.mjs`'s own Fix B block, which existed specifically
+to assert the old box "grows with Next Bar," now asserts the opposite (fixed width) since
+asserting the old behaviour would mean asserting something this release makes false on
+purpose.
+
+No PHP changed this release, no migration — `php -l`/`node --check` clean on every changed
+file, duplicate-name scan clean.
 
 ---
 

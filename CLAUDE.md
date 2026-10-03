@@ -7,7 +7,7 @@
 **Last Updated:** 2026-10-03 (housekeeping split — see below)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
-> "what changed and why" writeup (v3.9.x through v3.22.6, plus some retired reference
+> "what changed and why" writeup (v3.9.x through v3.22.7, plus some retired reference
 > material) was moved there verbatim on 2026-10-03 to keep this file under 600 lines.
 > This file only documents **current state** — what's true right now, not how it got
 > that way. If you need the story behind a design decision, check the archive first.
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.22.6 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.22.7 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -90,7 +90,7 @@ fill/P&L/drawdown math lives in `includes/backtest_engine.php`, self-tested via
 `php includes/backtest_engine.php`.
 
 The backtesting UI (order ticket, drawing tools, live trade display, price-axis
-auto-scale) has gone through many fix releases — see the archive's v3.21.x–v3.22.6
+auto-scale) has gone through many fix releases — see the archive's v3.21.x–v3.22.7
 entries for the full story if something there looks surprising.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
@@ -230,7 +230,7 @@ report_cards / report_card_blocks / report_card_templates / report_card_template
   full column lists + the AI review payload/tool schema are in the archive (v3.18.0).
 backtest_sessions / backtest_pending_orders / backtest_drawings / user_drawing_defaults /
   backtest_exit_time_repairs_log — see the Backtesting Replay Engine section above and
-  the archive's v3.19.0–v3.22.6 entries for full column lists and design history.
+  the archive's v3.19.0–v3.22.7 entries for full column lists and design history.
 ```
 
 ### Data Relationships
@@ -580,7 +580,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.6
+Current Version: v3.22.7
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

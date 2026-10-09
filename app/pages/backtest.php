@@ -30,9 +30,17 @@
 
       <div class="card form-section">
         <div class="card-title">Session</div>
-        <div class="form-group" style="margin-bottom:0">
+        <div class="form-group" style="margin-bottom:14px">
           <label>Session Name <span style="color:var(--red)">*</span></label>
           <input type="text" id="bt-setup-name" placeholder="e.g. FSA 1H BTC 10k test" maxlength="120">
+        </div>
+        <!-- v3.23.0 — optional. A strategy with active 'gate' variables shows a pre-order
+             checklist before every order ticket submits in this session (btOpenChecklist()
+             in js/backtest.js) -- a session with none selected, or a strategy with no gate
+             variables, behaves exactly as every pre-v3.23.0 session does. -->
+        <div class="form-group" style="margin-bottom:0">
+          <label>Strategy (optional — adds a pre-order checklist)</label>
+          <select id="bt-setup-strategy"><option value="">— No strategy / no checklist —</option></select>
         </div>
       </div>
 
@@ -225,6 +233,21 @@
              (position:relative) so it docks against the chart, not the page, and the
              chart stays visible while it's open, per the briefing. -->
         <div id="bt-ticket" class="bt-ticket" style="display:none"></div>
+        <!-- v3.23.0 — pre-order gate checklist, same structure/behavior as the live
+             journal's #checklist-popup (modals/checklist-modal.php), own ids throughout
+             to avoid colliding with it in the shared global scope. Only ever opened by
+             btSubmitTicket() when the session has a strategy with active gate variables
+             -- see js/backtest.js::btOpenChecklist(). -->
+        <div class="checklist-popup" id="bt-checklist-popup">
+          <h3>✅ GATE CHECKLIST</h3>
+          <div id="bt-checklist-items"></div>
+          <div class="check-score" id="bt-check-score" style="font-family:var(--font-head);font-size:24px;text-align:center;margin:12px 0">0/0</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost" style="flex:1" onclick="document.getElementById('bt-checklist-popup').classList.remove('open')">Cancel</button>
+            <button class="btn btn-success" style="flex:1" onclick="btChecklistProceed()">Proceed to Order →</button>
+          </div>
+        </div>
+        <div id="bt-checklist-overlay" onclick="document.getElementById('bt-checklist-popup').classList.remove('open')" style="display:none;position:fixed;inset:0;z-index:290"></div>
         <!-- v3.22.1 — the floating selection toolbar (replaces the old canvas-drawn
              "Place Long/Short" button). Positioned each redraw by
              js/backtest-drawings.js::btPositionSelectionToolbar(), just above whichever

@@ -284,6 +284,18 @@ async function populateBtSetupForm() {
         console.warn('[backtest] could not load challenges for prefill:', challenges.error);
     }
 
+    // v3.23.0 — same "non-fatal, this is a convenience dropdown" treatment as the
+    // challenge prefill just above: a strategy is entirely optional for a session.
+    const strategySel = document.getElementById('bt-setup-strategy');
+    const strategies = await btApi('get_strategies');
+    if (strategies && !strategies.error && Array.isArray(strategies)) {
+        strategySel.innerHTML = '<option value="">— No strategy / no checklist —</option>' +
+            strategies.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+    } else {
+        strategySel.innerHTML = '<option value="">— No strategy / no checklist —</option>';
+        if (strategies && strategies.error) console.warn('[backtest] could not load strategies:', strategies.error);
+    }
+
     await onBtSetupPairChange();
 }
 /**
@@ -376,6 +388,7 @@ async function createBacktestSession() {
         max_drawdown_pct: document.getElementById('bt-setup-max-dd').value,
         drawdown_type: document.getElementById('bt-setup-dd-type').value,
         max_trades_per_day: document.getElementById('bt-setup-max-trades').value || null,
+        strategy_id: document.getElementById('bt-setup-strategy').value || null,
     };
     const res = await btApi('create_backtest_session', 'POST', payload);
     if (res && res.error) { errEl.textContent = res.error; return; }
@@ -1533,7 +1546,50 @@ function btBaseAsset(symbol) {
     return s;
 }
 
-async function btSubmitTicket() {
+// v3.23.0 — entry point for the Place Order button. A session with a strategy that has
+// active gate variables shows the checklist first (btOpenChecklist()); every other
+// session skips straight to submission with gates_passed=null, exactly today's one-click
+// flow. btTicket/btSession are read fresh here (not passed through) since
+// btChecklistProceed() below calls back into btSubmitTicketConfirmed() asynchronously,
+// by which time the same globals must still describe the ticket actually being placed.
+function btSubmitTicket() {
+    if (!btTicket || !btSession) return;
+    const gates = (btSession.gate_variables || []);
+    if (btSession.strategy_id && gates.length) {
+        btOpenChecklist(gates);
+    } else {
+        btSubmitTicketConfirmed(null);
+    }
+}
+/** Renders bt-checklist-items from this session's active gate variables (same template
+ *  openChecklist() uses in trades.js for the live journal) and opens the popup. */
+function btOpenChecklist(gates) {
+    const wrap = document.getElementById('bt-checklist-items');
+    wrap.innerHTML = gates.map(v => `<div class="check-item" onclick="btToggleCheck(this)"><input type="checkbox"><span class="check-text">${v.timeframe ? `[${escapeHtml(v.timeframe)}] ` : ''}${escapeHtml(v.criteria || v.label)}</span></div>`).join('');
+    document.getElementById('bt-checklist-popup').classList.add('open');
+    btUpdateCheckScore();
+}
+function btToggleCheck(el) {
+    el.classList.toggle('checked');
+    el.querySelector('input').checked = el.classList.contains('checked');
+    btUpdateCheckScore();
+}
+function btUpdateCheckScore() {
+    const total = document.querySelectorAll('#bt-checklist-items .check-item').length;
+    const checked = document.querySelectorAll('#bt-checklist-items .check-item.checked').length;
+    const scoreEl = document.getElementById('bt-check-score');
+    scoreEl.textContent = checked + '/' + total;
+    scoreEl.style.color = checked === total ? 'var(--green)' : checked >= 3 ? 'var(--orange)' : 'var(--red)';
+}
+/** Mirrors trades.js::proceedTrade()'s own override prompt verbatim. */
+function btChecklistProceed() {
+    const checked = document.querySelectorAll('#bt-checklist-items .check-item.checked').length;
+    const total = document.querySelectorAll('#bt-checklist-items .check-item').length;
+    if (checked < total) { if (!confirm(`Only ${checked}/${total} rules met. Place order anyway?`)) return; }
+    document.getElementById('bt-checklist-popup').classList.remove('open');
+    btSubmitTicketConfirmed(checked === total ? 1 : 0);
+}
+async function btSubmitTicketConfirmed(gatesPassed) {
     if (!btTicket || !btSession) return;
     const c = btComputeTicket();
     if (c.blockReason) return; // button is disabled for this, but guard directly too
@@ -1559,6 +1615,7 @@ async function btSubmitTicket() {
         take_profit: btTicket.takeProfit !== null ? btRoundPrice(btTicket.takeProfit) : null,
         leverage: btTicket.leverage,
         risk_pct: c.riskPctEffective,
+        gates_passed: gatesPassed,
     };
     if (btTicket.orderType === 'limit') payload.limit_price = btRoundPrice(btTicket.entry);
     const res = await btApi('backtest_place_order', 'POST', payload);

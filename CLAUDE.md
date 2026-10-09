@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-03 (v3.22.10 — risk ladder in the backtest engine)
+**Last Updated:** 2026-10-09 (v3.23.0 — backtest gate checklist: strategy_id on sessions)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.22.10 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.23.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -104,6 +104,21 @@ limit order's tier is fixed at placement via `ladderInfoAsOf()`, re-derived from
 closed-trade history as of `placed_at_bar_time` rather than a new stored column. Never
 blocks off-ladder — only records `trades.planned_risk_pct`/`actual_risk_pct`/
 `balance_at_day_start`/`risk_deviation_pct` (reused v3.15/v3.16 columns).
+
+**Gate checklist (v3.23.0).** `backtest_sessions.strategy_id` (nullable FK to
+`strategies`, `ON DELETE SET NULL`) is optional — a session created without one behaves
+exactly as every pre-v3.23.0 session does. When set and that strategy has active
+`role='gate'` `strategy_variables`, `sessionSummary()` carries them as `gate_variables`
+(`BacktestController::getActiveGateVariables()`, the same `role='gate' AND is_active=1`
+filter the live journal's own `openChecklist()` uses client-side, moved server-side) and
+the order ticket shows a pre-order checklist before submitting
+(`js/backtest.js::btOpenChecklist()`/`btChecklistProceed()`, mirroring
+`trades.js::openChecklist()`'s own checked/total score and override-confirm UX). The
+trader's aggregate answer is recorded as `gates_passed` (TINYINT(1): 1 = every gate
+checked, 0 = overridden, NULL = no checklist applicable) on `backtest_pending_orders` for
+a limit order and carried to the `trades` row on fill, same carry-through convention as
+`planned_risk_pct`. Never blocks a trade — this is the plumbing a later release's gate-1
+structure indicator pre-fills/compares against, not an enforcement mechanism itself.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -592,7 +607,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.22.10
+Current Version: v3.23.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

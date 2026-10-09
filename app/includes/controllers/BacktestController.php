@@ -146,7 +146,7 @@ class BacktestController {
 
         $s = $this->db->prepare(
             "SELECT id, direction, entry_price, stop_loss, take_profit, exit_price, time_in, time_out,
-                    exit_reason, result, r_multiple, net_pnl, fees, pnl
+                    exit_reason, result, r_multiple, net_pnl, fees, pnl, gates_passed
              FROM trades
              WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
                AND result IN ('Win','Loss','Break Even')
@@ -169,6 +169,7 @@ class BacktestController {
                 'net_pnl' => (float) $t['net_pnl'],
                 'fees' => (float) $t['fees'],
                 'pnl' => (float) $t['pnl'],
+                'gates_passed' => $t['gates_passed'] !== null ? (int) $t['gates_passed'] : null,
             ];
         }, $s->fetchAll());
 
@@ -356,6 +357,19 @@ class BacktestController {
         $maxTradesPerDay = (isset($d['max_trades_per_day']) && $d['max_trades_per_day'] !== '') ? max(1, (int) $d['max_trades_per_day']) : null;
         $blindMode = !empty($d['blind_mode']) ? 1 : 0;
 
+        // v3.23.0 — optional: a session with no strategy (or one that doesn't belong to
+        // this user) behaves exactly as every pre-v3.23.0 session does, no checklist ever
+        // shown. Falls back to NULL rather than rejecting the request, same treatment
+        // default_leverage/drawdown_type already get above.
+        $strategyId = validId($d['strategy_id'] ?? 0);
+        if ($strategyId) {
+            $ownsStrategy = $this->db->prepare("SELECT id FROM strategies WHERE id=? AND user_id=?");
+            $ownsStrategy->execute([$strategyId, $this->uid]);
+            if (!$ownsStrategy->fetch()) $strategyId = null;
+        } else {
+            $strategyId = null;
+        }
+
         // v3.20.11 — cursor_step_tf records which timeframe replay_cursor_ms's own bar
         // came from (see the migration's own comment for why this is needed at all). The
         // very first bar a session ever shows is always at the session's own
@@ -365,12 +379,12 @@ class BacktestController {
             "INSERT INTO backtest_sessions
                 (user_id, session_name, symbol, replay_timeframe, start_time, replay_cursor_ms, cursor_step_tf, risk_pct, fee_rate_pct,
                  default_leverage, risk_ladder_json, use_flat_risk, blind_mode,
-                 starting_balance, profit_target_pct, daily_drawdown_pct, max_drawdown_pct, drawdown_type, max_trades_per_day)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                 starting_balance, profit_target_pct, daily_drawdown_pct, max_drawdown_pct, drawdown_type, max_trades_per_day, strategy_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         )->execute([
             $this->uid, $sessionName, $symbol, $timeframe, (int) $realStart, (int) $realStart, $timeframe, $riskPct, $feeRatePct,
             $defaultLeverage, json_encode($riskLadder), $useFlatRisk, $blindMode,
-            $startingBalance, $profitTargetPct, $dailyDrawdownPct, $maxDrawdownPct, $drawdownType, $maxTradesPerDay,
+            $startingBalance, $profitTargetPct, $dailyDrawdownPct, $maxDrawdownPct, $drawdownType, $maxTradesPerDay, $strategyId,
         ]);
 
         jsonResponse(['success' => true, 'id' => (int) $this->db->lastInsertId()]);
@@ -775,6 +789,17 @@ class BacktestController {
         $riskPct = num($d['risk_pct'] ?? $session['risk_pct']);
         if ($riskPct <= 0 || $riskPct > 100) $riskPct = (float) $session['risk_pct'];
 
+        // v3.23.0 — the pre-order checklist's own aggregate answer (1 = every active gate
+        // variable was checked, 0 = the trader overrode with at least one unchecked).
+        // Never validated/enforced beyond this coercion — the indicator this feeds (a
+        // later release) never blocks, same non-blocking principle the off-ladder risk
+        // note already applies elsewhere in this controller. NULL (no strategy/no gate
+        // variables, or simply omitted by an older client) passes through unchanged.
+        $gatesPassed = null;
+        if (array_key_exists('gates_passed', $d) && $d['gates_passed'] !== null) {
+            $gatesPassed = !empty($d['gates_passed']) ? 1 : 0;
+        }
+
         $state = $this->computeSessionState($session);
         $limits = $this->checkTradeLimits($session, $state, $session['replay_cursor_ms']);
         if ($limits['blocked']) jsonError($limits['reason']);
@@ -792,7 +817,7 @@ class BacktestController {
             // re-derivation needed (that's only for a limit order sitting pending across
             // bars/days, see evaluateBar()'s own call site below).
             $plannedRiskPct = $state['ladder_risk_pct'] ?? (float) $session['risk_pct'];
-            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time'], $plannedRiskPct, $state['start_of_day_equity']);
+            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time'], $plannedRiskPct, $state['start_of_day_equity'], $gatesPassed);
             jsonResponse(['success' => true, 'filled' => true, 'entry_price' => $entryPrice, 'lot_size' => $lotSize, 'direction' => $direction, 'trade_id' => $tradeId]);
         } else {
             $limitPrice = backtestRoundPrice(num($d['limit_price'] ?? 0));
@@ -823,9 +848,9 @@ class BacktestController {
             if ($direction === 'Short' && $stopLoss <= $limitPrice) jsonError('For a Short, stop loss must be above the limit price.');
             $this->checkMarginAndLiquidation($session, $direction, $limitPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
             $this->db->prepare(
-                "INSERT INTO backtest_pending_orders (session_id, direction, limit_price, stop_loss, take_profit, risk_pct, leverage, placed_at_bar_time)
-                 VALUES (?,?,?,?,?,?,?,?)"
-            )->execute([$session['id'], $direction, $limitPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $currentBar['open_time']]);
+                "INSERT INTO backtest_pending_orders (session_id, direction, limit_price, stop_loss, take_profit, risk_pct, leverage, placed_at_bar_time, gates_passed)
+                 VALUES (?,?,?,?,?,?,?,?,?)"
+            )->execute([$session['id'], $direction, $limitPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $currentBar['open_time'], $gatesPassed]);
             jsonResponse(['success' => true, 'filled' => false, 'pending_order_id' => (int) $this->db->lastInsertId()]);
         }
     }
@@ -1004,7 +1029,8 @@ class BacktestController {
                 $session, $order['direction'], $fillPrice, (float) $order['stop_loss'],
                 $order['take_profit'] !== null ? (float) $order['take_profit'] : null,
                 (float) $order['risk_pct'], (int) $order['leverage'], $state['equity'], $bar['open_time'],
-                $plannedRiskPct, $dayInfo['start_of_day_equity']
+                $plannedRiskPct, $dayInfo['start_of_day_equity'],
+                $order['gates_passed'] !== null ? (int) $order['gates_passed'] : null
             );
             $this->db->prepare("UPDATE backtest_pending_orders SET status='filled', trade_id=? WHERE id=?")->execute([$tradeId, $order['id']]);
             $filledThisBar[$tradeId] = $fillPrice;
@@ -1076,7 +1102,7 @@ class BacktestController {
     /** @return array{0:int,1:float} [tradeId, lotSize] -- lotSize is returned (not just
      *  the id) so callers can report a real fill confirmation ("Long 0.87 BTC filled @
      *  7140", v3.22.3 Fix F) without a second query or re-deriving the sizing math. */
-    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime, float $plannedRiskPct, float $balanceAtDayStart): array {
+    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime, float $plannedRiskPct, float $balanceAtDayStart, ?int $gatesPassed = null): array {
         $riskAmount = $equity * $riskPct / 100;
         $lotSize = backtestPositionSize($equity, $riskPct, $entryPrice, $stopLoss);
         $entryFee = round(backtestFee($lotSize, $entryPrice, (float) $session['fee_rate_pct']), 4);
@@ -1089,12 +1115,12 @@ class BacktestController {
             "INSERT INTO trades
                 (user_id, challenge_id, trade_date, time_in, pair, direction, entry_price, stop_loss, take_profit,
                  lot_size, fees, result, source, backtest_session_id, risk_amount, leverage, planned_margin,
-                 planned_risk_pct, actual_risk_pct, balance_at_day_start, risk_deviation_pct)
-             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?,?,?,?,?)"
+                 planned_risk_pct, actual_risk_pct, balance_at_day_start, risk_deviation_pct, gates_passed)
+             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?,?,?,?,?,?)"
         )->execute([
             $this->uid, $tradeDate, $timeIn, $session['symbol'], $direction, $entryPrice, $stopLoss, $takeProfit,
             $lotSize, $entryFee, $session['id'], $riskAmount, $leverage, $marginUsed,
-            $plannedRiskPct, $riskPct, $balanceAtDayStart, $riskDeviationPct,
+            $plannedRiskPct, $riskPct, $balanceAtDayStart, $riskDeviationPct, $gatesPassed,
         ]);
         return [(int) $this->db->lastInsertId(), $lotSize];
     }
@@ -1395,11 +1421,37 @@ class BacktestController {
         )->execute([$reason, $bar['open_time'], round($equity, 2), $session['id']]);
     }
 
+    /** v3.23.0 — the exact filter trades.js:937 already uses client-side for the live
+     *  pre-trade checklist (role='gate' AND is_active=1), moved server-side so the
+     *  backtest ticket doesn't need its own get_strategies round trip. Empty array (not
+     *  an error) whenever $strategyId is null — "no checklist configured" is a normal,
+     *  silent state here, same as the live journal's own openChecklist() empty-gates
+     *  message. */
+    private function getActiveGateVariables(?int $strategyId): array {
+        if (!$strategyId) return [];
+        $v = $this->db->prepare(
+            "SELECT id, label, criteria, timeframe FROM strategy_variables
+             WHERE strategy_id=? AND role='gate' AND is_active=1 ORDER BY sort_order ASC, id ASC"
+        );
+        $v->execute([$strategyId]);
+        return array_map(function ($row) {
+            return [
+                'id' => (int) $row['id'],
+                'label' => $row['label'],
+                'criteria' => $row['criteria'],
+                'timeframe' => $row['timeframe'],
+            ];
+        }, $v->fetchAll());
+    }
+
     private function sessionSummary(array $session, array $state): array {
         $starting = (float) $session['starting_balance'];
+        $strategyId = $session['strategy_id'] !== null ? (int) $session['strategy_id'] : null;
         return [
             'id' => (int) $session['id'],
             'session_name' => $session['session_name'],
+            'strategy_id' => $strategyId,
+            'gate_variables' => $this->getActiveGateVariables($strategyId),
             'symbol' => $session['blind_mode'] ? null : $session['symbol'],
             'blind_mode' => (bool) $session['blind_mode'],
             'replay_timeframe' => $session['replay_timeframe'],

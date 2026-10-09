@@ -76,6 +76,8 @@ function mockSessionSummary(): array {
         'passed_trade_count' => null,
         'rewind_count' => 0,
         'created_at' => gmdate('c'),
+        'strategy_id' => null,
+        'gate_variables' => [],
     ];
 }
 
@@ -177,6 +179,16 @@ function mockSessionConfig(int $id): ?array {
         // candle sequence as 24) so the <92.5% tier can be tested directly, in isolation,
         // without depending on/compounding session 24's own multi-step narrative.
         case 25: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'ladder'];
+        // v3.23.0 — a session with a strategy that has 2 active gate variables, so the
+        // ticket's pre-order checklist (js/backtest.js::btOpenChecklist()) actually has
+        // something to show. 26 is used for the market-order checked/overridden cases;
+        // 27 is a fresh, separate session so the limit-order carry-to-fill case doesn't
+        // share any state with 26's own market-order assertions. Same cursor_index=400
+        // candle sequence as 20/22 (see this file's own CLI mode for the hand-checked
+        // OHLC: index 401's low 8743.52 is below a 8750 Long limit, so it fills on the
+        // very next Next Bar click).
+        case 26: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'gated'];
+        case 27: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'gated'];
         default: return null;
     }
 }
@@ -382,6 +394,14 @@ function mockSessionResponse(int $id, array $st): array {
     $cfg = mockSessionConfig($id);
     $useFlatRisk = ($cfg['scenario'] ?? '') !== 'ladder';
     $riskLadder = $useFlatRisk ? [['lower_pct' => 0, 'upper_pct' => null, 'risk_pct' => 1.0]] : MOCK_DEFAULT_RISK_LADDER;
+    // v3.23.0 — only the 'gated' scenario (sessions 26/27) carries a strategy with
+    // active gate variables; every other stateful session keeps strategy_id=null,
+    // gate_variables=[] (no checklist), unchanged from before this release.
+    $gated = ($cfg['scenario'] ?? '') === 'gated';
+    $gateVariables = $gated ? [
+        ['id' => 1, 'label' => '4H bias aligned', 'criteria' => '4H bias aligned with trade direction', 'timeframe' => '4H'],
+        ['id' => 2, 'label' => 'Liquidity swept', 'criteria' => 'Liquidity swept before entry', 'timeframe' => null],
+    ] : [];
     $dayInfo = mockStartOfDayEquityAndTier($st, $cursorMs, $useFlatRisk, 1.0);
     return [
         'id' => $id, 'session_name' => 'UI Harness Stateful Session ' . $id,
@@ -407,6 +427,8 @@ function mockSessionResponse(int $id, array $st): array {
         // whenever use_flat_risk=true.
         'start_of_day_equity' => $dayInfo['start_of_day_equity'],
         'ladder_risk_pct' => $dayInfo['ladder_risk_pct'],
+        'strategy_id' => $gated ? 1 : null,
+        'gate_variables' => $gateVariables,
     ];
 }
 
@@ -438,6 +460,10 @@ function mockAdvance(int $id, array $st): array {
             'fees_paid' => round($lotSize * $o['limit_price'] * 0.0004, 4), 'leverage' => $o['leverage'], 'time_in' => $bar['time'],
             'planned_risk_pct' => $plannedRiskPct, 'actual_risk_pct' => $actualRiskPct,
             'balance_at_day_start' => $o['balance_at_day_start'] ?? null, 'risk_deviation_pct' => $riskDeviationPct,
+            // v3.23.0 — carries the checklist answer recorded AT PLACEMENT through to
+            // the fill, same "limit orders store the tier at placement" carry-through
+            // convention as planned_risk_pct just above.
+            'gates_passed' => $o['gates_passed'] ?? null,
         ];
         $st['trades_today']++;
         $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => $o['id'], 'price' => $o['limit_price'], 'lot_size' => $lotSize, 'direction' => $o['direction']];
@@ -680,6 +706,9 @@ switch ($action) {
             $cfg = mockSessionConfig($sessionIdParam);
             $useFlatRisk = ($cfg['scenario'] ?? '') !== 'ladder';
             $actualRiskPct = (float) ($body['risk_pct'] ?? 1);
+            // v3.23.0 — the ticket's own checklist answer, same nullable-passthrough the
+            // real placeOrder() does: absent/null stays null, otherwise coerced to 1/0.
+            $gatesPassed = (array_key_exists('gates_passed', $body) && $body['gates_passed'] !== null) ? (int) !!$body['gates_passed'] : null;
             if (($body['type'] ?? 'market') === 'market') {
                 $entryPrice = mockPriceAtIndex($st['cursor_index']);
                 // v3.22.10 — every OTHER stateful session keeps the flat, display-only
@@ -706,6 +735,7 @@ switch ($action) {
                     'leverage' => (int) ($body['leverage'] ?? 5), 'time_in' => $cursorMs,
                     'planned_risk_pct' => $plannedRiskPct, 'actual_risk_pct' => $actualRiskPct,
                     'balance_at_day_start' => $dayInfo['start_of_day_equity'], 'risk_deviation_pct' => $riskDeviationPct,
+                    'gates_passed' => $gatesPassed,
                 ];
                 $st['trades_today']++;
                 putMockSessionState($sessionIdParam, $st);
@@ -727,6 +757,7 @@ switch ($action) {
                     'placed_at_bar_time' => $cursorMs,
                     'planned_risk_pct' => $dayInfo['ladder_risk_pct'] ?? $dayInfo['flat_risk_pct'],
                     'balance_at_day_start' => $dayInfo['start_of_day_equity'],
+                    'gates_passed' => $gatesPassed,
                 ];
                 putMockSessionState($sessionIdParam, $st);
                 out(['success' => true, 'filled' => false, 'pending_order_id' => $orderId]);
@@ -816,5 +847,5 @@ switch ($action) {
  *  one owns a given order/trade id without the client telling them (cancelBtOrder()/
  *  closeBtPosition() only ever send the order/trade id, same as the real endpoints). */
 function mockSessionConfigsWithState(): array {
-    return [20 => true, 21 => true, 22 => true, 24 => true, 25 => true];
+    return [20 => true, 21 => true, 22 => true, 24 => true, 25 => true, 26 => true, 27 => true];
 }

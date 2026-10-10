@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-10 (v3.24.0 — FSA Gate 1 structure indicator in Backtesting)
+**Last Updated:** 2026-10-10 (v3.24.1 — Gate 1 engine tie-break fix, caught by real fixtures)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.24.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.24.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -142,8 +142,12 @@ order unconditionally; `gate1_agree` (1/0) only when the v3.23.0 checklist actua
 — it gets one extra, always-present "Gate 1 (Structure)" row pre-checked per state+
 direction, which the trader can override, same non-enforcing `gates_passed` pattern.
 Mandatory parity tests (`app/tests/gate1_parity.js`, fixtures in
-`app/tests/fixtures/gate1/`) are not yet populated with real Pine-exported data — see that
-directory's own README for the fixture contract.
+`app/tests/fixtures/gate1/`) pass exactly against all 4 real Pine-exported fixtures
+(BTC/LINK/LIT/PUMPFUN) as of v3.24.1 — a real tie-breaking bug in `hiSince`/`loSince`
+(forward-scan-from-range-start instead of Pine's actual backward-scan-from-the-confirming-
+candle) was caught and fixed by LINKUSDT's own fixture. Still outstanding: a live BTC 4H
+side-by-side against the real TradingView chart (no browser access from this
+environment).
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -632,7 +636,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.24.0
+Current Version: v3.24.1
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

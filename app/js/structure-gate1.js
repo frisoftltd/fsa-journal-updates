@@ -39,18 +39,26 @@ function createGate1Engine(opts) {
     }
     initState();
 
-    // Pine's hiSince(fromBar)/loSince(fromBar): scans fromBar..bar_index INCLUSIVE (the
-    // current candle's own high/low is a valid candidate for the new tracked extreme).
+    // Pine's hiSince(fromBar)/loSince(fromBar) -- ported from the ACTUAL relative-index
+    // semantics (`low[i]` = i bars back from bar_index), not just "find the extreme in
+    // [fromBar, bar_index]": v/b seed from bar_index itself (the CURRENT/confirming
+    // candle), then the loop walks BACKWARD (`for i = 1 to n`, checking low[i]/high[i])
+    // toward fromBar, replacing only on a STRICT improvement. On a tie between the
+    // current bar and an earlier one in range, Pine therefore keeps the CURRENT
+    // (later/higher-index) bar -- confirmed against a real fixture mismatch (LINKUSDT,
+    // swing 180: candles 1531 and 1533 tie at low=9.061; Pine's own export keeps 1533,
+    // the later one). A naive forward scan from fromBar (this function's original,
+    // wrong port) picks the EARLIER tied bar instead -- same extreme value, wrong index.
     function loSince(fromIdx, toIdx) {
-        let v = history[fromIdx].l, b = fromIdx;
-        for (let i = fromIdx + 1; i <= toIdx; i++) {
+        let v = history[toIdx].l, b = toIdx;
+        for (let i = toIdx - 1; i >= fromIdx; i--) {
             if (history[i].l < v) { v = history[i].l; b = i; }
         }
         return [v, b];
     }
     function hiSince(fromIdx, toIdx) {
-        let v = history[fromIdx].h, b = fromIdx;
-        for (let i = fromIdx + 1; i <= toIdx; i++) {
+        let v = history[toIdx].h, b = toIdx;
+        for (let i = toIdx - 1; i >= fromIdx; i--) {
             if (history[i].h > v) { v = history[i].h; b = i; }
         }
         return [v, b];

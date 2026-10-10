@@ -93,6 +93,119 @@ function runLookaheadTest() {
 // events:[{type,direction,level,sourceSwingIdx,breakIdx}], finalState}. No fixtures
 // present is reported, not failed -- this is an input only the trader can supply.
 // ════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+// Tie-break audit — one small synthetic case per site in structure-gate1.js where two
+// candles can share the exact same extreme value, each hand-verified against the real
+// Pine source line-by-line (not against this engine's own prior output). v3.24.1 fixed
+// one real bug here (hiSince/loSince); the other three sites were already correct and
+// are covered here so a future change can't silently regress them.
+//
+// Every sequence below was constructed candle-by-candle and confirmed with the engine
+// used purely as an arithmetic calculator (Wilder RMA by hand across many steps is
+// impractical) -- the CHOICE of which index is "correct" comes from independently
+// tracing Pine's own algorithm, not from whatever this engine happened to output.
+// ════════════════════════════════════════════════════════════════
+function mkCandle2(t, o, h, l, c) { return { t, o, h, l, c }; }
+
+function runTieBreakTests() {
+    console.log('[Tie-break audit]');
+
+    // --- Case 1: start-phase HIGH tracking (`h > iHi`, Pine line 76) -- strict, a tie
+    // must NOT move iHiBar forward. Candle 3 sets a new high (1010); candle 4 ties it
+    // exactly and must be ignored; candle 5 crosses the threshold via a low that's set
+    // LATER than the high, so the eventual confirm reports the HIGH swing -- its
+    // swingIdx must be 3 (the first candle to reach 1010), not 4 (the tying repeat).
+    {
+        const seq = [
+            mkCandle2(0, 1000, 1001, 999, 1000),
+            mkCandle2(1, 1000, 1001, 999, 500),
+            mkCandle2(2, 500, 1001, 999, 500),
+            mkCandle2(3, 1000, 1010, 1000, 1005),
+            mkCandle2(4, 1000, 1010, 1000, 1005), // ties candle 3's high exactly
+            mkCandle2(5, 1000, 1005, 1, 500),
+        ];
+        const e = createGate1Engine({ atrLen: 3, atrMult: 1.0 });
+        let swings = [];
+        for (const c of seq) swings = swings.concat(e.push(c).newSwings);
+        assert(swings.length === 1 && swings[0].type === 'H' && swings[0].swingIdx === 3,
+            `start-phase high tie keeps the EARLIER candle (got ${JSON.stringify(swings)})`);
+    }
+
+    // --- Case 2: start-phase LOW tracking (`l < iLo`, Pine line 79) -- mirror of case 1.
+    {
+        const seq = [
+            mkCandle2(0, 1000, 1001, 999, 1000),
+            mkCandle2(1, 1000, 1001, 999, 500),
+            mkCandle2(2, 500, 1001, 999, 500),
+            mkCandle2(3, 1000, 1000, 990, 995),
+            mkCandle2(4, 1000, 1000, 990, 995), // ties candle 3's low exactly
+            mkCandle2(5, 1000, 2000, 995, 1500),
+        ];
+        const e = createGate1Engine({ atrLen: 3, atrMult: 1.0 });
+        let swings = [];
+        for (const c of seq) swings = swings.concat(e.push(c).newSwings);
+        assert(swings.length === 1 && swings[0].type === 'L' && swings[0].swingIdx === 3,
+            `start-phase low tie keeps the EARLIER candle (got ${JSON.stringify(swings)})`);
+    }
+
+    // --- Case 3: post-confirmation search (hiSince/loSince, Pine lines 26-46) -- the
+    // bug v3.24.1 fixed. Candles 6 and 8 both reach high=15 within the post-confirmation
+    // search window; Pine's own loop seeds from the CONFIRMING candle and scans
+    // backward with strict replacement, so a tie keeps the LATER one (8).
+    {
+        const seq = [
+            mkCandle2(0, 1000, 1001, 999, 1000),
+            mkCandle2(1, 1000, 1001, 999, 500),
+            mkCandle2(2, 500, 1001, 999, 500),
+            mkCandle2(3, 1000, 1010, 1000, 1005),
+            mkCandle2(4, 1000, 1010, 1000, 1005),
+            mkCandle2(5, 1000, 1005, 1, 500),
+            mkCandle2(6, 10, 15, 9, 12),     // tie candidate, EARLIER (high=15)
+            mkCandle2(7, 12, 13, 10, 11),
+            mkCandle2(8, 11, 15, 10, 12),    // tie candidate, LATER (high=15, same value)
+            mkCandle2(9, 12, 13, 11, 12),
+            mkCandle2(10, 12, 12.5, 11.5, 12),
+            mkCandle2(11, 12, 12.3, 11.7, 12),
+            mkCandle2(12, 12, 12.2, 11.8, 12),
+            mkCandle2(13, 12, 12.1, 11.9, 12),
+            mkCandle2(14, 12, 12.1, 11.9, 12),
+            mkCandle2(15, 12, 12.1, 11.9, 12),
+            mkCandle2(16, 12, 12.1, 11.9, 12), // confirms a low swing -> triggers hiSince(6,16) over the tie
+            mkCandle2(17, 12, 12.1, 11, 12),
+            mkCandle2(18, 12, 12, 5, 8),        // confirms the swing high -> reveals which candle hiSince picked
+        ];
+        const e = createGate1Engine({ atrLen: 3, atrMult: 1.0 });
+        let swings = [];
+        for (const c of seq) swings = swings.concat(e.push(c).newSwings);
+        const tieSwing = swings.find(s => s.price === 15);
+        assert(!!tieSwing && tieSwing.swingIdx === 8,
+            `post-confirmation search tie keeps the LATER candle (got ${JSON.stringify(swings)})`);
+    }
+
+    // --- Case 4: start-phase, iHiBar === iLoBar (Pine's confirm block has no `else` for
+    // this case, lines 83-98) -- an "outside" candle that's simultaneously the new
+    // running high AND low confirms NOTHING even if the threshold is already crossed,
+    // and keeps waiting until a later candle breaks the tie between the two bar indexes.
+    {
+        const seq = [
+            mkCandle2(0, 1000, 1001, 999, 1000),
+            mkCandle2(1, 1000, 1001, 999, 500),
+            mkCandle2(2, 500, 1001, 999, 500),
+            mkCandle2(3, 750, 2000, 1, 750),      // outside bar: iHiBar=iLoBar=3, threshold already crossed
+            mkCandle2(4, 750, 760, 740, 750),     // quiet -- tie must still be unresolved
+            mkCandle2(5, 740, 2500, 700, 2400),   // new high breaks the tie -> now confirms
+        ];
+        const e = createGate1Engine({ atrLen: 3, atrMult: 1.0 });
+        const snaps = [];
+        for (const c of seq) snaps.push(e.push(c));
+        assert(snaps[3].newSwings.length === 0,
+            `iHiBar===iLoBar confirms NOTHING even though the threshold is already crossed (got ${JSON.stringify(snaps[3].newSwings)})`);
+        assert(snaps[4].newSwings.length === 0, 'still waiting one quiet bar later');
+        assert(snaps[5].newSwings.length === 1 && snaps[5].newSwings[0].type === 'L' && snaps[5].newSwings[0].swingIdx === 3,
+            `tie resolves once broken, crediting the original (earlier) candle 3 (got ${JSON.stringify(snaps[5].newSwings)})`);
+    }
+}
+
 function runFixtureTests() {
     const dir = path.join(__dirname, 'fixtures', 'gate1');
     let files = [];
@@ -143,6 +256,7 @@ function runFixtureTests() {
 }
 
 runLookaheadTest();
+runTieBreakTests();
 runFixtureTests();
 
 console.log(`\n${fail === 0 ? 'ALL PASS' : `${fail} FAILURE(S)`} (${pass} passed, ${fail} failed)`);

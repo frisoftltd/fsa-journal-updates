@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-09 (v3.23.0 — backtest gate checklist: strategy_id on sessions)
+**Last Updated:** 2026-10-10 (v3.24.0 — FSA Gate 1 structure indicator in Backtesting)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.23.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.24.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -117,8 +117,33 @@ the order ticket shows a pre-order checklist before submitting
 trader's aggregate answer is recorded as `gates_passed` (TINYINT(1): 1 = every gate
 checked, 0 = overridden, NULL = no checklist applicable) on `backtest_pending_orders` for
 a limit order and carried to the `trades` row on fill, same carry-through convention as
-`planned_risk_pct`. Never blocks a trade — this is the plumbing a later release's gate-1
-structure indicator pre-fills/compares against, not an enforcement mechanism itself.
+`planned_risk_pct`. Never blocks a trade — this was the plumbing v3.24.0's own gate-1
+structure indicator builds on.
+
+**FSA Gate 1 structure indicator (v3.24.0).** `app/js/structure-gate1.js` — exact port of
+`app/docs/reference/FSA_Structure_Gate1.pine` v4.2 (ATR(14) Wilder RMA, hidden zigzag,
+swing labeling, the BOS/CHoCH `st`/`pendRef` state machine). Pure, incremental, no DOM:
+`createGate1Engine({atrLen,atrMult}).push({t,o,h,l,c})` (t = UTC seconds) consumes exactly
+one already-closed 4H candle per call — there is no "recompute over the full array" path,
+so lookahead is impossible by construction. The feed (`js/backtest.js`,
+`btRebuildGate1FromScratch()`/`btAdvanceGate1IfNeeded()`) reuses the existing
+`get_backtest_candles` endpoint at `timeframe=4H` with `before` set to the start of the
+4H bucket containing the replay cursor — this alone skips `getCandles()`'s own
+still-forming-bar synthesis (`backtestAggregateCandles()`), so every candle the engine
+ever sees is already real and closed; no new endpoint, no custom aggregation. 500-candle
+warm-up on every session open/resume; a rewind does `reset()` then replays from the
+warm-up start through the new cursor — it never patches swings/events in place. Rendered
+on the existing `#bt-draw-overlay` canvas (`js/backtest-drawings.js::
+btRenderGate1Overlay()`, reusing `btTimeToX`/`btPriceToY`) plus a real DOM badge
+(`#bt-gate1-badge`) with the exact Pine badge text; toggleable (default on) from the draw
+toolbar — the toggle only ever hides/shows rendering, the engine and order recording keep
+running regardless. `gate1_auto_state` (the engine's `state`, -2..2) is sent on **every**
+order unconditionally; `gate1_agree` (1/0) only when the v3.23.0 checklist actually opens
+— it gets one extra, always-present "Gate 1 (Structure)" row pre-checked per state+
+direction, which the trader can override, same non-enforcing `gates_passed` pattern.
+Mandatory parity tests (`app/tests/gate1_parity.js`, fixtures in
+`app/tests/fixtures/gate1/`) are not yet populated with real Pine-exported data — see that
+directory's own README for the fixture contract.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -607,7 +632,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.23.0
+Current Version: v3.24.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

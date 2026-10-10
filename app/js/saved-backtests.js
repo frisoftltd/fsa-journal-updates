@@ -66,6 +66,14 @@ function sbSummaryLine(rs) {
     const exp = rs.expectancy_r === null ? '—' : `${rs.expectancy_r >= 0 ? '+' : ''}${rs.expectancy_r.toFixed(2)}R`;
     return `${rs.trade_count} trade${rs.trade_count === 1 ? '' : 's'} · ${wr} win rate · ${exp} expectancy`;
 }
+/** v3.24.0 — §6's condensed line, present only when results_summary.gate1_summary
+ *  exists (BacktestController::quickResultsSummary()) -- a strategy-less session, or one
+ *  entirely pre-v3.24.0, shows nothing extra here at all. */
+function sbGate1SummaryLine(rs) {
+    if (!rs || !rs.gate1_summary) return '';
+    const fmtSide = side => side.win_rate === null ? `${side.n}` : `${side.n} (${(side.win_rate * 100).toFixed(0)}%)`;
+    return `<div class="sb-card-summary" style="color:var(--text3)">Gate 1: ${fmtSide(rs.gate1_summary.agreed)} agreed · ${fmtSide(rs.gate1_summary.disagreed)} disagreed</div>`;
+}
 
 function sbCardHtml(s) {
     const progressPct = s.progress_to_target_pct === null ? null : Math.max(0, Math.min(100, s.progress_to_target_pct));
@@ -93,6 +101,7 @@ function sbCardHtml(s) {
             <div class="sb-progress-label">${progressLabel}</div>
         </div>
         <div class="sb-card-summary">${sbSummaryLine(s.results_summary)}</div>
+        ${sbGate1SummaryLine(s.results_summary)}
         <div class="sb-card-actions">
             <button class="btn btn-primary btn-sm" style="flex:1" onclick="openBacktestFromList(${s.id})">${s.status === 'active' ? 'Resume' : 'Review'}</button>
             <button class="btn btn-ghost btn-sm" style="flex:1" onclick="showPage('backtest-results', ${s.id})">Results</button>

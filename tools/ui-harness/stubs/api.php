@@ -189,6 +189,11 @@ function mockSessionConfig(int $id): ?array {
         // very next Next Bar click).
         case 26: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'gated'];
         case 27: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'gated'];
+        // v3.24.0 — a strategy with 18 active gate variables (on top of the Gate 1
+        // engine's own dedicated row, 19 total) specifically to force the §0 checklist-
+        // overflow case the harness needs to verify -- every other 'gated' session above
+        // has only 2, nowhere near enough to overflow a 90vh popup.
+        case 28: return ['symbol' => 'BTCUSDT', 'timeframe' => '1H', 'start_index' => 380, 'cursor_index' => 400, 'scenario' => 'gated_overflow'];
         default: return null;
     }
 }
@@ -397,11 +402,26 @@ function mockSessionResponse(int $id, array $st): array {
     // v3.23.0 — only the 'gated' scenario (sessions 26/27) carries a strategy with
     // active gate variables; every other stateful session keeps strategy_id=null,
     // gate_variables=[] (no checklist), unchanged from before this release.
-    $gated = ($cfg['scenario'] ?? '') === 'gated';
-    $gateVariables = $gated ? [
-        ['id' => 1, 'label' => '4H bias aligned', 'criteria' => '4H bias aligned with trade direction', 'timeframe' => '4H'],
-        ['id' => 2, 'label' => 'Liquidity swept', 'criteria' => 'Liquidity swept before entry', 'timeframe' => null],
-    ] : [];
+    // v3.24.0 — 'gated_overflow' (session 28) carries 8, specifically to force the §0
+    // checklist-overflow case (9 rows total once the Gate 1 engine's own dedicated row
+    // is added on top -- js/backtest.js::btOpenChecklist()).
+    $scenario = $cfg['scenario'] ?? '';
+    $gated = $scenario === 'gated' || $scenario === 'gated_overflow';
+    if ($scenario === 'gated_overflow') {
+        // 18 rows (+ the engine's own dedicated Gate 1 row = 19) -- comfortably forces
+        // real overflow even at 1920x1080's own 90vh, not just 1366x768's.
+        $gateVariables = [];
+        for ($gi = 1; $gi <= 18; $gi++) {
+            $gateVariables[] = ['id' => $gi, 'label' => "Gate check #$gi", 'criteria' => "This is the full rule text for gate check #$gi, long enough on its own to force the checklist's collapsible detail to actually matter in this test.", 'timeframe' => $gi % 2 === 0 ? '4H' : '1H'];
+        }
+    } elseif ($gated) {
+        $gateVariables = [
+            ['id' => 1, 'label' => '4H bias aligned', 'criteria' => '4H bias aligned with trade direction', 'timeframe' => '4H'],
+            ['id' => 2, 'label' => 'Liquidity swept', 'criteria' => 'Liquidity swept before entry', 'timeframe' => null],
+        ];
+    } else {
+        $gateVariables = [];
+    }
     $dayInfo = mockStartOfDayEquityAndTier($st, $cursorMs, $useFlatRisk, 1.0);
     return [
         'id' => $id, 'session_name' => 'UI Harness Stateful Session ' . $id,
@@ -462,8 +482,11 @@ function mockAdvance(int $id, array $st): array {
             'balance_at_day_start' => $o['balance_at_day_start'] ?? null, 'risk_deviation_pct' => $riskDeviationPct,
             // v3.23.0 — carries the checklist answer recorded AT PLACEMENT through to
             // the fill, same "limit orders store the tier at placement" carry-through
-            // convention as planned_risk_pct just above.
+            // convention as planned_risk_pct just above. v3.24.0 — same for the Gate 1
+            // engine's own fields.
             'gates_passed' => $o['gates_passed'] ?? null,
+            'gate1_auto_state' => $o['gate1_auto_state'] ?? null,
+            'gate1_agree' => $o['gate1_agree'] ?? null,
         ];
         $st['trades_today']++;
         $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => $o['id'], 'price' => $o['limit_price'], 'lot_size' => $lotSize, 'direction' => $o['direction']];
@@ -709,6 +732,11 @@ switch ($action) {
             // v3.23.0 — the ticket's own checklist answer, same nullable-passthrough the
             // real placeOrder() does: absent/null stays null, otherwise coerced to 1/0.
             $gatesPassed = (array_key_exists('gates_passed', $body) && $body['gates_passed'] !== null) ? (int) !!$body['gates_passed'] : null;
+            // v3.24.0 — same nullable-passthrough treatment for the Gate 1 engine's own
+            // fields. gate1AutoState is sent on every order regardless of whether any
+            // checklist appeared; gate1Agree only when it did.
+            $gate1AutoState = (array_key_exists('gate1_auto_state', $body) && $body['gate1_auto_state'] !== null) ? (int) $body['gate1_auto_state'] : null;
+            $gate1Agree = (array_key_exists('gate1_agree', $body) && $body['gate1_agree'] !== null) ? (int) !!$body['gate1_agree'] : null;
             if (($body['type'] ?? 'market') === 'market') {
                 $entryPrice = mockPriceAtIndex($st['cursor_index']);
                 // v3.22.10 — every OTHER stateful session keeps the flat, display-only
@@ -735,7 +763,7 @@ switch ($action) {
                     'leverage' => (int) ($body['leverage'] ?? 5), 'time_in' => $cursorMs,
                     'planned_risk_pct' => $plannedRiskPct, 'actual_risk_pct' => $actualRiskPct,
                     'balance_at_day_start' => $dayInfo['start_of_day_equity'], 'risk_deviation_pct' => $riskDeviationPct,
-                    'gates_passed' => $gatesPassed,
+                    'gates_passed' => $gatesPassed, 'gate1_auto_state' => $gate1AutoState, 'gate1_agree' => $gate1Agree,
                 ];
                 $st['trades_today']++;
                 putMockSessionState($sessionIdParam, $st);
@@ -757,7 +785,7 @@ switch ($action) {
                     'placed_at_bar_time' => $cursorMs,
                     'planned_risk_pct' => $dayInfo['ladder_risk_pct'] ?? $dayInfo['flat_risk_pct'],
                     'balance_at_day_start' => $dayInfo['start_of_day_equity'],
-                    'gates_passed' => $gatesPassed,
+                    'gates_passed' => $gatesPassed, 'gate1_auto_state' => $gate1AutoState, 'gate1_agree' => $gate1Agree,
                 ];
                 putMockSessionState($sessionIdParam, $st);
                 out(['success' => true, 'filled' => false, 'pending_order_id' => $orderId]);
@@ -847,5 +875,5 @@ switch ($action) {
  *  one owns a given order/trade id without the client telling them (cancelBtOrder()/
  *  closeBtPosition() only ever send the order/trade id, same as the real endpoints). */
 function mockSessionConfigsWithState(): array {
-    return [20 => true, 21 => true, 22 => true, 24 => true, 25 => true, 26 => true, 27 => true];
+    return [20 => true, 21 => true, 22 => true, 24 => true, 25 => true, 26 => true, 27 => true, 28 => true];
 }

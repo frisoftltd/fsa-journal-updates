@@ -50,6 +50,28 @@ function pnlCls(n){return parseFloat(n)>=0?'pnl-pos':'pnl-neg';}
 function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+/** v3.24.0 — shared row markup for both pre-trade checklists (trades.js::openChecklist()
+ *  and backtest.js::btOpenChecklist()): a short title (`[timeframe] label`) plus the
+ *  longer `criteria` text collapsed underneath, opened by its own "▾" affordance that
+ *  stops propagation before toggleCheck()/btToggleCheck() ever sees the click — ticking
+ *  the box never requires opening the detail first. No detail/expand affordance at all
+ *  when criteria is blank or identical to the title (nothing to collapse). `item` is
+ *  {label, criteria, timeframe} — the same shape strategy_variables' gate rows already
+ *  have; a caller's own synthetic item (e.g. backtest.js's dedicated Gate 1 row) just
+ *  needs to match that shape. `toggleFn`/`expandToggleFn` are the caller's own global
+ *  function names (different per checklist, since they target different item ids). */
+function checkItemHtml(item, toggleFn, extraAttrs) {
+    const title = `${item.timeframe ? `[${escapeHtml(item.timeframe)}] ` : ''}${escapeHtml(item.label)}`;
+    const detail = (item.criteria && item.criteria.trim() && item.criteria.trim() !== (item.label || '').trim()) ? item.criteria : null;
+    return `<div class="check-item"${extraAttrs || ''}>
+        <div class="check-item-row" onclick="${toggleFn}(this.parentElement)">
+            <input type="checkbox">
+            <span class="check-text">${title}</span>
+            ${detail ? `<span class="check-expand" onclick="event.stopPropagation(); this.closest('.check-item').classList.toggle('expanded')">▾</span>` : ''}
+        </div>
+        ${detail ? `<div class="check-detail">${escapeHtml(detail)}</div>` : ''}
+    </div>`;
+}
 function resultBadge(r){
     if(!r) return '—';
     const m={Win:'win',Loss:'loss','Break Even':'be'};

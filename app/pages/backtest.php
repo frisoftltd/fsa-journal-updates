@@ -216,6 +216,15 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="12" r="1.6" fill="currentColor" stroke="none"/><line x1="4" y1="12" x2="19" y2="12"/><path d="M15 8l4 4-4 4"/></svg>
         </button>
         <div class="bt-draw-toolbar-sep"></div>
+        <!-- v3.24.0 — FSA Gate 1 overlay toggle. Default on. Only ever hides/shows the
+             badge + swing labels + BOS/CHoCH lines (js/backtest.js::btGate1Visible) --
+             the engine itself keeps running and gate1_auto_state keeps getting recorded
+             on every order regardless of this toggle's state. Own hand-drawn glyph (a
+             zigzag), same 24x24 stroke-only convention as every other icon here. -->
+        <button class="bt-util-btn active" id="bt-gate1-toggle-btn" onclick="btToggleGate1()" title="FSA Gate 1 overlay">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16l5-9 4 6 3-4 4 5"/></svg>
+        </button>
+        <div class="bt-draw-toolbar-sep"></div>
         <button class="bt-util-btn active" id="bt-magnet-btn" onclick="btToggleMagnet()" title="Magnet — snap to candle open/high/low/close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v7a7 7 0 0 0 14 0V4"/><line x1="5" y1="4" x2="9" y2="4"/><line x1="15" y1="4" x2="19" y2="4"/><line x1="5" y1="8" x2="9" y2="8"/><line x1="15" y1="8" x2="19" y2="8"/></svg>
         </button>
@@ -240,9 +249,9 @@
              -- see js/backtest.js::btOpenChecklist(). -->
         <div class="checklist-popup" id="bt-checklist-popup">
           <h3>✅ GATE CHECKLIST</h3>
-          <div id="bt-checklist-items"></div>
+          <div id="bt-checklist-items" class="check-items-scroll"></div>
           <div class="check-score" id="bt-check-score" style="font-family:var(--font-head);font-size:24px;text-align:center;margin:12px 0">0/0</div>
-          <div style="display:flex;gap:8px">
+          <div style="display:flex;gap:8px;flex-shrink:0">
             <button class="btn btn-ghost" style="flex:1" onclick="document.getElementById('bt-checklist-popup').classList.remove('open')">Cancel</button>
             <button class="btn btn-success" style="flex:1" onclick="btChecklistProceed()">Proceed to Order →</button>
           </div>
@@ -280,6 +289,11 @@
              (js/backtest.js::btReenableAutoScale()) — the second of the two explicit
              "ways back to auto," alongside double-clicking the axis itself. -->
         <button id="bt-autoscale-toggle" class="bt-autoscale-toggle" onclick="btReenableAutoScale()" title="Re-enable auto price-scale">A</button>
+        <!-- v3.24.0 — FSA Gate 1 badge: a real DOM element (crisper multi-line text than
+             canvas fillText), same "DOM overlay inside .tv-chart-wrap" pattern the order
+             ticket itself already uses. Filled/shown by js/backtest.js::renderBtGate1Badge();
+             empty and hidden until the engine has pushed at least one candle. -->
+        <div id="bt-gate1-badge" class="bt-gate1-badge" style="display:none"></div>
       </div>
 
       <div class="bt-side-panel">

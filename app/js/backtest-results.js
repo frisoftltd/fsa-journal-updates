@@ -153,6 +153,12 @@ function brPageHtml(data) {
         { label: 'Long', block: metrics.long },
         { label: 'Short', block: metrics.short },
     ];
+    // v3.24.0 — §6 of the Gate 1 briefing: "trader vs indicator agreed/disagreed" columns,
+    // pushed onto the exact same {label, block} array brMetricTableHtml() already renders
+    // generically. Present only when the server actually found gate1 data for this
+    // session (a strategy-less session, or one entirely pre-v3.24.0, has neither key).
+    if (metrics.gate1_agreed) columns.push({ label: 'Gate 1 Agreed', block: metrics.gate1_agreed });
+    if (metrics.gate1_disagreed) columns.push({ label: 'Gate 1 Disagreed', block: metrics.gate1_disagreed });
     return `
         ${brHeaderHtml(session, metrics.overall)}
         ${brStatTilesHtml(metrics.overall)}

@@ -304,6 +304,67 @@ session, place and close a trade, then confirm the Trade Log, Dashboard, Statist
 Review Engine pages for the real active challenge show no change at all from before the
 backtest trade existed.
 
+## 14. FSA Gate 1 engine (v3.24.0)
+
+Gate 1 (4H market structure — swings, BOS/CHoCH, a bullish/bearish/unclear badge) is
+ported exactly from `app/docs/reference/FSA_Structure_Gate1.pine` v4.2 into
+`app/js/structure-gate1.js` — a pure, incremental, no-DOM module.
+`createGate1Engine({atrLen, atrMult}).push({t,o,h,l,c})` (t = open time, UTC **seconds**)
+consumes exactly one already-closed 4H candle per call and returns a snapshot
+(`{state, protectedLevel, bosLevel, lastSwingHigh, lastSwingLow, newSwings[], newEvents[]}`).
+There is no "recompute over the full array" code path — lookahead is impossible by
+construction, not just by convention.
+
+**Candle feed — no new endpoint.** `BacktestController::getCandles()`
+(`get_backtest_candles`) already synthesizes a still-forming display-timeframe bar from
+revealed 15m candles whenever the requested ceiling falls inside it
+(`backtestAggregateCandles()`) — exactly the lookahead this engine must never see.
+Calling it with `timeframe=4H` and `before` set to the start of the 4H bucket the replay
+cursor currently sits in (`alignedStart = floor(cursor_ms / 14400000) * 14400000`)
+sidesteps that synthesis branch entirely (`$includePartial` becomes false server-side),
+so every row returned is already real and fully closed. `js/backtest.js` never builds 4H
+candles from finer ones itself — it just asks for exactly the right window.
+
+**Warm-up.** 500 4H candles are fetched and pushed silently before a session's first
+replay step is ever shown (`btRebuildGate1FromScratch()`), so ATR and structure are
+already settled when the trader starts. This also runs on every plain session open/resume
+— the engine is purely client-side/ephemeral (no server-side state of its own to resume
+from), so "resume a session" and "rewind" both reduce to the same reset-then-replay
+procedure.
+
+**Advance.** After every `btAdvance()`, `btAdvanceGate1IfNeeded()` recomputes the new
+cursor's own 4H-bucket start; if it has moved past the last-pushed candle's own bucket, it
+fetches a small window (`limit=10`, comfortably covering even a full 1D replay step) and
+pushes whatever's newly closed. Most advance() calls (finer than 4H) push nothing at all.
+
+**Rewind.** `reset()` then full replay from the warm-up start through the new cursor —
+swings/events are never patched in place. Verified in
+`tools/ui-harness/drive-v3240.mjs`: an advance followed by an equal rewind produces a
+byte-identical `{gate1Swings, gate1Events, gate1Snapshot}` to before.
+
+**Rendering.** The existing drawing canvas (`#bt-draw-overlay`,
+`js/backtest-drawings.js::btRenderGate1Overlay()`), reusing that file's own
+`btTimeToX`/`btPriceToY` coordinate helpers — gate1 candle times are raw UTC seconds, so
+each one goes through `toDisplaySeconds()` (js/chart.js) first, exactly like every other
+drawing anchor in that file. The badge itself (`#bt-gate1-badge`) is a real DOM element,
+not canvas-drawn, for crisper multi-line text. A toolbar toggle (default on) only ever
+hides/shows rendering — the engine and order recording run regardless of its state.
+
+**Order recording.** `gate1_auto_state` (the engine's `state`, -2..2) is sent on every
+`backtest_place_order` call unconditionally. `gate1_agree` (1/0) is only ever non-null
+when the v3.23.0 gate checklist actually opens (`strategy_id` + active gate variables) —
+it gets one extra, always-present "Gate 1 (Structure)" row, pre-checked per state+
+direction, that the trader can override. Both carry from a limit order's pending row to
+the trade on fill, same pattern `gates_passed`/`planned_risk_pct` already use. Neither is
+ever enforced — the indicator's manual validation (§7 of the original briefing) isn't
+finished.
+
+**Parity fixtures.** `app/tests/fixtures/gate1/` — one JSON per coin, exported from the
+real Pine indicator. Empty as of v3.24.0; `app/tests/gate1_parity.js` reports "skipped"
+rather than failing until the trader supplies them. See that directory's own README for
+the exact expected shape (a reconstruction from the briefing's prose, not yet confirmed
+against a real export).
+
 ## Judgment calls made, not literally specified in the briefing
 
 - `candles` has no surrogate `id` — its natural key `(symbol, timeframe, open_time)` is

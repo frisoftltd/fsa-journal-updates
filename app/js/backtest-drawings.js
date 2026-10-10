@@ -1983,6 +1983,73 @@ function btHitTestOne(d, x, y) {
     return null;
 }
 
+// ── FSA GATE 1 OVERLAY (v3.24.0) ───────────────────────────
+// Swings (gate1Swings) and BOS/CHoCH events (gate1Events), both accumulated in
+// js/backtest.js as the engine (app/js/structure-gate1.js) pushes each newly-closed 4H
+// candle. Every time/price anchor here goes through the SAME real-time+price ->
+// on-screen conversion every other drawing in this file already uses
+// (btTimeToX/btPriceToY, this file's own docblock) -- gate1 candle times are raw UTC
+// seconds (structure-gate1.js's own contract), so they're converted to the chart's own
+// display-shifted-seconds domain via toDisplaySeconds() (js/chart.js) before btTimeToX,
+// exactly like every other anchor here.
+function btGate1TimeToX(openTimeMs) {
+    // v3.24.0 fix (caught by the existing v3.23.0 harness driver, not assumed): on a
+    // session's very first open, btRebuildGate1FromScratch() can schedule a redraw
+    // before btLoadCandleWindow() has ever set chartState.timezone (that call happens
+    // right after, in openBacktestSession()) -- same fallback expression
+    // btLoadCandleWindow() itself uses, so this never depends on call order.
+    const tz = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    return btTimeToX(toDisplaySeconds(openTimeMs, tz));
+}
+function btRenderGate1Overlay(ctx) {
+    if (typeof gate1Swings === 'undefined' || !gate1PushedTimes || !gate1PushedTimes.length) return;
+    const bullCol = '#089981', bearCol = '#f23645';
+
+    ctx.save();
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    for (const sw of gate1Swings) {
+        const openTimeMs = gate1PushedTimes[sw.confirmIdx];
+        if (openTimeMs === undefined) continue;
+        const x = btGate1TimeToX(openTimeMs);
+        const y = btPriceToY(sw.price);
+        if (x === null || y === null) continue;
+        // Pine's own rule (FSA_Structure_Gate1.pine:129-130/135-136): `up` -- and so the
+        // label's colour -- defaults bullCol/true for the very FIRST swing of either
+        // kind (no previous reference to compare against), not by high-vs-low. HH/H ->
+        // bull, LH -> bear (highs); HL/L -> bull, LL -> bear (lows). Matched exactly,
+        // not "fixed" to a more intuitive-looking high=bull/low=bear split.
+        const isHighType = sw.type === 'H' || sw.type === 'HH' || sw.type === 'LH';
+        const up = sw.type === 'H' || sw.type === 'HH' || sw.type === 'L' || sw.type === 'HL';
+        ctx.fillStyle = up ? bullCol : bearCol;
+        ctx.textBaseline = isHighType ? 'bottom' : 'top';
+        ctx.fillText(sw.type, x, y + (isHighType ? -4 : 4));
+    }
+
+    ctx.setLineDash([]);
+    ctx.textBaseline = 'middle';
+    for (const ev of gate1Events) {
+        const sourceTimeMs = gate1PushedTimes[ev.sourceSwingIdx];
+        const breakTimeMs = gate1PushedTimes[ev.breakCandleIdx];
+        if (sourceTimeMs === undefined || breakTimeMs === undefined) continue;
+        const x1 = btGate1TimeToX(sourceTimeMs), x2 = btGate1TimeToX(breakTimeMs);
+        const y = btPriceToY(ev.level);
+        if (x1 === null || x2 === null || y === null) continue;
+        const color = ev.direction === 'bullish' ? bullCol : bearCol;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(ev.type === 'CHoCH' ? [4, 3] : []);
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x2, y);
+        ctx.stroke();
+        ctx.fillStyle = color;
+        ctx.fillText(ev.type, (x1 + x2) / 2, y + (ev.direction === 'bullish' ? -8 : 8));
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+}
+
 // ── RENDERING ──────────────────────────────────────────────
 function btRenderDrawings() {
     if (!btDrawOverlay || !btDrawCtx) return;
@@ -2023,6 +2090,12 @@ function btRenderDrawings() {
     // render after this whole loop, so they're covered by this same ordering for free.
     for (const d of btDrawings.filter(dw => dw.tool === 'rectangle')) {
         btDrawOne(ctx, d, d.id === btSelectedDrawingId, false, null);
+    }
+    // v3.24.0 — FSA Gate 1 swings/BOS/CHoCH, same "background context never covers a
+    // live trade" precedence rectangles already get (drawn right after them, before
+    // every other drawing/trade line below).
+    if (typeof btGate1Visible !== 'undefined' && btGate1Visible && typeof btRenderGate1Overlay === 'function') {
+        btRenderGate1Overlay(ctx);
     }
     for (const d of btDrawings.filter(dw => dw.tool !== 'rectangle')) {
         // v3.22.7 — a linked drawing is the trade's own box now (the v3.22.3 "superseded

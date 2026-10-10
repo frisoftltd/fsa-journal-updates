@@ -47,6 +47,20 @@ let btAutoplayTimer = null;
 // (see refreshBtSession()'s isFirstLoad branch), then only ever changed by the user via
 // setBtDisplayTimeframe().
 let btDisplayTimeframe = null;
+// v3.24.0 — FSA Gate 1 structure engine state. Purely client-side/ephemeral (the engine
+// itself, app/js/structure-gate1.js, has no server state to resume from) -- rebuilt from
+// scratch (reset() then re-push from the warm-up start) on every session open/resume AND
+// on every rewind, never patched in place. gate1PushedTimes is index-aligned with the
+// engine's own internal candle index, so a swing/event's swingIdx/confirmIdx/
+// sourceSwingIdx/breakCandleIdx can be resolved back to a real open_time (ms) for
+// drawing -- see btRenderGate1Overlay() (backtest-drawings.js).
+let gate1Engine = null;
+let gate1PushedTimes = [];
+let gate1Swings = [];
+let gate1Events = [];
+let gate1Snapshot = null;
+let gate1LastPushedOpenTime = null;
+let btGate1Visible = true;
 
 /** Every network/API call this module (and js/saved-backtests.js) makes goes through
  *  this — never a bare api() call. Always returns a plain object: either the server's
@@ -421,6 +435,7 @@ async function openBacktestSession(id) {
 
     const ok = await refreshBtSession();
     if (!ok) return;
+    await btRebuildGate1FromScratch();
     await btLoadCandleWindow();
     if (typeof resizeTvChart === 'function') resizeTvChart();
     // v3.21.0 — drawings are scoped per session; load them once the session itself is
@@ -490,6 +505,135 @@ async function btLoadCandleWindow() {
     // index into this array, so a full replace of chartState.candles (which is exactly
     // what just happened) doesn't itself invalidate anything -- this just repaints them
     // at their current, correctly-recomputed screen positions against the new window.
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
+}
+
+// ── FSA GATE 1 (v3.24.0) ───────────────────────────────────
+// Gate 1 is defined on 4H regardless of the session's own replay_timeframe or whatever
+// the trader is currently viewing -- this feed is entirely independent of
+// btFetchCandles()/chartState above, always timeframe=4H, and never touches
+// chartState.candles.
+const GATE1_FOUR_H_MS = 4 * 3600 * 1000;
+const GATE1_WARMUP_BARS = 500;
+
+function btGate1AlignedStart(cursorMs) {
+    return Math.floor(cursorMs / GATE1_FOUR_H_MS) * GATE1_FOUR_H_MS;
+}
+
+/**
+ * BacktestController::getCandles() already synthesizes a still-forming display-timeframe
+ * bar from already-revealed 15m candles whenever the requested ceiling falls inside it
+ * (backtestAggregateCandles()) -- exactly the lookahead this engine must never see.
+ * Passing `before` equal to the START of the 4H bucket the cursor currently sits in
+ * (btGate1AlignedStart()) sidesteps that synthesis branch entirely: the server's own
+ * $includePartial check becomes false, so every row returned is already real and fully
+ * closed. No new endpoint, no custom aggregation -- the existing no-lookahead clamp
+ * already does exactly what this needs.
+ */
+async function btFetchGate1Candles(beforeMs, limit) {
+    const action = `get_backtest_candles&session_id=${btActiveSessionId}&timeframe=4H&before=${beforeMs}&limit=${limit}`;
+    const res = await btApi(action);
+    if (!res || res.error || !Array.isArray(res.candles)) return [];
+    return res.candles;
+}
+
+function btGate1PushCandle(r) {
+    gate1PushedTimes.push(r.time);
+    const snap = gate1Engine.push({ t: Math.floor(r.time / 1000), o: r.open, h: r.high, l: r.low, c: r.close });
+    gate1Swings.push(...snap.newSwings);
+    gate1Events.push(...snap.newEvents);
+    gate1Snapshot = snap;
+    gate1LastPushedOpenTime = r.time;
+}
+
+/**
+ * Resets the engine and replays everything from the warm-up start through the current
+ * cursor -- never patches existing drawings in place. This is both "rewind rebuilds from
+ * the warm-up start" (the briefing's own instruction) AND what every plain session open/
+ * resume does too, since the engine has no server-side state of its own to resume from
+ * (it's purely client-side/ephemeral, per structure-gate1.js's own docblock).
+ */
+async function btRebuildGate1FromScratch() {
+    if (!btSession) return;
+    if (!gate1Engine) gate1Engine = createGate1Engine({ atrLen: 14, atrMult: 2.0 });
+    gate1Engine.reset();
+    gate1PushedTimes = [];
+    gate1Swings = [];
+    gate1Events = [];
+    gate1Snapshot = null;
+    gate1LastPushedOpenTime = null;
+    const alignedStart = btGate1AlignedStart(btSession.replay_cursor_ms);
+    const rows = await btFetchGate1Candles(alignedStart, GATE1_WARMUP_BARS + 1);
+    rows.forEach(btGate1PushCandle);
+    if (typeof renderBtGate1Badge === 'function') renderBtGate1Badge();
+    if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
+}
+
+/**
+ * After every btAdvance(): push whatever newly-closed 4H candle(s) the cursor has
+ * crossed into since the last push. Most advance() calls (always finer than 4H -- the
+ * replay clock's own step is capped at the session's replay_timeframe, 1D at the
+ * coarsest) cross no 4H boundary at all and this is a no-op; limit=10 comfortably covers
+ * even a full 1D jump (6 four-hour buckets) in one call.
+ */
+async function btAdvanceGate1IfNeeded() {
+    if (!btSession || !gate1Engine) return;
+    const newAlignedStart = btGate1AlignedStart(btSession.replay_cursor_ms);
+    if (gate1LastPushedOpenTime !== null && newAlignedStart <= gate1LastPushedOpenTime) return;
+    const rows = await btFetchGate1Candles(newAlignedStart, 10);
+    const fresh = rows.filter(r => gate1LastPushedOpenTime === null || r.time > gate1LastPushedOpenTime);
+    fresh.forEach(btGate1PushCandle);
+    if (fresh.length) {
+        if (typeof renderBtGate1Badge === 'function') renderBtGate1Badge();
+        if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
+    }
+}
+
+/** Exact text/structure of the Pine badge (FSA_Structure_Gate1.pine v4.2, lines 211-228)
+ *  -- same head ("GATE 1: BULLISH — longs only" etc.) and sub-line wording, including
+ *  "forming" for a null bosLevel. Hidden entirely until the engine has pushed at least
+ *  one candle, or while the toggle has the overlay off. */
+/** Exact Pine head text/colour class for a given engine state -- shared by the chart
+ *  badge (renderBtGate1Badge()) and the checklist's own dedicated Gate 1 row
+ *  (btOpenChecklist()), so both ever only say one thing. */
+function btGate1BadgeHead(state) {
+    if (state === 1) return { head: 'GATE 1: BULLISH — longs only', cls: 'bull' };
+    if (state === -1) return { head: 'GATE 1: BEARISH — shorts only', cls: 'bear' };
+    return { head: 'GATE 1: UNCLEAR — NO TRADE', cls: 'neut' };
+}
+function renderBtGate1Badge() {
+    const el = document.getElementById('bt-gate1-badge');
+    if (!el) return;
+    if (!btGate1Visible || !gate1Snapshot) { el.style.display = 'none'; return; }
+    const s = gate1Snapshot;
+    const bl = s.bosLevel === null ? 'forming' : fmtPrice5(s.bosLevel);
+    const { head, cls } = btGate1BadgeHead(s.state);
+    let sub;
+    if (s.state === 1) sub = `Protected low ${fmtPrice5(s.lastSwingLow)} | next BOS: close above ${bl}`;
+    else if (s.state === -1) sub = `Protected high ${fmtPrice5(s.lastSwingHigh)} | next BOS: close below ${bl}`;
+    else if (s.state === 2) sub = `Bullish CHoCH. BOS: close above ${bl} | close below ${fmtPrice5(s.lastSwingLow)} = bearish CHoCH`;
+    else if (s.state === -2) sub = `Bearish CHoCH. BOS: close below ${bl} | close above ${fmtPrice5(s.lastSwingHigh)} = bullish CHoCH`;
+    else sub = 'Not enough structure yet';
+    el.className = 'bt-gate1-badge ' + cls;
+    el.innerHTML = `<div class="bt-gate1-badge-head">${escapeHtml(head)}</div><div class="bt-gate1-badge-sub">${escapeHtml(sub)}</div>`;
+    el.style.display = '';
+}
+/** §5 of the briefing: BULLISH -> pass for longs / fail for shorts; BEARISH -> mirror;
+ *  UNCLEAR or none -> fail, regardless of direction. */
+function btGate1AutoChecked(direction) {
+    if (!gate1Snapshot) return false;
+    if (gate1Snapshot.state === 1) return direction === 'Long';
+    if (gate1Snapshot.state === -1) return direction === 'Short';
+    return false;
+}
+
+/** Only ever hides/shows the badge + canvas overlay (btRenderGate1Overlay(),
+ *  backtest-drawings.js) -- the engine keeps running and gate1_auto_state keeps getting
+ *  recorded on every order regardless of this toggle's state. */
+function btToggleGate1() {
+    btGate1Visible = !btGate1Visible;
+    document.getElementById('bt-gate1-toggle-btn').classList.toggle('active', btGate1Visible);
+    renderBtGate1Badge();
     if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
 }
 
@@ -999,6 +1143,7 @@ async function btAdvance() {
     btUpdateNewTradeCapUI();
     if (btSession.status !== 'active') { stopBtAutoplay(); document.getElementById('bt-replay-status').textContent = `Session ${btSession.status}`; }
 
+    await btAdvanceGate1IfNeeded();
     await btLoadCandleWindow(); // already schedules its own redraw
 }
 
@@ -1040,6 +1185,10 @@ async function btRewind() {
     btUpdateNewTradeCapUI();
     document.getElementById('bt-replay-status').textContent = btSession.status === 'active' ? '' : `Session ${btSession.status}`;
 
+    // v3.24.0 — "rewind rebuilds from the warm-up start, never patches drawings" (§4 of
+    // the briefing) -- reset() then re-push is the only implementation that satisfies
+    // that, same procedure a plain session open/resume already uses.
+    await btRebuildGate1FromScratch();
     await btLoadCandleWindow();
 }
 
@@ -1558,16 +1707,28 @@ function btSubmitTicket() {
     if (btSession.strategy_id && gates.length) {
         btOpenChecklist(gates);
     } else {
-        btSubmitTicketConfirmed(null);
+        // v3.24.0 — gate1_auto_state is sent on EVERY order regardless of whether any
+        // checklist UI ever appears (the engine runs continuously on the chart,
+        // independent of strategy_id) -- gate1_agree stays null since there's no
+        // checklist here for the trader to confirm/override against.
+        btSubmitTicketConfirmed(null, gate1Snapshot ? gate1Snapshot.state : null, null);
     }
 }
 /** Renders bt-checklist-items from this session's active gate variables (same template
- *  openChecklist() uses in trades.js for the live journal) and opens the popup. */
+ *  openChecklist() uses in trades.js for the live journal), PLUS one extra, always-first
+ *  row for Gate 1 itself (v3.24.0, §5 of the briefing) -- pre-checked per
+ *  btGate1AutoChecked(), distinct from the strategy's own generic gate variables via
+ *  id="bt-gate1-check-item" so btChecklistProceed() can read its own final state
+ *  separately to compute gate1_agree. Opens the popup either way. */
 function btOpenChecklist(gates) {
     const wrap = document.getElementById('bt-checklist-items');
-    wrap.innerHTML = gates.map(v => `<div class="check-item" onclick="btToggleCheck(this)"><input type="checkbox"><span class="check-text">${v.timeframe ? `[${escapeHtml(v.timeframe)}] ` : ''}${escapeHtml(v.criteria || v.label)}</span></div>`).join('');
+    const state = gate1Snapshot ? gate1Snapshot.state : 0;
+    const gate1Item = { label: 'Gate 1 (Structure) — Indicator: ' + btGate1BadgeHead(state).head, criteria: null, timeframe: null };
+    wrap.innerHTML = checkItemHtml(gate1Item, 'btToggleCheck', ' id="bt-gate1-check-item"')
+        + gates.map(v => checkItemHtml(v, 'btToggleCheck')).join('');
     document.getElementById('bt-checklist-popup').classList.add('open');
-    btUpdateCheckScore();
+    if (btGate1AutoChecked(btTicket.direction)) btToggleCheck(document.getElementById('bt-gate1-check-item'));
+    else btUpdateCheckScore();
 }
 function btToggleCheck(el) {
     el.classList.toggle('checked');
@@ -1581,15 +1742,22 @@ function btUpdateCheckScore() {
     scoreEl.textContent = checked + '/' + total;
     scoreEl.style.color = checked === total ? 'var(--green)' : checked >= 3 ? 'var(--orange)' : 'var(--red)';
 }
-/** Mirrors trades.js::proceedTrade()'s own override prompt verbatim. */
+/** Mirrors trades.js::proceedTrade()'s own override prompt verbatim. gates_passed is
+ *  computed exactly as before (the indicator never overrides it -- the Gate 1 row only
+ *  supplies its own starting checked state, same as every other row defaults to
+ *  unchecked and the trader must actively confirm); gate1_agree is a SEPARATE read of
+ *  just that one row's own final state against what the auto-fill suggested. */
 function btChecklistProceed() {
     const checked = document.querySelectorAll('#bt-checklist-items .check-item.checked').length;
     const total = document.querySelectorAll('#bt-checklist-items .check-item').length;
     if (checked < total) { if (!confirm(`Only ${checked}/${total} rules met. Place order anyway?`)) return; }
+    const gate1El = document.getElementById('bt-gate1-check-item');
+    const gate1FinalChecked = gate1El ? gate1El.classList.contains('checked') : false;
+    const gate1Agree = gate1FinalChecked === btGate1AutoChecked(btTicket.direction) ? 1 : 0;
     document.getElementById('bt-checklist-popup').classList.remove('open');
-    btSubmitTicketConfirmed(checked === total ? 1 : 0);
+    btSubmitTicketConfirmed(checked === total ? 1 : 0, gate1Snapshot ? gate1Snapshot.state : null, gate1Agree);
 }
-async function btSubmitTicketConfirmed(gatesPassed) {
+async function btSubmitTicketConfirmed(gatesPassed, gate1AutoState, gate1Agree) {
     if (!btTicket || !btSession) return;
     const c = btComputeTicket();
     if (c.blockReason) return; // button is disabled for this, but guard directly too
@@ -1616,6 +1784,8 @@ async function btSubmitTicketConfirmed(gatesPassed) {
         leverage: btTicket.leverage,
         risk_pct: c.riskPctEffective,
         gates_passed: gatesPassed,
+        gate1_auto_state: gate1AutoState,
+        gate1_agree: gate1Agree,
     };
     if (btTicket.orderType === 'limit') payload.limit_price = btRoundPrice(btTicket.entry);
     const res = await btApi('backtest_place_order', 'POST', payload);

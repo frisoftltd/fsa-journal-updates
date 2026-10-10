@@ -95,13 +95,20 @@ async function main() {
         await page.click('#bt-ticket-place-btn');
         await page.waitForSelector('#bt-checklist-popup.open', { state: 'visible' });
         assert(placeOrderCalls === 0, 'Place Trade opens the checklist first -- no order submitted yet');
-        assert((await page.textContent('#bt-check-score')) === '0/2', 'checklist starts at 0/2');
+        // v3.24.0 note (explicit, briefed exception to "never edit an old driver" --
+        // CLAUDE.md §12): the checklist now always prepends one extra Gate 1 engine row
+        // on top of this session's own 2 strategy gate variables, 3 total -- an
+        // intentional behavior change from that release's own approved spec, not a
+        // regression. Only the item counts/indices below changed; every other
+        // assertion in this file is untouched.
+        assert((await page.textContent('#bt-check-score')) === '0/3', 'checklist starts at 0/3 (Gate 1 row + 2 strategy gates)');
         await shot(page, 'verify1-checklist-opened');
 
         const items = page.locator('#bt-checklist-items .check-item');
         await items.nth(0).click();
         await items.nth(1).click();
-        assert((await page.textContent('#bt-check-score')) === '2/2', 'both gates checked -> 2/2');
+        await items.nth(2).click();
+        assert((await page.textContent('#bt-check-score')) === '3/3', 'all checked -> 3/3');
 
         const [placeRes1] = await Promise.all([
             page.waitForResponse(res => res.url().includes('action=backtest_place_order')),
@@ -125,8 +132,8 @@ async function main() {
         await page.dispatchEvent('#bt-ticket-sl', 'change');
         await page.click('#bt-ticket-place-btn');
         await page.waitForSelector('#bt-checklist-popup.open', { state: 'visible' });
-        await page.locator('#bt-checklist-items .check-item').nth(0).click(); // only 1 of 2
-        assert((await page.textContent('#bt-check-score')) === '1/2', 'one gate checked -> 1/2');
+        await page.locator('#bt-checklist-items .check-item').nth(0).click(); // only 1 of 3 (v3.24.0: now includes the Gate 1 row)
+        assert((await page.textContent('#bt-check-score')) === '1/3', 'one checked -> 1/3');
 
         const [placeRes2] = await Promise.all([
             page.waitForResponse(res => res.url().includes('action=backtest_place_order')),
@@ -184,8 +191,12 @@ async function main() {
         await page.dispatchEvent('#bt-ticket-sl', 'change');
         await page.click('#bt-ticket-place-btn');
         await page.waitForSelector('#bt-checklist-popup.open', { state: 'visible' });
+        // v3.24.0 (explicit, briefed exception to "never edit an old driver" -- see the
+        // Verify 1 comment above): 3 items now, not 2 -- check all of them for
+        // gates_passed=1 to still hold.
         await page.locator('#bt-checklist-items .check-item').nth(0).click();
         await page.locator('#bt-checklist-items .check-item').nth(1).click();
+        await page.locator('#bt-checklist-items .check-item').nth(2).click();
         const [placeRes4] = await Promise.all([
             page.waitForResponse(res => res.url().includes('action=backtest_place_order')),
             page.click('text=Proceed to Order'),

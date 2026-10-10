@@ -941,7 +941,7 @@ async function openChecklist(){
             No pre-trade checklist is configured${st?` for ${st.name}`:''} yet. Set one up in Strategy Lab, or continue straight to logging the trade.
         </div>`;
     } else {
-        wrap.innerHTML = gates.map(v=>`<div class="check-item" onclick="toggleCheck(this)"><input type="checkbox"><span class="check-text">${v.timeframe?`[${v.timeframe}] `:''}${(v.criteria||v.label).replace(/</g,'&lt;')}</span></div>`).join('');
+        wrap.innerHTML = gates.map(v=>checkItemHtml(v, 'toggleCheck')).join('');
     }
     updateCheckScore();
 }
@@ -951,8 +951,8 @@ function toggleCheck(el){
     updateCheckScore();
 }
 function updateCheckScore(){
-    const total=document.querySelectorAll('.check-item').length;
-    const checked=document.querySelectorAll('.check-item.checked').length;
+    const total=document.querySelectorAll('#checklist-items .check-item').length;
+    const checked=document.querySelectorAll('#checklist-items .check-item.checked').length;
     const scoreEl=document.getElementById('check-score');
     scoreEl.textContent=checked+'/'+total;
     scoreEl.style.color=checked===total?'var(--green)':checked>=3?'var(--orange)':'var(--red)';

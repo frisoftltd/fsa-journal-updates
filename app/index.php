@@ -180,7 +180,7 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
 
 <!-- ══ JS MODULES ══ -->
 <?php foreach ([
-    'app', 'dashboard', 'trades', 'report-card', 'stats', 'chart', 'backtest',
+    'app', 'dashboard', 'trades', 'report-card', 'stats', 'chart', 'structure-gate1', 'backtest',
     'backtest-drawings', 'backtest-results', 'saved-backtests', 'calculator', 'strategy', 'strategies',
     'leaderboard', 'review', 'profile', 'challenges', 'import', 'bfimport',
 ] as $__jsModule): ?>

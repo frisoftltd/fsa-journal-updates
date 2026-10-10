@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-10 (v3.24.1 — Gate 1 engine tie-break fix, caught by real fixtures)
+**Last Updated:** 2026-10-10 (v3.24.2 — manifest-only catch-up release, see "Deploy & Release Workflow" below)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.24.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.24.2 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -597,7 +597,12 @@ fsa-journal-updates/          ← Repo root
   changed only in a since-superseded release and was never repeated in a later manifest
   is silently never deployed if that release's Update Now click gets skipped — when in
   doubt about what state a live server is actually in, union every manifest since the
-  last confirmed-good version rather than guessing.
+  last confirmed-good version rather than guessing. **This happened for real once**: a
+  site updated straight from v3.23.0 to v3.24.1, got only v3.24.1's own one-file
+  manifest, and silently skipped all of v3.24.0 — fixed by v3.24.2's cumulative
+  manifest. `git diff --name-only <old-tag> <new-tag> -- app/` (excluding `app/tests/`
+  and `app/docs/`) is the reliable way to build that union — don't reconstruct it from
+  memory or from release notes prose.
 - `critical: true` means "never auto-overwrite this file" (for something like
   `config.php`) — **not** "this file matters, make sure it deploys." Every real code
   change should be `critical: false`.
@@ -636,7 +641,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.24.1
+Current Version: v3.24.2
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

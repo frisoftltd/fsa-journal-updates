@@ -1,0 +1,232 @@
+//@version=6
+// FSA Structure (Gate 1) v4.2 — Fri Soft Ltd. Private use.
+// Original implementation of the FSA gate 1 rules (4H market structure). Not derived from third-party code.
+// Swings (classic Dow / zigzag):
+//  - A swing high/low is confirmed only after price reverses from it by at least N x ATR(14). Highs and lows alternate.
+//  - Swings are wick to wick. Each swing is labelled against the previous swing of the same type (HH/LH, HL/LL).
+// Gate 1 (candle CLOSE rules on top of the swings):
+//  - CHoCH = close beyond the last swing low (in an uptrend) / last swing high (in a downtrend) -> UNCLEAR.
+//  - After a CHoCH, BOS = close beyond the first swing extreme of the new impulse -> trend confirmed.
+//  - While UNCLEAR, a close back beyond the last opposite swing = opposite CHoCH (still UNCLEAR).
+//  - In a confirmed trend, a close beyond the last swing in the trend direction = continuation BOS.
+indicator("FSA Structure (Gate 1)", "FSA Gate1", overlay = true, max_labels_count = 500, max_lines_count = 500, max_bars_back = 1000)
+
+float atrMult    = input.float(2.0, "Swing size (x ATR 14)", minval = 0.5, step = 0.5)
+bool  showSwings = input.bool(true, "Show HH / HL / LH / LL")
+bool  showBreaks = input.bool(true, "Show BOS / CHoCH")
+bool  showLevels = input.bool(true, "Show protected level and BOS level")
+bool  showBadge  = input.bool(true, "Show Gate 1 badge")
+color bullCol    = input.color(#089981, "Bullish colour")
+color bearCol    = input.color(#F23645, "Bearish colour")
+color neutCol    = input.color(#787B86, "Unclear colour")
+
+float thr = atrMult * ta.atr(14)
+
+//---------------------------------------------------------------- Helpers (pure)
+hiSince(int fromBar) =>
+    float v = high
+    int   b = bar_index
+    int   n = math.min(bar_index - fromBar, 999)
+    if n > 0
+        for i = 1 to n
+            if high[i] > v
+                v := high[i]
+                b := bar_index - i
+    [v, b]
+
+loSince(int fromBar) =>
+    float v = low
+    int   b = bar_index
+    int   n = math.min(bar_index - fromBar, 999)
+    if n > 0
+        for i = 1 to n
+            if low[i] < v
+                v := low[i]
+                b := bar_index - i
+    [v, b]
+
+drawBreak(int fromBar, float lvl, string txt, bool isBull) =>
+    if showBreaks and not na(fromBar) and not na(lvl)
+        color c = isBull ? bullCol : bearCol
+        line.new(fromBar, lvl, bar_index, lvl, color = c, style = txt == "BOS" ? line.style_solid : line.style_dashed)
+        label.new(math.round((fromBar + bar_index) / 2), lvl, txt, color = color(na), textcolor = c, style = isBull ? label.style_label_down : label.style_label_up, size = size.small)
+
+//---------------------------------------------------------------- 1) Zigzag swings (ATR reversal, alternating)
+var int   z        = 0      // +1 tracking a high, -1 tracking a low, 0 start
+var float ext      = na
+var int   extBar   = na
+var float iHi      = na
+var int   iHiBar   = na
+var float iLo      = na
+var int   iLoBar   = na
+
+var float lastH    = na
+var float prevH    = na
+var int   lastHBar = na
+var bool  hBroken  = true
+var float lastL    = na
+var float prevL    = na
+var int   lastLBar = na
+var bool  lBroken  = true
+
+bool newHigh = false
+bool newLow  = false
+
+if z == 0
+    if na(iHi) or high > iHi
+        iHi    := high
+        iHiBar := bar_index
+    if na(iLo) or low < iLo
+        iLo    := low
+        iLoBar := bar_index
+    if not na(thr) and iHi - iLo >= thr
+        if iHiBar < iLoBar
+            prevH    := lastH
+            lastH    := iHi
+            lastHBar := iHiBar
+            newHigh  := true
+            z        := -1
+            ext      := iLo
+            extBar   := iLoBar
+        else if iLoBar < iHiBar
+            prevL    := lastL
+            lastL    := iLo
+            lastLBar := iLoBar
+            newLow   := true
+            z        := 1
+            ext      := iHi
+            extBar   := iHiBar
+else if z == 1
+    if high > ext
+        ext    := high
+        extBar := bar_index
+    else if ext - low >= thr or (not na(lastL) and low < lastL)   // price below the last swing low = the high in between must be a swing
+        prevH    := lastH
+        lastH    := ext
+        lastHBar := extBar
+        newHigh  := true
+        z        := -1
+        [v, b] = loSince(extBar + 1)   // next swing starts on the candle AFTER the swing
+        ext    := v
+        extBar := b
+else
+    if low < ext
+        ext    := low
+        extBar := bar_index
+    else if high - ext >= thr or (not na(lastH) and high > lastH)   // price above the last swing high = the low in between must be a swing
+        prevL    := lastL
+        lastL    := ext
+        lastLBar := extBar
+        newLow   := true
+        z        := 1
+        [v, b] = hiSince(extBar + 1)   // next swing starts on the candle AFTER the swing
+        ext    := v
+        extBar := b
+
+if newHigh
+    hBroken := false
+    if showSwings
+        bool   up = na(prevH) ? true : lastH > prevH
+        string t  = na(prevH) ? "H" : up ? "HH" : "LH"
+        label.new(lastHBar, lastH, t, color = color(na), textcolor = up ? bullCol : bearCol, style = label.style_label_down, size = size.small)
+if newLow
+    lBroken := false
+    if showSwings
+        bool   up = na(prevL) ? true : lastL > prevL
+        string t  = na(prevL) ? "L" : up ? "HL" : "LL"
+        label.new(lastLBar, lastL, t, color = color(na), textcolor = up ? bullCol : bearCol, style = label.style_label_up, size = size.small)
+
+//---------------------------------------------------------------- 2) Gate 1 state (candle close rules)
+var int   st        = 0     // 1 bull, -1 bear, 2 unclear after bullish CHoCH, -2 unclear after bearish CHoCH, 0 none
+var float pendRef   = na    // BOS level after a CHoCH = first swing extreme of the new impulse
+var int   pendRefB  = na
+
+// first swing of the new impulse becomes the BOS level
+if st == 2 and newHigh and na(pendRef)
+    pendRef  := lastH
+    pendRefB := lastHBar
+if st == -2 and newLow and na(pendRef)
+    pendRef  := lastL
+    pendRefB := lastLBar
+
+// breaks only on CLOSED candles (the live candle can never flip the badge)
+bool cf   = barstate.isconfirmed
+bool brUp = cf and not na(lastH) and not hBroken and close > lastH
+bool brDn = cf and not na(lastL) and not lBroken and close < lastL
+
+if st == 1
+    if brDn
+        drawBreak(lastLBar, lastL, "CHoCH", false)
+        st      := -2
+        pendRef := na
+    else if brUp
+        drawBreak(lastHBar, lastH, "BOS", true)
+else if st == -1
+    if brUp
+        drawBreak(lastHBar, lastH, "CHoCH", true)
+        st      := 2
+        pendRef := na
+    else if brDn
+        drawBreak(lastLBar, lastL, "BOS", false)
+else if st == 2
+    if cf and not na(pendRef) and close > pendRef
+        drawBreak(pendRefB, pendRef, "BOS", true)
+        st      := 1
+        pendRef := na
+    else if brDn
+        drawBreak(lastLBar, lastL, "CHoCH", false)
+        st      := -2
+        pendRef := na
+else if st == -2
+    if cf and not na(pendRef) and close < pendRef
+        drawBreak(pendRefB, pendRef, "BOS", false)
+        st      := -1
+        pendRef := na
+    else if brUp
+        drawBreak(lastHBar, lastH, "CHoCH", true)
+        st      := 2
+        pendRef := na
+else
+    if brUp
+        drawBreak(lastHBar, lastH, "CHoCH", true)
+        st := 2
+    else if brDn
+        drawBreak(lastLBar, lastL, "CHoCH", false)
+        st := -2
+
+if brUp
+    hBroken := true
+if brDn
+    lBroken := true
+
+//---------------------------------------------------------------- 3) Output
+float protLvl = st > 0 ? lastL : st < 0 ? lastH : na
+float bosLvl  = math.abs(st) == 2 ? pendRef : st == 1 ? (hBroken ? na : lastH) : st == -1 ? (lBroken ? na : lastL) : na
+plot(showLevels ? protLvl : na, "Protected level (close beyond = CHoCH)", color = st > 0 ? color.new(bullCol, 30) : color.new(bearCol, 30), style = plot.style_linebr, linewidth = 1)
+plot(showLevels ? bosLvl : na, "BOS level (close beyond = BOS)", color = neutCol, style = plot.style_linebr, linewidth = 2)
+plot(st, "Gate1 state (1 bull, -1 bear, 0/2/-2 unclear)", display = display.data_window)
+
+var table badge = table.new(position.top_right, 1, 2, border_width = 1)
+if showBadge and barstate.islast
+    string head = st == 1 ? "GATE 1: BULLISH — longs only" : st == -1 ? "GATE 1: BEARISH — shorts only" : "GATE 1: UNCLEAR — NO TRADE"
+    color  bg   = st == 1 ? bullCol : st == -1 ? bearCol : neutCol
+    string bl   = na(bosLvl) ? "forming" : str.tostring(bosLvl, format.mintick)
+    string sub  = ""
+    if st == 1
+        sub := "Protected low " + str.tostring(lastL, format.mintick) + " | next BOS: close above " + bl
+    else if st == -1
+        sub := "Protected high " + str.tostring(lastH, format.mintick) + " | next BOS: close below " + bl
+    else if st == 2
+        sub := "Bullish CHoCH. BOS: close above " + bl + " | close below " + str.tostring(lastL, format.mintick) + " = bearish CHoCH"
+    else if st == -2
+        sub := "Bearish CHoCH. BOS: close below " + bl + " | close above " + str.tostring(lastH, format.mintick) + " = bullish CHoCH"
+    else
+        sub := "Not enough structure yet"
+    if timeframe.period != "240"
+        sub := sub + "\n⚠ Gate 1 is defined on 4H — chart is " + timeframe.period
+    table.cell(badge, 0, 0, head, bgcolor = bg, text_color = color.white, text_size = size.normal)
+    table.cell(badge, 0, 1, sub, bgcolor = color.new(bg, 80), text_color = chart.fg_color, text_size = size.small)
+
+alertcondition(st == 1 and st[1] != 1, "Gate 1 turned BULLISH", "FSA Gate 1: confirmed bullish structure")
+alertcondition(st == -1 and st[1] != -1, "Gate 1 turned BEARISH", "FSA Gate 1: confirmed bearish structure")
+alertcondition(math.abs(st) == 2 and st != st[1], "Gate 1 turned UNCLEAR", "FSA Gate 1: CHoCH printed, structure unclear")

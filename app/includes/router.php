@@ -115,6 +115,9 @@ $routes = [
     'get_drawing_defaults'    => ['BacktestDrawingController', 'getDefaults'],
     'save_drawing_default'    => ['BacktestDrawingController', 'saveDefault'],
     'reset_drawing_default'   => ['BacktestDrawingController', 'resetDefault'],
+    // Per-user FSA Gate 1 indicator settings (v3.25.0) — Inputs/Style/Visibility dialog
+    'get_gate1_settings'      => ['Gate1SettingsController', 'get'],
+    'save_gate1_settings'     => ['Gate1SettingsController', 'save'],
 ];
 
 if (!isset($routes[$action])) {

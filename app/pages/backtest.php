@@ -224,6 +224,13 @@
         <button class="bt-util-btn active" id="bt-gate1-toggle-btn" onclick="btToggleGate1()" title="FSA Gate 1 overlay">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16l5-9 4 6 3-4 4 5"/></svg>
         </button>
+        <!-- v3.25.0 — FSA Gate 1 settings dialog (Inputs/Style/Visibility), same gear
+             glyph convention every settings entry point elsewhere in this app uses.
+             Double-clicking the badge itself (#bt-gate1-badge) opens the same dialog --
+             wired in js/backtest.js::renderBtGate1Badge(). -->
+        <button class="bt-util-btn" id="bt-gate1-settings-btn" onclick="btOpenGate1Settings()" title="FSA Gate 1 settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
         <div class="bt-draw-toolbar-sep"></div>
         <button class="bt-util-btn active" id="bt-magnet-btn" onclick="btToggleMagnet()" title="Magnet — snap to candle open/high/low/close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4v7a7 7 0 0 0 14 0V4"/><line x1="5" y1="4" x2="9" y2="4"/><line x1="15" y1="4" x2="19" y2="4"/><line x1="5" y1="8" x2="9" y2="8"/><line x1="15" y1="8" x2="19" y2="8"/></svg>

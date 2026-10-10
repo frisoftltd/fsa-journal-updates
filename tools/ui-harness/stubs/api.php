@@ -330,6 +330,25 @@ function saveMockDrawingDefaults(array $defaults): void {
     saveMockStateStore($store);
 }
 
+// v3.25.0 — Gate1SettingsController::DEFAULTS equivalent and its get/save mock, same
+// single-top-level-key pattern as _drawing_defaults just above (one user only).
+const MOCK_GATE1_SETTINGS_DEFAULTS = [
+    'atrMult' => 2.0,
+    'showSwings' => true, 'showBreaks' => true, 'showLevels' => true, 'showBadge' => true,
+    'bullColor' => '#089981', 'bearColor' => '#F23645', 'unclearColor' => '#787B86',
+    'labelSize' => 'normal',
+    'visibility' => ['15m' => true, '1H' => true, '4H' => true, '1D' => true],
+];
+function loadMockGate1Settings(): array {
+    $store = loadMockStateStore();
+    return $store['_gate1_settings'] ?? MOCK_GATE1_SETTINGS_DEFAULTS;
+}
+function saveMockGate1Settings(array $settings): void {
+    $store = loadMockStateStore();
+    $store['_gate1_settings'] = $settings;
+    saveMockStateStore($store);
+}
+
 /** Mirrors BacktestController::computeSessionState()'s own shape closely enough for this
  *  mock's purposes: marks open positions to the CURRENT cursor bar's close (never null/
  *  entry -- this mock has no v3.22.1-era bug to reproduce), sums closed trades'
@@ -487,6 +506,7 @@ function mockAdvance(int $id, array $st): array {
             'gates_passed' => $o['gates_passed'] ?? null,
             'gate1_auto_state' => $o['gate1_auto_state'] ?? null,
             'gate1_agree' => $o['gate1_agree'] ?? null,
+            'gate1_atr_mult' => $o['gate1_atr_mult'] ?? null,
         ];
         $st['trades_today']++;
         $events[] = ['type' => 'limit_filled', 'trade_id' => $tradeId, 'order_id' => $o['id'], 'price' => $o['limit_price'], 'lot_size' => $lotSize, 'direction' => $o['direction']];
@@ -718,6 +738,13 @@ switch ($action) {
         saveMockDrawingDefaults($defaults);
         out(['success' => true]);
 
+    case 'get_gate1_settings':
+        out(loadMockGate1Settings());
+
+    case 'save_gate1_settings':
+        saveMockGate1Settings($body);
+        out(['success' => true, 'settings' => $body]);
+
     case 'backtest_place_order':
         if ($statefulCfg) {
             $st = getMockSessionState($sessionIdParam);
@@ -737,6 +764,9 @@ switch ($action) {
             // checklist appeared; gate1Agree only when it did.
             $gate1AutoState = (array_key_exists('gate1_auto_state', $body) && $body['gate1_auto_state'] !== null) ? (int) $body['gate1_auto_state'] : null;
             $gate1Agree = (array_key_exists('gate1_agree', $body) && $body['gate1_agree'] !== null) ? (int) !!$body['gate1_agree'] : null;
+            // v3.25.0 — the swing size the client's engine was running at order time
+            // (same nullable-passthrough treatment as the two fields just above).
+            $gate1AtrMult = (array_key_exists('gate1_atr_mult', $body) && $body['gate1_atr_mult'] !== null && is_numeric($body['gate1_atr_mult'])) ? (float) $body['gate1_atr_mult'] : null;
             if (($body['type'] ?? 'market') === 'market') {
                 $entryPrice = mockPriceAtIndex($st['cursor_index']);
                 // v3.22.10 — every OTHER stateful session keeps the flat, display-only
@@ -763,7 +793,7 @@ switch ($action) {
                     'leverage' => (int) ($body['leverage'] ?? 5), 'time_in' => $cursorMs,
                     'planned_risk_pct' => $plannedRiskPct, 'actual_risk_pct' => $actualRiskPct,
                     'balance_at_day_start' => $dayInfo['start_of_day_equity'], 'risk_deviation_pct' => $riskDeviationPct,
-                    'gates_passed' => $gatesPassed, 'gate1_auto_state' => $gate1AutoState, 'gate1_agree' => $gate1Agree,
+                    'gates_passed' => $gatesPassed, 'gate1_auto_state' => $gate1AutoState, 'gate1_agree' => $gate1Agree, 'gate1_atr_mult' => $gate1AtrMult,
                 ];
                 $st['trades_today']++;
                 putMockSessionState($sessionIdParam, $st);
@@ -785,7 +815,7 @@ switch ($action) {
                     'placed_at_bar_time' => $cursorMs,
                     'planned_risk_pct' => $dayInfo['ladder_risk_pct'] ?? $dayInfo['flat_risk_pct'],
                     'balance_at_day_start' => $dayInfo['start_of_day_equity'],
-                    'gates_passed' => $gatesPassed, 'gate1_auto_state' => $gate1AutoState, 'gate1_agree' => $gate1Agree,
+                    'gates_passed' => $gatesPassed, 'gate1_auto_state' => $gate1AutoState, 'gate1_agree' => $gate1Agree, 'gate1_atr_mult' => $gate1AtrMult,
                 ];
                 putMockSessionState($sessionIdParam, $st);
                 out(['success' => true, 'filled' => false, 'pending_order_id' => $orderId]);

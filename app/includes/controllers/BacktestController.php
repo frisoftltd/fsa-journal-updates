@@ -92,7 +92,7 @@ class BacktestController {
      *  query for it. */
     private function quickResultsSummary(int $sessionId): array {
         $s = $this->db->prepare(
-            "SELECT direction, result, r_multiple, net_pnl, fees, pnl, gate1_agree FROM trades
+            "SELECT direction, result, r_multiple, net_pnl, fees, pnl, gate1_agree, gate1_atr_mult FROM trades
              WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
                AND result IN ('Win','Loss','Break Even')"
         );
@@ -103,6 +103,7 @@ class BacktestController {
                 'r_multiple' => $t['r_multiple'] !== null ? (float) $t['r_multiple'] : null,
                 'net_pnl' => (float) $t['net_pnl'], 'fees' => (float) $t['fees'], 'pnl' => (float) $t['pnl'],
                 'gate1_agree' => $t['gate1_agree'] !== null ? (int) $t['gate1_agree'] : null,
+                'gate1_atr_mult' => $t['gate1_atr_mult'] !== null ? (float) $t['gate1_atr_mult'] : null,
             ];
         }, $s->fetchAll());
         $block = backtestMetricsBlock($rows, 0.0);
@@ -112,15 +113,30 @@ class BacktestController {
         // trade in this session actually has a recorded gate1_agree (a strategy-less
         // session, or one entirely pre-v3.24.0, omits the field entirely rather than
         // rendering an empty/zeroed line).
-        $agreed = array_values(array_filter($rows, fn($t) => $t['gate1_agree'] === 1));
-        $disagreed = array_values(array_filter($rows, fn($t) => $t['gate1_agree'] === 0));
-        if ($agreed || $disagreed) {
-            $agreedBlock = backtestMetricsBlock($agreed, 0.0);
-            $disagreedBlock = backtestMetricsBlock($disagreed, 0.0);
-            $out['gate1_summary'] = [
-                'agreed' => ['n' => $agreedBlock['n'], 'win_rate' => $agreedBlock['win_rate']],
-                'disagreed' => ['n' => $disagreedBlock['n'], 'win_rate' => $disagreedBlock['win_rate']],
-            ];
+        // v3.25.0 — grouped by gate1_atr_mult so a session with orders placed at more
+        // than one swing size (2.0, then later changed to 3.0) never reports one
+        // combined agreed/disagreed number blending the two. Keyed by the multiplier as
+        // a fixed-1-decimal string; a trade recorded before this column existed
+        // (gate1_atr_mult NULL) groups under 'unset' rather than being assumed to be
+        // 2.0 — see the migration's own doc comment for why this isn't backfilled.
+        $withGate1 = array_values(array_filter($rows, fn($t) => $t['gate1_agree'] !== null));
+        if ($withGate1) {
+            $byMult = [];
+            foreach ($withGate1 as $t) {
+                $key = $t['gate1_atr_mult'] !== null ? number_format($t['gate1_atr_mult'], 1) : 'unset';
+                $byMult[$key][] = $t;
+            }
+            $summary = [];
+            foreach ($byMult as $key => $groupRows) {
+                $agreedBlock = backtestMetricsBlock(array_values(array_filter($groupRows, fn($t) => $t['gate1_agree'] === 1)), 0.0);
+                $disagreedBlock = backtestMetricsBlock(array_values(array_filter($groupRows, fn($t) => $t['gate1_agree'] === 0)), 0.0);
+                $summary[$key] = [
+                    'atr_mult' => $key === 'unset' ? null : (float) $key,
+                    'agreed' => ['n' => $agreedBlock['n'], 'win_rate' => $agreedBlock['win_rate']],
+                    'disagreed' => ['n' => $disagreedBlock['n'], 'win_rate' => $disagreedBlock['win_rate']],
+                ];
+            }
+            $out['gate1_summary'] = $summary;
         }
         return $out;
     }
@@ -164,7 +180,7 @@ class BacktestController {
         $s = $this->db->prepare(
             "SELECT id, direction, entry_price, stop_loss, take_profit, exit_price, time_in, time_out,
                     exit_reason, result, r_multiple, net_pnl, fees, pnl, gates_passed,
-                    gate1_auto_state, gate1_agree
+                    gate1_auto_state, gate1_agree, gate1_atr_mult
              FROM trades
              WHERE backtest_session_id=? AND source='backtest' AND backtest_rewound=0
                AND result IN ('Win','Loss','Break Even')
@@ -190,6 +206,7 @@ class BacktestController {
                 'gates_passed' => $t['gates_passed'] !== null ? (int) $t['gates_passed'] : null,
                 'gate1_auto_state' => $t['gate1_auto_state'] !== null ? (int) $t['gate1_auto_state'] : null,
                 'gate1_agree' => $t['gate1_agree'] !== null ? (int) $t['gate1_agree'] : null,
+                'gate1_atr_mult' => $t['gate1_atr_mult'] !== null ? (float) $t['gate1_atr_mult'] : null,
             ];
         }, $s->fetchAll());
 
@@ -209,12 +226,26 @@ class BacktestController {
         // backtestResultsMetrics() itself already uses for Long/Short. Added to the
         // response only when at least one trade actually has a non-null gate1_agree --
         // a strategy-less session, or one entirely pre-v3.24.0, renders nothing extra.
+        // v3.25.0 — grouped by gate1_atr_mult (metrics.gate1_by_atr_mult, replacing the
+        // old flat gate1_agreed/gate1_disagreed pair) so a session with orders at more
+        // than one swing size never reports one combined number blending them — see
+        // quickResultsSummary()'s identical reasoning just above in this file.
         $metrics = backtestResultsMetrics($trades, (float) $session['starting_balance']);
-        $gate1Agreed = array_values(array_filter($trades, fn($t) => $t['gate1_agree'] === 1));
-        $gate1Disagreed = array_values(array_filter($trades, fn($t) => $t['gate1_agree'] === 0));
-        if ($gate1Agreed || $gate1Disagreed) {
-            $metrics['gate1_agreed'] = backtestMetricsBlock($gate1Agreed, (float) $session['starting_balance']);
-            $metrics['gate1_disagreed'] = backtestMetricsBlock($gate1Disagreed, (float) $session['starting_balance']);
+        $withGate1 = array_values(array_filter($trades, fn($t) => $t['gate1_agree'] !== null));
+        if ($withGate1) {
+            $byMult = [];
+            foreach ($withGate1 as $t) {
+                $key = $t['gate1_atr_mult'] !== null ? number_format($t['gate1_atr_mult'], 1) : 'unset';
+                $byMult[$key][] = $t;
+            }
+            $metrics['gate1_by_atr_mult'] = [];
+            foreach ($byMult as $key => $groupRows) {
+                $metrics['gate1_by_atr_mult'][$key] = [
+                    'atr_mult' => $key === 'unset' ? null : (float) $key,
+                    'agreed' => backtestMetricsBlock(array_values(array_filter($groupRows, fn($t) => $t['gate1_agree'] === 1)), (float) $session['starting_balance']),
+                    'disagreed' => backtestMetricsBlock(array_values(array_filter($groupRows, fn($t) => $t['gate1_agree'] === 0)), (float) $session['starting_balance']),
+                ];
+            }
         }
 
         jsonResponse([
@@ -851,6 +882,18 @@ class BacktestController {
             $gate1Agree = !empty($d['gate1_agree']) ? 1 : 0;
         }
 
+        // v3.25.0 — the swing-size (ATR multiplier) the client's engine was actually
+        // running with at order time (js/backtest.js's gate1Settings.atrMult, user- and
+        // session-settable via the Inputs tab). Never validated against the dialog's own
+        // 0.5-10 range here — same non-blocking "coerce, don't reject" treatment every
+        // other gate1_* field already gets; an out-of-range or malformed value just
+        // means an older/tampered client, not something worth failing the whole order
+        // over. NULL (an older client that predates this field) passes straight through.
+        $gate1AtrMult = null;
+        if (array_key_exists('gate1_atr_mult', $d) && $d['gate1_atr_mult'] !== null && is_numeric($d['gate1_atr_mult'])) {
+            $gate1AtrMult = round((float) $d['gate1_atr_mult'], 1);
+        }
+
         $state = $this->computeSessionState($session);
         $limits = $this->checkTradeLimits($session, $state, $session['replay_cursor_ms']);
         if ($limits['blocked']) jsonError($limits['reason']);
@@ -868,7 +911,7 @@ class BacktestController {
             // re-derivation needed (that's only for a limit order sitting pending across
             // bars/days, see evaluateBar()'s own call site below).
             $plannedRiskPct = $state['ladder_risk_pct'] ?? (float) $session['risk_pct'];
-            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time'], $plannedRiskPct, $state['start_of_day_equity'], $gatesPassed, $gate1AutoState, $gate1Agree);
+            [$tradeId, $lotSize] = $this->fillPosition($session, $direction, $entryPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $state['equity'], $currentBar['open_time'], $plannedRiskPct, $state['start_of_day_equity'], $gatesPassed, $gate1AutoState, $gate1Agree, $gate1AtrMult);
             jsonResponse(['success' => true, 'filled' => true, 'entry_price' => $entryPrice, 'lot_size' => $lotSize, 'direction' => $direction, 'trade_id' => $tradeId]);
         } else {
             $limitPrice = backtestRoundPrice(num($d['limit_price'] ?? 0));
@@ -899,9 +942,9 @@ class BacktestController {
             if ($direction === 'Short' && $stopLoss <= $limitPrice) jsonError('For a Short, stop loss must be above the limit price.');
             $this->checkMarginAndLiquidation($session, $direction, $limitPrice, $stopLoss, $riskPct, $leverage, $state['equity']);
             $this->db->prepare(
-                "INSERT INTO backtest_pending_orders (session_id, direction, limit_price, stop_loss, take_profit, risk_pct, leverage, placed_at_bar_time, gates_passed, gate1_auto_state, gate1_agree)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)"
-            )->execute([$session['id'], $direction, $limitPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $currentBar['open_time'], $gatesPassed, $gate1AutoState, $gate1Agree]);
+                "INSERT INTO backtest_pending_orders (session_id, direction, limit_price, stop_loss, take_profit, risk_pct, leverage, placed_at_bar_time, gates_passed, gate1_auto_state, gate1_agree, gate1_atr_mult)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+            )->execute([$session['id'], $direction, $limitPrice, $stopLoss, $takeProfit, $riskPct, $leverage, $currentBar['open_time'], $gatesPassed, $gate1AutoState, $gate1Agree, $gate1AtrMult]);
             jsonResponse(['success' => true, 'filled' => false, 'pending_order_id' => (int) $this->db->lastInsertId()]);
         }
     }
@@ -1083,7 +1126,8 @@ class BacktestController {
                 $plannedRiskPct, $dayInfo['start_of_day_equity'],
                 $order['gates_passed'] !== null ? (int) $order['gates_passed'] : null,
                 $order['gate1_auto_state'] !== null ? (int) $order['gate1_auto_state'] : null,
-                $order['gate1_agree'] !== null ? (int) $order['gate1_agree'] : null
+                $order['gate1_agree'] !== null ? (int) $order['gate1_agree'] : null,
+                $order['gate1_atr_mult'] !== null ? (float) $order['gate1_atr_mult'] : null
             );
             $this->db->prepare("UPDATE backtest_pending_orders SET status='filled', trade_id=? WHERE id=?")->execute([$tradeId, $order['id']]);
             $filledThisBar[$tradeId] = $fillPrice;
@@ -1155,7 +1199,7 @@ class BacktestController {
     /** @return array{0:int,1:float} [tradeId, lotSize] -- lotSize is returned (not just
      *  the id) so callers can report a real fill confirmation ("Long 0.87 BTC filled @
      *  7140", v3.22.3 Fix F) without a second query or re-deriving the sizing math. */
-    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime, float $plannedRiskPct, float $balanceAtDayStart, ?int $gatesPassed = null, ?int $gate1AutoState = null, ?int $gate1Agree = null): array {
+    private function fillPosition(array $session, string $direction, float $entryPrice, float $stopLoss, ?float $takeProfit, float $riskPct, int $leverage, float $equity, int $barTime, float $plannedRiskPct, float $balanceAtDayStart, ?int $gatesPassed = null, ?int $gate1AutoState = null, ?int $gate1Agree = null, ?float $gate1AtrMult = null): array {
         $riskAmount = $equity * $riskPct / 100;
         $lotSize = backtestPositionSize($equity, $riskPct, $entryPrice, $stopLoss);
         $entryFee = round(backtestFee($lotSize, $entryPrice, (float) $session['fee_rate_pct']), 4);
@@ -1169,13 +1213,13 @@ class BacktestController {
                 (user_id, challenge_id, trade_date, time_in, pair, direction, entry_price, stop_loss, take_profit,
                  lot_size, fees, result, source, backtest_session_id, risk_amount, leverage, planned_margin,
                  planned_risk_pct, actual_risk_pct, balance_at_day_start, risk_deviation_pct, gates_passed,
-                 gate1_auto_state, gate1_agree)
-             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?,?,?,?,?,?,?,?)"
+                 gate1_auto_state, gate1_agree, gate1_atr_mult)
+             VALUES (?,NULL,?,?,?,?,?,?,?,?,?,'Open','backtest',?,?,?,?,?,?,?,?,?,?,?,?)"
         )->execute([
             $this->uid, $tradeDate, $timeIn, $session['symbol'], $direction, $entryPrice, $stopLoss, $takeProfit,
             $lotSize, $entryFee, $session['id'], $riskAmount, $leverage, $marginUsed,
             $plannedRiskPct, $riskPct, $balanceAtDayStart, $riskDeviationPct, $gatesPassed,
-            $gate1AutoState, $gate1Agree,
+            $gate1AutoState, $gate1Agree, $gate1AtrMult,
         ]);
         return [(int) $this->db->lastInsertId(), $lotSize];
     }

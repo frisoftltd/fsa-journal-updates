@@ -68,11 +68,17 @@ function sbSummaryLine(rs) {
 }
 /** v3.24.0 — §6's condensed line, present only when results_summary.gate1_summary
  *  exists (BacktestController::quickResultsSummary()) -- a strategy-less session, or one
- *  entirely pre-v3.24.0, shows nothing extra here at all. */
+ *  entirely pre-v3.24.0, shows nothing extra here at all.
+ *  v3.25.0 — gate1_summary is now keyed by gate1_atr_mult group (never one combined
+ *  number blending more than one swing size) -- one small line per group; 'unset'
+ *  (pre-v3.25.0 trades, no recorded multiplier) renders as "legacy". */
 function sbGate1SummaryLine(rs) {
     if (!rs || !rs.gate1_summary) return '';
     const fmtSide = side => side.win_rate === null ? `${side.n}` : `${side.n} (${(side.win_rate * 100).toFixed(0)}%)`;
-    return `<div class="sb-card-summary" style="color:var(--text3)">Gate 1: ${fmtSide(rs.gate1_summary.agreed)} agreed · ${fmtSide(rs.gate1_summary.disagreed)} disagreed</div>`;
+    return Object.entries(rs.gate1_summary).map(([key, group]) => {
+        const tag = key === 'unset' ? 'legacy' : `×${group.atr_mult}`;
+        return `<div class="sb-card-summary" style="color:var(--text3)">Gate 1 (${tag}): ${fmtSide(group.agreed)} agreed · ${fmtSide(group.disagreed)} disagreed</div>`;
+    }).join('');
 }
 
 function sbCardHtml(s) {

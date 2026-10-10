@@ -14,6 +14,7 @@ fix this schema and `gate1_parity.js`'s own reader together, not just one of the
 ```json
 {
   "symbol": "BTCUSDT",
+  "atrMult": 2.0,
   "candles": [{"t": 1690000000, "o": 29000.0, "h": 29150.0, "l": 28950.0, "c": 29100.0}],
   "swings": [{"type": "HH", "price": 29150.0, "swingIdx": 12, "confirmIdx": 18}],
   "events": [{"type": "BOS", "direction": "bullish", "level": 29150.0, "sourceSwingIdx": 12, "breakIdx": 20}],
@@ -22,6 +23,11 @@ fix this schema and `gate1_parity.js`'s own reader together, not just one of the
 ```
 
 - `candles[].t` — open time, UTC **seconds** (not ms).
+- `atrMult` — the swing-size multiplier the export was taken at (v3.25.0's Gate 1
+  settings dialog, "Swing size (× ATR 14)"). Optional — defaults to `2.0` when absent,
+  since every fixture before v3.25.0 was exported at the Pine script's own default. A
+  fixture at a different setting (e.g. `BTCUSDT_atr3.json` at 3.0) MUST set this field —
+  `gate1_parity.js` constructs the engine with whatever this says, not a hardcoded 2.0.
 - `swings[]` — every confirmed swing in order; `type` is one of `H`/`HH`/`LH` (highs) or
   `L`/`HL`/`LL` (lows); `swingIdx`/`confirmIdx` are 0-based indexes into `candles`.
 - `events[]` — every BOS/CHoCH in order; `direction` is `bullish`/`bearish`;

@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-10 (v3.24.2 — manifest-only catch-up release, see "Deploy & Release Workflow" below)
+**Last Updated:** 2026-10-10 (v3.25.0 — FSA Gate 1 indicator settings dialog in Backtesting)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.24.2 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.25.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -149,6 +149,37 @@ candle) was caught and fixed by LINKUSDT's own fixture. Still outstanding: a liv
 side-by-side against the real TradingView chart (no browser access from this
 environment).
 
+**FSA Gate 1 settings dialog (v3.25.0).** Gear icon next to the toolbar toggle, or
+double-click the badge — `js/backtest.js::btOpenGate1Settings()`, 3 tabs mirroring
+`FSA_Structure_Gate1.pine`'s own inputs block (`docs/reference/...`, lines 14-21):
+Inputs (swing size × ATR 14, 0.5–10 in 0.5 steps; show swings/breaks/levels/badge), Style
+(bullish/bearish/unclear colour, label size), Visibility (which `Viewing` timeframe the
+overlay draws on — the engine always runs on 4H regardless; the badge is never
+timeframe-gated). `gate1Settings` is loaded once per session open
+(`loadGate1Settings()`); only an `atrMult` change triggers a real rebuild
+(`btRebuildGate1FromScratch()` — `createGate1Engine()`'s `atrMult` is fixed at
+construction, so this always builds a fresh engine instance rather than calling the old
+one's `reset()`), every other field just re-renders/redraws. Persisted server-side,
+per-user, via a new table (`user_indicator_settings`, not `user_drawing_defaults` — see
+that migration's own doc comment for why) and `Gate1SettingsController`
+(`get_gate1_settings`/`save_gate1_settings`), which validates every field strictly and
+refuses anything unrecognised — a saved default becomes every future session's starting
+point. `structure-gate1.js` gained two read-only snapshot fields,
+`protectedLevelBar`/`bosLevelBar` (bookkeeping only, no engine rule changed — mirrors
+Pine's own continuously-replotted "protected level"/"BOS level" lines, lines 205-206, not
+previously rendered at all before this release). New column `gate1_atr_mult`
+(`trades`/`backtest_pending_orders`) carries the swing size through to a limit order's
+fill exactly like `gate1_auto_state`/`gate1_agree` already do; existing rows stay `NULL`
+(they were all run at the old hardcoded 2.0, but this is **not** backfilled) — the
+Results/Saved-Backtests gate-1 agreement breakdown is grouped by `gate1_atr_mult` (a
+`NULL` row groups under its own `'unset'`/"legacy" bucket) so a session with orders at
+more than one swing size never reports one combined number blending them. Not yet
+verified from this environment: the exact badge text at 3.0 vs 2.0 against a real BTC 4H
+replay side-by-side with the real TradingView indicator (same standing limitation as
+v3.24.0/v3.24.1), and a real browser login/logout settings-persistence round trip — the
+harness's own proof (`drive-v3250.mjs`) is a full page reload against the mock, which
+exercises the same server-round-trip mechanism but isn't a real login.
+
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
 ### The Core Principle
@@ -213,7 +244,8 @@ Current controllers include `ProfileController`, `ChallengeController`,
 `PairController`, `ImportController`, `StrategyController`, `StrategyBuilderController`,
 `ReviewController`, `ReviewEngineController`, `BitfundedImportController`,
 `ReportCardController`, `ReportCardAiController`, `BacktestController`,
-`BacktestDrawingController`, `ChartController`, `OnboardingController`.
+`BacktestDrawingController`, `Gate1SettingsController`, `ChartController`,
+`OnboardingController`.
 
 ## 3. DATABASE SCHEMA (current)
 
@@ -287,6 +319,9 @@ report_cards / report_card_blocks / report_card_templates / report_card_template
 backtest_sessions / backtest_pending_orders / backtest_drawings / user_drawing_defaults /
   backtest_exit_time_repairs_log — see the Backtesting Replay Engine section above and
   the archive's v3.19.0–v3.22.10 entries for full column lists and design history.
+user_indicator_settings: id, user_id, indicator, settings_json, updated_at —
+  UNIQUE(user_id, indicator); FSA Gate 1's own Inputs/Style/Visibility dialog (v3.25.0)
+  is the only indicator so far — see the Backtesting Replay Engine section above.
 ```
 
 ### Data Relationships
@@ -414,7 +449,7 @@ File uploads go through `fetch()` directly with `FormData`.
 | Strategy | `get_strategy_trades`, `get_strategy_stats`, `add_strategy_trade`, `delete_strategy_trade` |
 | Reviews | `get_reviews`, `save_review` (legacy); `ReviewEngineController` for the generated insights feed |
 | Report Card | `get_report_card`, `save_report_card`, `get_report_card_history`, block/template/mantra/ticker CRUD, `run_ai_review`, `run_weekly_ai_review`, `get_ai_reviews`, `acknowledge_ai_finding` |
-| Backtesting | `get_backtest_session`, `get_backtest_results` (metrics/trade-list for the Results page), `get_backtest_candles`, `backtest_advance`, `backtest_rewind`, `backtest_place_order`, `backtest_cancel_order`, `backtest_close_position`, drawing CRUD via `BacktestDrawingController` |
+| Backtesting | `get_backtest_session`, `get_backtest_results` (metrics/trade-list for the Results page), `get_backtest_candles`, `backtest_advance`, `backtest_rewind`, `backtest_place_order`, `backtest_cancel_order`, `backtest_close_position`, drawing CRUD via `BacktestDrawingController`, `get_gate1_settings`/`save_gate1_settings` via `Gate1SettingsController` |
 
 Full per-action method/controller/description table is in the archive if you need it —
 this condensed version is enough to know which controller owns a given feature.
@@ -641,7 +676,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.24.2
+Current Version: v3.25.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

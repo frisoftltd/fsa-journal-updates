@@ -2001,51 +2001,109 @@ function btGate1TimeToX(openTimeMs) {
     const tz = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     return btTimeToX(toDisplaySeconds(openTimeMs, tz));
 }
+/** v3.25.0 — every colour/visibility/label-size choice below reads gate1Settings
+ *  (js/backtest.js, Inputs/Style/Visibility dialog) instead of the old fixed
+ *  bullCol/bearCol constants. Per-timeframe visibility (§1 of the briefing: "which
+ *  Viewing timeframes the drawings appear on") hides ALL of this overlay's own output
+ *  when the CURRENTLY DISPLAYED timeframe is unchecked — the engine itself always keeps
+ *  running on 4H regardless (btAdvanceGate1IfNeeded() is untouched), so hiding here never
+ *  affects gate1_auto_state/the badge, exactly per the briefing's own constraint. */
 function btRenderGate1Overlay(ctx) {
     if (typeof gate1Swings === 'undefined' || !gate1PushedTimes || !gate1PushedTimes.length) return;
-    const bullCol = '#089981', bearCol = '#f23645';
+    const settings = (typeof gate1Settings !== 'undefined' && gate1Settings) ? gate1Settings : GATE1_SETTINGS_DEFAULTS;
+    const displayTf = (typeof btDisplayTimeframe !== 'undefined' && btDisplayTimeframe) || (typeof btSession !== 'undefined' && btSession ? btSession.replay_timeframe : '1H');
+    if (settings.visibility && settings.visibility[displayTf] === false) return;
+    const bullCol = settings.bullColor, bearCol = settings.bearColor, unclearCol = settings.unclearColor;
+    const fontSize = settings.labelSize === 'small' ? 8 : 10;
 
     ctx.save();
-    ctx.font = '10px sans-serif';
+    ctx.font = fontSize + 'px sans-serif';
     ctx.textAlign = 'center';
-    for (const sw of gate1Swings) {
-        const openTimeMs = gate1PushedTimes[sw.confirmIdx];
-        if (openTimeMs === undefined) continue;
-        const x = btGate1TimeToX(openTimeMs);
-        const y = btPriceToY(sw.price);
-        if (x === null || y === null) continue;
-        // Pine's own rule (FSA_Structure_Gate1.pine:129-130/135-136): `up` -- and so the
-        // label's colour -- defaults bullCol/true for the very FIRST swing of either
-        // kind (no previous reference to compare against), not by high-vs-low. HH/H ->
-        // bull, LH -> bear (highs); HL/L -> bull, LL -> bear (lows). Matched exactly,
-        // not "fixed" to a more intuitive-looking high=bull/low=bear split.
-        const isHighType = sw.type === 'H' || sw.type === 'HH' || sw.type === 'LH';
-        const up = sw.type === 'H' || sw.type === 'HH' || sw.type === 'L' || sw.type === 'HL';
-        ctx.fillStyle = up ? bullCol : bearCol;
-        ctx.textBaseline = isHighType ? 'bottom' : 'top';
-        ctx.fillText(sw.type, x, y + (isHighType ? -4 : 4));
+
+    if (settings.showSwings) {
+        for (const sw of gate1Swings) {
+            const openTimeMs = gate1PushedTimes[sw.confirmIdx];
+            if (openTimeMs === undefined) continue;
+            const x = btGate1TimeToX(openTimeMs);
+            const y = btPriceToY(sw.price);
+            if (x === null || y === null) continue;
+            // Pine's own rule (FSA_Structure_Gate1.pine:129-130/135-136): `up` -- and so
+            // the label's colour -- defaults bullCol/true for the very FIRST swing of
+            // either kind (no previous reference to compare against), not by
+            // high-vs-low. HH/H -> bull, LH -> bear (highs); HL/L -> bull, LL -> bear
+            // (lows). Matched exactly, not "fixed" to a more intuitive-looking
+            // high=bull/low=bear split.
+            const isHighType = sw.type === 'H' || sw.type === 'HH' || sw.type === 'LH';
+            const up = sw.type === 'H' || sw.type === 'HH' || sw.type === 'L' || sw.type === 'HL';
+            ctx.fillStyle = up ? bullCol : bearCol;
+            ctx.textBaseline = isHighType ? 'bottom' : 'top';
+            ctx.fillText(sw.type, x, y + (isHighType ? -4 : 4));
+        }
     }
 
-    ctx.setLineDash([]);
-    ctx.textBaseline = 'middle';
-    for (const ev of gate1Events) {
-        const sourceTimeMs = gate1PushedTimes[ev.sourceSwingIdx];
-        const breakTimeMs = gate1PushedTimes[ev.breakCandleIdx];
-        if (sourceTimeMs === undefined || breakTimeMs === undefined) continue;
-        const x1 = btGate1TimeToX(sourceTimeMs), x2 = btGate1TimeToX(breakTimeMs);
-        const y = btPriceToY(ev.level);
-        if (x1 === null || x2 === null || y === null) continue;
-        const color = ev.direction === 'bullish' ? bullCol : bearCol;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 1;
-        ctx.setLineDash(ev.type === 'CHoCH' ? [4, 3] : []);
-        ctx.beginPath();
-        ctx.moveTo(x1, y);
-        ctx.lineTo(x2, y);
-        ctx.stroke();
-        ctx.fillStyle = color;
-        ctx.fillText(ev.type, (x1 + x2) / 2, y + (ev.direction === 'bullish' ? -8 : 8));
+    if (settings.showBreaks) {
+        ctx.setLineDash([]);
+        ctx.textBaseline = 'middle';
+        for (const ev of gate1Events) {
+            const sourceTimeMs = gate1PushedTimes[ev.sourceSwingIdx];
+            const breakTimeMs = gate1PushedTimes[ev.breakCandleIdx];
+            if (sourceTimeMs === undefined || breakTimeMs === undefined) continue;
+            const x1 = btGate1TimeToX(sourceTimeMs), x2 = btGate1TimeToX(breakTimeMs);
+            const y = btPriceToY(ev.level);
+            if (x1 === null || x2 === null || y === null) continue;
+            const color = ev.direction === 'bullish' ? bullCol : bearCol;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.setLineDash(ev.type === 'CHoCH' ? [4, 3] : []);
+            ctx.beginPath();
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x2, y);
+            ctx.stroke();
+            ctx.fillStyle = color;
+            ctx.fillText(ev.type, (x1 + x2) / 2, y + (ev.direction === 'bullish' ? -8 : 8));
+        }
+        ctx.setLineDash([]);
     }
+
+    // v3.25.0 — "protected level"/"BOS level" (FSA_Structure_Gate1.pine:205-206,
+    // plot.style_linebr): a LIVE line from wherever the level was set through to the
+    // latest pushed candle, distinct from showBreaks' own retroactive break-event lines
+    // above. protectedLevelBar/bosLevelBar (structure-gate1.js) are the same bar-index
+    // bookkeeping swingIdx/sourceSwingIdx already provide for swings/events -- this is
+    // the first thing in this file to read them. Protected level's colour follows the
+    // CURRENT direction (st>0 bull, st<0 bear) at reduced opacity, matching Pine's own
+    // color.new(_, 30); BOS level always renders in the unclear colour regardless of
+    // direction, matching Pine's own fixed `color = neutCol` on that plot.
+    if (settings.showLevels && gate1Snapshot) {
+        const lastIdx = gate1PushedTimes.length - 1;
+        const s = gate1Snapshot;
+        ctx.setLineDash([]);
+        if (s.protectedLevel !== null && s.protectedLevelBar !== null) {
+            const x1t = gate1PushedTimes[s.protectedLevelBar], x2t = gate1PushedTimes[lastIdx];
+            if (x1t !== undefined && x2t !== undefined) {
+                const x1 = btGate1TimeToX(x1t), x2 = btGate1TimeToX(x2t), y = btPriceToY(s.protectedLevel);
+                if (x1 !== null && x2 !== null && y !== null) {
+                    ctx.globalAlpha = 0.3;
+                    ctx.strokeStyle = s.state > 0 ? bullCol : bearCol;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+                    ctx.globalAlpha = 1;
+                }
+            }
+        }
+        if (s.bosLevel !== null && s.bosLevelBar !== null) {
+            const x1t = gate1PushedTimes[s.bosLevelBar], x2t = gate1PushedTimes[lastIdx];
+            if (x1t !== undefined && x2t !== undefined) {
+                const x1 = btGate1TimeToX(x1t), x2 = btGate1TimeToX(x2t), y = btPriceToY(s.bosLevel);
+                if (x1 !== null && x2 !== null && y !== null) {
+                    ctx.strokeStyle = unclearCol;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+                }
+            }
+        }
+    }
+
     ctx.setLineDash([]);
     ctx.restore();
 }

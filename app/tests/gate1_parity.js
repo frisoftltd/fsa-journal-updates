@@ -219,7 +219,13 @@ function runFixtureTests() {
     for (const file of files) {
         console.log(`[Fixture parity test] ${file}`);
         const fixture = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-        const engine = createGate1Engine({ atrLen: 14, atrMult: 2.0 });
+        // v3.25.0 — fixture.atrMult lets a fixture exported at a non-default swing size
+        // (e.g. BTCUSDT_atr3.json at 3.0, per the Gate 1 settings briefing's §5) be
+        // tested against the matching multiplier; absent entirely on every pre-v3.25.0
+        // fixture, which defaults to 2.0 -- the only value any of them were ever
+        // exported at.
+        const atrMult = fixture.atrMult !== undefined ? fixture.atrMult : 2.0;
+        const engine = createGate1Engine({ atrLen: 14, atrMult });
         const allSwings = [], allEvents = [];
         let lastSnap = null;
         for (const c of fixture.candles) {

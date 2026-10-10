@@ -157,8 +157,18 @@ function brPageHtml(data) {
     // pushed onto the exact same {label, block} array brMetricTableHtml() already renders
     // generically. Present only when the server actually found gate1 data for this
     // session (a strategy-less session, or one entirely pre-v3.24.0, has neither key).
-    if (metrics.gate1_agreed) columns.push({ label: 'Gate 1 Agreed', block: metrics.gate1_agreed });
-    if (metrics.gate1_disagreed) columns.push({ label: 'Gate 1 Disagreed', block: metrics.gate1_disagreed });
+    // v3.25.0 — one agreed/disagreed column PAIR per gate1_atr_mult group
+    // (metrics.gate1_by_atr_mult, replacing the old flat gate1_agreed/gate1_disagreed)
+    // so a session with orders at more than one swing size never shows one combined
+    // number blending them. 'unset' (pre-v3.25.0 trades, no recorded multiplier) renders
+    // as "legacy" rather than a number.
+    if (metrics.gate1_by_atr_mult) {
+        for (const [key, group] of Object.entries(metrics.gate1_by_atr_mult)) {
+            const tag = key === 'unset' ? 'legacy' : `×${group.atr_mult}`;
+            columns.push({ label: `Gate 1 Agreed (${tag})`, block: group.agreed });
+            columns.push({ label: `Gate 1 Disagreed (${tag})`, block: group.disagreed });
+        }
+    }
     return `
         ${brHeaderHtml(session, metrics.overall)}
         ${brStatTilesHtml(metrics.overall)}

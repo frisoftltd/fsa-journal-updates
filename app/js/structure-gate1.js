@@ -168,11 +168,21 @@ function createGate1Engine(opts) {
 
         const protectedLevel = st > 0 ? lastL : st < 0 ? lastH : null;
         const bosLevel = Math.abs(st) === 2 ? pendRef : st === 1 ? (hBroken ? null : lastH) : st === -1 ? (lBroken ? null : lastL) : null;
+        // v3.25.0 — the candle index each level is anchored at, exposed purely so a
+        // caller (js/backtest-drawings.js) can draw Pine's own continuously-replotted
+        // "protected level"/"BOS level" lines (FSA_Structure_Gate1.pine:205-206,
+        // plot.style_linebr) from where the level actually started through to the
+        // latest pushed candle. Bookkeeping only -- no new logic, no effect on
+        // state/swings/events; mirrors protectedLevel/bosLevel's own ternaries exactly.
+        const protectedLevelBar = st > 0 ? lastLBar : st < 0 ? lastHBar : null;
+        const bosLevelBar = Math.abs(st) === 2 ? pendRefBar : st === 1 ? (hBroken ? null : lastHBar) : st === -1 ? (lBroken ? null : lastLBar) : null;
 
         return {
             state: st,
             protectedLevel,
             bosLevel,
+            protectedLevelBar,
+            bosLevelBar,
             lastSwingHigh: lastH,
             lastSwingLow: lastL,
             newSwings,

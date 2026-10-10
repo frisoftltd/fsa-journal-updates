@@ -567,17 +567,18 @@ body.backtest-active #bt-screen-window.active{display:flex;flex-direction:column
 .bt-autoscale-toggle.active{background:rgba(41,98,255,0.18);color:#5b8dff;border-color:rgba(41,98,255,0.35)}
 
 /* v3.24.0 — FSA Gate 1 badge, top-right of the chart. Exact Pine badge text/structure
-   (head row + a smaller sub row), colour keyed to bullish/bearish/unclear via
-   js/backtest.js::renderBtGate1Badge() setting .bull/.bear/.neut. */
+   (head row + a smaller sub row). v3.25.0 — head/sub background colour is set inline by
+   js/backtest.js::renderBtGate1Badge() from the user's own Style-tab colour choice
+   (gate1Settings.bull/bear/unclearColor), not a fixed .bull/.bear/.neut class — these
+   two rules are the only colour-independent chrome left. */
 .bt-gate1-badge{position:absolute;z-index:6;top:8px;right:8px;max-width:280px;border-radius:4px;overflow:hidden;font-family:var(--font-body);box-shadow:0 2px 8px rgba(0,0,0,0.35)}
 .bt-gate1-badge-head{padding:6px 10px;font-size:12px;font-weight:700;color:#fff}
 .bt-gate1-badge-sub{padding:5px 10px;font-size:11px;line-height:1.4;color:#d1d4dc;white-space:pre-line}
-.bt-gate1-badge.bull .bt-gate1-badge-head{background:#089981}
-.bt-gate1-badge.bull .bt-gate1-badge-sub{background:rgba(8,153,129,0.18)}
-.bt-gate1-badge.bear .bt-gate1-badge-head{background:#f23645}
-.bt-gate1-badge.bear .bt-gate1-badge-sub{background:rgba(242,54,69,0.18)}
-.bt-gate1-badge.neut .bt-gate1-badge-head{background:#787b86}
-.bt-gate1-badge.neut .bt-gate1-badge-sub{background:rgba(120,123,134,0.18)}
+
+/* v3.25.0 — FSA Gate 1 settings dialog: reuses the .bt-draw-popover visual family
+   (tabs/body/actions rules above) but is always centred (no drag/anchor — it isn't tied
+   to a drawing's own click point, unlike every other user of that family). */
+.bt-gate1-settings-popover{left:50%;top:50%;transform:translate(-50%,-50%);width:280px}
 
 /* The ticket itself: docked at the LEFT of the chart, not a centred modal, so the chart
    (and the lines/box it's editing) stay visible while it's open — the whole point of

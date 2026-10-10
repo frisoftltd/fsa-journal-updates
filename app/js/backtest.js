@@ -61,6 +61,21 @@ let gate1Events = [];
 let gate1Snapshot = null;
 let gate1LastPushedOpenTime = null;
 let btGate1Visible = true;
+// v3.25.0 — FSA Gate 1 indicator settings (Inputs/Style/Visibility dialog), mirroring
+// FSA_Structure_Gate1.pine's own inputs block (docs/reference/..., lines 14-21) plus a
+// UI-only labelSize/visibility-by-timeframe pair the Pine script itself doesn't expose
+// as inputs (TradingView's own Style-tab label-size control, and this app's own
+// per-display-timeframe drawing visibility). Loaded once per session open
+// (loadGate1Settings(), same "once per session open" convention loadBtDrawingDefaults()
+// already uses) from the server (Gate1SettingsController, per-user, never per-session).
+const GATE1_SETTINGS_DEFAULTS = {
+    atrMult: 2.0,
+    showSwings: true, showBreaks: true, showLevels: true, showBadge: true,
+    bullColor: '#089981', bearColor: '#F23645', unclearColor: '#787B86',
+    labelSize: 'normal',
+    visibility: { '15m': true, '1H': true, '4H': true, '1D': true },
+};
+let gate1Settings = null;
 
 /** Every network/API call this module (and js/saved-backtests.js) makes goes through
  *  this — never a bare api() call. Always returns a plain object: either the server's
@@ -435,6 +450,7 @@ async function openBacktestSession(id) {
 
     const ok = await refreshBtSession();
     if (!ok) return;
+    await loadGate1Settings();
     await btRebuildGate1FromScratch();
     await btLoadCandleWindow();
     if (typeof resizeTvChart === 'function') resizeTvChart();
@@ -537,6 +553,16 @@ async function btFetchGate1Candles(beforeMs, limit) {
     return res.candles;
 }
 
+/** Loads this user's saved Gate 1 settings once per session open -- never per-session
+ *  storage, same "a default belongs to the user, not one replay" precedent
+ *  user_drawing_defaults already set (BacktestDrawingController's own doc comment). A
+ *  fetch failure (older/unpatched server, network hiccup) falls back to the coded
+ *  defaults rather than leaving gate1Settings null and the engine unable to start. */
+async function loadGate1Settings() {
+    const res = await btApi('get_gate1_settings');
+    gate1Settings = (res && !res.error && res.atrMult !== undefined) ? res : JSON.parse(JSON.stringify(GATE1_SETTINGS_DEFAULTS));
+}
+
 function btGate1PushCandle(r) {
     gate1PushedTimes.push(r.time);
     const snap = gate1Engine.push({ t: Math.floor(r.time / 1000), o: r.open, h: r.high, l: r.low, c: r.close });
@@ -555,8 +581,13 @@ function btGate1PushCandle(r) {
  */
 async function btRebuildGate1FromScratch() {
     if (!btSession) return;
-    if (!gate1Engine) gate1Engine = createGate1Engine({ atrLen: 14, atrMult: 2.0 });
-    gate1Engine.reset();
+    if (!gate1Settings) gate1Settings = JSON.parse(JSON.stringify(GATE1_SETTINGS_DEFAULTS));
+    // v3.25.0 — atrMult is fixed at construction (createGate1Engine()'s own closure), so
+    // a swing-size change needs a brand-new engine instance, not .reset() on the old one
+    // -- always constructing fresh here is also exactly "reset() and re-push from the
+    // warm-up start" for the (common) case where atrMult didn't change, so there's no
+    // separate code path needed for "settings changed" vs "plain rebuild."
+    gate1Engine = createGate1Engine({ atrLen: 14, atrMult: gate1Settings.atrMult });
     gate1PushedTimes = [];
     gate1Swings = [];
     gate1Events = [];
@@ -601,22 +632,187 @@ function btGate1BadgeHead(state) {
     if (state === -1) return { head: 'GATE 1: BEARISH — shorts only', cls: 'bear' };
     return { head: 'GATE 1: UNCLEAR — NO TRADE', cls: 'neut' };
 }
+/** v3.25.0 — the badge's colour comes from gate1Settings' own bullColor/bearColor/
+ *  unclearColor (Style tab) rather than the fixed CSS classes alone -- the class still
+ *  carries non-colour chrome (padding/radius/shadow), but background/text colour are set
+ *  inline so a custom colour choice actually takes effect. The badge itself is NEVER
+ *  timeframe-gated (§2 of the briefing: "the badge keeps the existing note when viewing
+ *  another timeframe") -- only showBadge/btGate1Visible hide it. */
+function btGate1Color(state) {
+    if (!gate1Settings) gate1Settings = GATE1_SETTINGS_DEFAULTS;
+    if (state === 1 || state === 2) return gate1Settings.bullColor;
+    if (state === -1 || state === -2) return gate1Settings.bearColor;
+    return gate1Settings.unclearColor;
+}
 function renderBtGate1Badge() {
     const el = document.getElementById('bt-gate1-badge');
     if (!el) return;
-    if (!btGate1Visible || !gate1Snapshot) { el.style.display = 'none'; return; }
+    const hiddenBySettings = gate1Settings && !gate1Settings.showBadge;
+    if (!btGate1Visible || hiddenBySettings || !gate1Snapshot) { el.style.display = 'none'; return; }
     const s = gate1Snapshot;
     const bl = s.bosLevel === null ? 'forming' : fmtPrice5(s.bosLevel);
-    const { head, cls } = btGate1BadgeHead(s.state);
+    const { head } = btGate1BadgeHead(s.state);
     let sub;
     if (s.state === 1) sub = `Protected low ${fmtPrice5(s.lastSwingLow)} | next BOS: close above ${bl}`;
     else if (s.state === -1) sub = `Protected high ${fmtPrice5(s.lastSwingHigh)} | next BOS: close below ${bl}`;
     else if (s.state === 2) sub = `Bullish CHoCH. BOS: close above ${bl} | close below ${fmtPrice5(s.lastSwingLow)} = bearish CHoCH`;
     else if (s.state === -2) sub = `Bearish CHoCH. BOS: close below ${bl} | close above ${fmtPrice5(s.lastSwingHigh)} = bullish CHoCH`;
     else sub = 'Not enough structure yet';
-    el.className = 'bt-gate1-badge ' + cls;
-    el.innerHTML = `<div class="bt-gate1-badge-head">${escapeHtml(head)}</div><div class="bt-gate1-badge-sub">${escapeHtml(sub)}</div>`;
+    const color = btGate1Color(s.state);
+    el.className = 'bt-gate1-badge';
+    el.style.setProperty('--bt-gate1-color', color);
+    el.innerHTML = `<div class="bt-gate1-badge-head" style="background:${color}">${escapeHtml(head)}</div><div class="bt-gate1-badge-sub" style="background:${color}2e">${escapeHtml(sub)}</div>`;
     el.style.display = '';
+    // v3.25.0 — double-click opens the settings dialog, same alternate entry point as
+    // the gear icon in the toolbar (§1 of the briefing). Reassigned on every render
+    // (cheap, idempotent) rather than wired once, since this element's content (and
+    // therefore the need to re-bind after innerHTML replacement) changes on every push.
+    el.ondblclick = btOpenGate1Settings;
+}
+
+// ── FSA GATE 1 SETTINGS DIALOG (v3.25.0) ────────────────────
+// Mirrors FSA_Structure_Gate1.pine's own Inputs/Style/Visibility dialog (docs/reference/
+// ..., lines 14-21) so the replay chart's indicator and the trader's own TradingView
+// chart read the same structure the same way. Reuses the .bt-draw-popover visual family
+// (css/style.css) under its own id/classes -- independent of backtest-drawings.js's own
+// drag-popover machinery (that one is bound to a specific drawing's points/settings; this
+// one belongs to the session, not any one drawing), always centered rather than anchored
+// to a click point. OK applies instantly client-side AND persists to the user's saved
+// default in the background; Cancel/✕ discard the form and leave gate1Settings exactly
+// as it was when the dialog opened -- no snapshot/revert needed since nothing is applied
+// until OK runs.
+const GATE1_VISIBLE_TIMEFRAMES = ['15m', '1H', '4H', '1D'];
+
+function btGate1SettingsHtml(s) {
+    return `<div class="bt-draw-popover-header" id="bt-gate1-settings-header">
+            <span class="bt-draw-popover-header-title">FSA Gate 1 Settings</span>
+            <button type="button" id="bt-gate1-settings-close-x" class="bt-draw-popover-close-x" title="Close">✕</button>
+        </div>
+        <div class="bt-draw-popover-body">
+            <div class="bt-draw-popover-tabs">
+                <button type="button" class="bt-draw-popover-tab active" data-tab="inputs">Inputs</button>
+                <button type="button" class="bt-draw-popover-tab" data-tab="style">Style</button>
+                <button type="button" class="bt-draw-popover-tab" data-tab="visibility">Visibility</button>
+            </div>
+            <div class="bt-draw-popover-tabpanel active" data-tabpanel="inputs">
+                <label>Swing size (× ATR 14) <input type="number" id="g1-atrMult" value="${s.atrMult}" min="0.5" max="10" step="0.5"></label>
+                <label><input type="checkbox" id="g1-showSwings" ${s.showSwings ? 'checked' : ''}> Show HH / HL / LH / LL</label>
+                <label><input type="checkbox" id="g1-showBreaks" ${s.showBreaks ? 'checked' : ''}> Show BOS / CHoCH</label>
+                <label><input type="checkbox" id="g1-showLevels" ${s.showLevels ? 'checked' : ''}> Show protected level and BOS level</label>
+                <label><input type="checkbox" id="g1-showBadge" ${s.showBadge ? 'checked' : ''}> Show Gate 1 badge</label>
+            </div>
+            <div class="bt-draw-popover-tabpanel" data-tabpanel="style">
+                <label>Bullish colour <input type="color" id="g1-bullColor" value="${s.bullColor}"></label>
+                <label>Bearish colour <input type="color" id="g1-bearColor" value="${s.bearColor}"></label>
+                <label>Unclear colour <input type="color" id="g1-unclearColor" value="${s.unclearColor}"></label>
+                <label>Label size <select id="g1-labelSize">
+                    <option value="small" ${s.labelSize === 'small' ? 'selected' : ''}>Small</option>
+                    <option value="normal" ${s.labelSize !== 'small' ? 'selected' : ''}>Normal</option>
+                </select></label>
+            </div>
+            <div class="bt-draw-popover-tabpanel" data-tabpanel="visibility">
+                ${GATE1_VISIBLE_TIMEFRAMES.map(tf => `<label><input type="checkbox" id="g1-vis-${tf}" ${s.visibility[tf] ? 'checked' : ''}> ${tf}</label>`).join('')}
+            </div>
+            <div class="bt-draw-popover-actions">
+                <button type="button" id="bt-gate1-settings-defaults" class="btn btn-ghost btn-sm">Defaults</button>
+                <div style="display:flex;gap:8px">
+                    <button type="button" id="bt-gate1-settings-cancel" class="btn btn-ghost btn-sm">Cancel</button>
+                    <button type="button" id="bt-gate1-settings-ok" class="btn btn-primary btn-sm">OK</button>
+                </div>
+            </div>
+        </div>`;
+}
+
+function btGate1ReadFormIntoSettings() {
+    const visibility = {};
+    GATE1_VISIBLE_TIMEFRAMES.forEach(tf => { visibility[tf] = document.getElementById('g1-vis-' + tf).checked; });
+    // Snapped to the nearest 0.5 step client-side (the server coerces/accepts anyway,
+    // but the dialog should never show a step mismatch back to itself after OK).
+    const rawAtrMult = parseFloat(document.getElementById('g1-atrMult').value);
+    const atrMult = Math.max(0.5, Math.min(10, Math.round((isNaN(rawAtrMult) ? 2.0 : rawAtrMult) * 2) / 2));
+    return {
+        atrMult,
+        showSwings: document.getElementById('g1-showSwings').checked,
+        showBreaks: document.getElementById('g1-showBreaks').checked,
+        showLevels: document.getElementById('g1-showLevels').checked,
+        showBadge: document.getElementById('g1-showBadge').checked,
+        bullColor: document.getElementById('g1-bullColor').value,
+        bearColor: document.getElementById('g1-bearColor').value,
+        unclearColor: document.getElementById('g1-unclearColor').value,
+        labelSize: document.getElementById('g1-labelSize').value,
+        visibility,
+    };
+}
+
+/** "Defaults" only resets the FORM's own fields (TradingView's own behaviour) -- OK is
+ *  still required to actually apply/persist anything, per the briefing's own "Changes
+ *  apply on OK." */
+function btGate1RerenderDefaults() {
+    const pop = document.getElementById('bt-gate1-settings-popover');
+    if (!pop) return;
+    pop.innerHTML = btGate1SettingsHtml(JSON.parse(JSON.stringify(GATE1_SETTINGS_DEFAULTS)));
+    btWireGate1SettingsPopover();
+}
+
+function btCloseGate1Settings() {
+    const pop = document.getElementById('bt-gate1-settings-popover');
+    if (pop) pop.style.display = 'none';
+}
+
+/** Applies instantly, client-side, the same tick OK is clicked -- a slow/failed save
+ *  (network hiccup, an older server missing the migration) never blocks the trader from
+ *  seeing their own change take effect immediately; the save is a best-effort
+ *  persistence of that same change as their new default, not a precondition for it.
+ *  Only an actual atrMult change triggers a full engine rebuild (fetch + replay from the
+ *  warm-up start, §2 of the briefing) -- every other field only re-renders/redraws. */
+async function btApplyGate1Settings(newSettings) {
+    const atrMultChanged = !gate1Settings || gate1Settings.atrMult !== newSettings.atrMult;
+    gate1Settings = newSettings;
+    if (atrMultChanged) {
+        await btRebuildGate1FromScratch();
+    } else {
+        renderBtGate1Badge();
+        if (typeof btScheduleRedraw === 'function') btScheduleRedraw();
+    }
+    const res = await btApi('save_gate1_settings', 'POST', newSettings);
+    if (res && res.error) toast('Gate 1 settings applied, but failed to save as your default — ' + res.error, 'error');
+}
+
+function btWireGate1SettingsPopover() {
+    const pop = document.getElementById('bt-gate1-settings-popover');
+    if (!pop) return;
+    pop.querySelectorAll('.bt-draw-popover-tab').forEach(tabBtn => {
+        tabBtn.onclick = () => {
+            pop.querySelectorAll('.bt-draw-popover-tab').forEach(b => b.classList.toggle('active', b === tabBtn));
+            pop.querySelectorAll('.bt-draw-popover-tabpanel').forEach(p => p.classList.toggle('active', p.dataset.tabpanel === tabBtn.dataset.tab));
+        };
+    });
+    const closeBtn = document.getElementById('bt-gate1-settings-close-x');
+    if (closeBtn) closeBtn.onclick = () => btCloseGate1Settings();
+    const cancelBtn = document.getElementById('bt-gate1-settings-cancel');
+    if (cancelBtn) cancelBtn.onclick = () => btCloseGate1Settings();
+    const defaultsBtn = document.getElementById('bt-gate1-settings-defaults');
+    if (defaultsBtn) defaultsBtn.onclick = () => btGate1RerenderDefaults();
+    const okBtn = document.getElementById('bt-gate1-settings-ok');
+    if (okBtn) okBtn.onclick = async () => {
+        const newSettings = btGate1ReadFormIntoSettings();
+        btCloseGate1Settings();
+        await btApplyGate1Settings(newSettings);
+    };
+}
+
+function btOpenGate1Settings() {
+    if (!gate1Settings) gate1Settings = JSON.parse(JSON.stringify(GATE1_SETTINGS_DEFAULTS));
+    let pop = document.getElementById('bt-gate1-settings-popover');
+    if (!pop) {
+        pop = document.createElement('div');
+        pop.id = 'bt-gate1-settings-popover';
+        pop.className = 'bt-draw-popover bt-gate1-settings-popover';
+        document.body.appendChild(pop);
+    }
+    pop.innerHTML = btGate1SettingsHtml(gate1Settings);
+    pop.style.display = 'flex';
+    btWireGate1SettingsPopover();
 }
 /** §5 of the briefing: BULLISH -> pass for longs / fail for shorts; BEARISH -> mirror;
  *  UNCLEAR or none -> fail, regardless of direction. */
@@ -1711,7 +1907,7 @@ function btSubmitTicket() {
         // checklist UI ever appears (the engine runs continuously on the chart,
         // independent of strategy_id) -- gate1_agree stays null since there's no
         // checklist here for the trader to confirm/override against.
-        btSubmitTicketConfirmed(null, gate1Snapshot ? gate1Snapshot.state : null, null);
+        btSubmitTicketConfirmed(null, gate1Snapshot ? gate1Snapshot.state : null, null, gate1Settings ? gate1Settings.atrMult : null);
     }
 }
 /** Renders bt-checklist-items from this session's active gate variables (same template
@@ -1755,9 +1951,9 @@ function btChecklistProceed() {
     const gate1FinalChecked = gate1El ? gate1El.classList.contains('checked') : false;
     const gate1Agree = gate1FinalChecked === btGate1AutoChecked(btTicket.direction) ? 1 : 0;
     document.getElementById('bt-checklist-popup').classList.remove('open');
-    btSubmitTicketConfirmed(checked === total ? 1 : 0, gate1Snapshot ? gate1Snapshot.state : null, gate1Agree);
+    btSubmitTicketConfirmed(checked === total ? 1 : 0, gate1Snapshot ? gate1Snapshot.state : null, gate1Agree, gate1Settings ? gate1Settings.atrMult : null);
 }
-async function btSubmitTicketConfirmed(gatesPassed, gate1AutoState, gate1Agree) {
+async function btSubmitTicketConfirmed(gatesPassed, gate1AutoState, gate1Agree, gate1AtrMult) {
     if (!btTicket || !btSession) return;
     const c = btComputeTicket();
     if (c.blockReason) return; // button is disabled for this, but guard directly too
@@ -1786,6 +1982,7 @@ async function btSubmitTicketConfirmed(gatesPassed, gate1AutoState, gate1Agree) 
         gates_passed: gatesPassed,
         gate1_auto_state: gate1AutoState,
         gate1_agree: gate1Agree,
+        gate1_atr_mult: gate1AtrMult,
     };
     if (btTicket.orderType === 'limit') payload.limit_price = btRoundPrice(btTicket.entry);
     const res = await btApi('backtest_place_order', 'POST', payload);

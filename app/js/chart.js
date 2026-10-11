@@ -295,7 +295,12 @@ function initTvChart() {
 
     tvChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
         if (!range) return;
-        if (range.from < 10) loadOlderCandles();
+        // v3.26.0 — never during an active backtest session: it manages its own fixed-
+        // size lead-in window (js/backtest.js::btLoadCandleWindow()), and this plain-
+        // chart pagination would prepend candles outside that window, growing
+        // chartState.candles past what the next replay step expects and fighting the
+        // replay's own fixed bar spacing.
+        if (range.from < 10 && typeof window.btFetchCandlesOverride !== 'function') loadOlderCandles();
     });
 
     container.addEventListener('dblclick', () => tvChart.timeScale().fitContent());

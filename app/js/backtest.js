@@ -41,6 +41,24 @@ let btActiveSessionId = null;
 let btSession = null; // last full session payload from the server
 let btDirection = 'Long';
 let btAutoplayTimer = null;
+// v3.26.0 — guards toggleBtAutoplay()'s setInterval against firing a second btAdvance()
+// before the first one's own round trip (API call + Gate 1 push + candle refetch) has
+// resolved. Without this, a slow response under real network latency lets two advances
+// race, and whichever response resolves second (not necessarily the one that actually
+// fired second) wins — the chart then shows a window that can briefly jump backward
+// before the correct one lands, which is exactly what a "stretch" looks like mid-Play.
+let btAdvanceInFlight = false;
+// v3.26.0 — "fixed candle spacing during replay" (see btApplyFixedTimeScaleOnce() below).
+// true = every advance/rewind scrolls the view to the live edge, same as TradingView's
+// own replay follow mode. Set false the moment the trader pans or zooms away from that
+// position (btOnVisibleRangeChange()); only an explicit Jump to Latest click (or
+// scrolling/zooming back to exactly the live position by hand) sets it true again.
+let btAutoFollow = true;
+// The one true bar-spacing value for the session, set ONCE per fresh window (open/
+// resume/rewind/display-timeframe switch) from the container's actual width at that
+// moment — never recomputed by a plain advance. null until the first fresh load.
+let btFixedBarSpacing = null;
+let btTimeScalePanWired = false;
 // v3.20.10 — what's being DISPLAYED, independent of btSession.replay_timeframe (which
 // is always what actually drives the clock — advance()/rewind() never read this). Reset
 // to the session's own replay_timeframe every time a session is freshly opened/resumed
@@ -441,19 +459,35 @@ async function openBacktestSession(id) {
     btDisplayTimeframe = null;
     btResetPriceRangeStabilizer();
     btResetAutoScaleTracking(); // v3.22.6 Bug 1 -- a manual scale from a prior session is stale here
+    btAutoFollow = true;
+    btFixedBarSpacing = null;
     showBacktestScreen('window');
 
     if (typeof initTvChart === 'function') initTvChart();
     btInstallPriceRangeStabilizer();
     if (typeof btInitDrawOverlay === 'function') btInitDrawOverlay();
     window.btFetchCandlesOverride = (symbol, timeframe, before, limit) => btFetchCandles(before, limit);
+    // v3.26.0 — subscribed once (tvChart itself is only ever created once, initTvChart()
+    // is a no-op on every later call), not per session open.
+    if (!btTimeScalePanWired && typeof tvChart !== 'undefined' && tvChart) {
+        tvChart.timeScale().subscribeVisibleLogicalRangeChange(btOnVisibleRangeChange);
+        btTimeScalePanWired = true;
+    }
+
+    // v3.26.0 — resize MUST happen before the first fixed-bar-spacing computation below
+    // (inside btLoadCandleWindow(true)): that computation reads the container's actual
+    // pixel width, and this chart instance may still be sized for whatever screen/width
+    // was showing before this one (initTvChart() only sizes the canvas ONCE, the first
+    // time it's ever created). Resizing after would leave the just-computed spacing
+    // fitted to the wrong width — the exact mismatch that shows up as a stretched-looking
+    // chart the moment a session (re)opens.
+    if (typeof resizeTvChart === 'function') resizeTvChart();
 
     const ok = await refreshBtSession();
     if (!ok) return;
     await loadGate1Settings();
     await btRebuildGate1FromScratch();
-    await btLoadCandleWindow();
-    if (typeof resizeTvChart === 'function') resizeTvChart();
+    await btLoadCandleWindow(true);
     // v3.21.0 — drawings are scoped per session; load them once the session itself is
     // confirmed to exist (refreshBtSession() already returned true above).
     // v3.21.12 — this user's saved per-tool drawing defaults are user-scoped, not
@@ -493,21 +527,27 @@ async function btFetchCandles(before, limit) {
 
 /**
  * Runs on session open, resume, after every advance/rewind, and on a display-timeframe
- * switch -- one shared path, so lead-in behavior and the stable visible range are
- * automatically consistent everywhere a fresh window is loaded rather than only at
- * session-creation time. get_backtest_candles' own no-lookahead clamp
- * (BacktestController::getCandles()'s replayCeiling) is untouched and still applies to
- * every call here regardless of how many bars are requested or what timeframe is
- * displayed -- this only changes how much HISTORY is requested, never what's allowed
- * after the replay point.
+ * switch -- one shared path, so lead-in behavior is automatically consistent everywhere
+ * a fresh window is loaded rather than only at session-creation time.
+ * get_backtest_candles' own no-lookahead clamp (BacktestController::getCandles()'s
+ * replayCeiling) is untouched and still applies to every call here regardless of how
+ * many bars are requested or what timeframe is displayed -- this only changes how much
+ * HISTORY is requested, never what's allowed after the replay point.
  *
  * If the session's start date has fewer than BT_LEAD_IN_BARS candles behind it (e.g. it
  * starts at the very earliest bar this symbol/timeframe has at all), the server simply
  * returns however many actually exist -- no error, per the requirement -- and
  * exhaustedOlder correctly ends up true so loadOlderCandles() doesn't waste a request
  * trying to fetch history that was never there.
+ *
+ * resetView (true on open/resume/rewind/display-timeframe switch, false on a plain
+ * advance): whether this load is allowed to touch bar spacing / re-fit the time scale at
+ * all. v3.26.0 — this is the fix for candle spacing changing mid-replay: a plain advance
+ * never calls anything that can resize a bar, and only scrolls to the live edge (and only
+ * while btAutoFollow is true -- see btOnVisibleRangeChange()) instead of re-fitting a
+ * range every step.
  */
-async function btLoadCandleWindow() {
+async function btLoadCandleWindow(resetView = false) {
     const rows = await btFetchCandles(null, BT_LEAD_IN_BARS + 1);
     chartState.candles = rows.map(r => ({ time: r.time, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }));
     chartState.exhaustedOlder = rows.length < (BT_LEAD_IN_BARS + 1);
@@ -516,7 +556,11 @@ async function btLoadCandleWindow() {
     chartState.timezone = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     chartState.blindMode = !!(btSession && btSession.blind_mode);
     if (typeof renderChartData === 'function') renderChartData();
-    btSetVisibleRange();
+    if (resetView) {
+        btApplyFixedTimeScaleOnce();
+    } else if (btAutoFollow) {
+        btScrollToLive(false);
+    }
     // v3.21.0 — drawings are anchored to real time+price, not pixels or a bar's logical
     // index into this array, so a full replace of chartState.candles (which is exactly
     // what just happened) doesn't itself invalidate anything -- this just repaints them
@@ -834,27 +878,87 @@ function btToggleGate1() {
 }
 
 /**
- * v3.20.10: fixed-width logical range with room to the right of the cursor, recomputed
- * fresh from the CURRENT candle count every time this runs. Since btFetchCandles()
- * always asks for "the most recent BT_LEAD_IN_BARS+1 candles ending at the cursor," the
- * last loaded bar is always the cursor itself regardless of how far replay has advanced
- * -- so recomputing this range from chartState.candles.length on every call is
- * mathematically identical to shifting the same fixed-width window forward/back by
- * however many bars actually changed, without needing to track a delta explicitly. This
- * is what keeps the visible bar count constant and the cursor's own screen position
- * consistent while stepping, per the requirement -- replacing fitContent()'s "cram
- * everything into view" (v3.20.8) with a real fixed zoom level, now also shifted off the
- * right edge instead of pinned to it. Deliberately requested even when fewer bars are
- * actually loaded (from/to can extend past the real data) -- Lightweight Charts renders
- * the real bars at normal width with empty space filling the rest, rather than
- * stretching sparse data to fill the pane.
+ * v3.26.0 — REPLACES the old v3.20.10 btSetVisibleRange(), which called
+ * setVisibleLogicalRange() (a fit: it derives bar spacing fresh from container width ÷
+ * requested range width) on every single advance/rewind. That happened to produce a
+ * numerically stable spacing as long as the container never resized mid-replay, but it's
+ * the wrong primitive for a replay step -- it has no notion of "the trader already
+ * zoomed/panned, leave their view alone," which is exactly the gap that made the very
+ * next step yank the view back to the fixed window the instant they touched the chart.
+ *
+ * Fixed spacing is now set ONCE here, as a real persistent timeScale option, from
+ * whatever the container's actual width is at this moment (open/resume/rewind/display-
+ * timeframe switch only -- never a plain advance, see btLoadCandleWindow()'s own
+ * resetView param). Every later advance only ever calls btScrollToLive() -- a pure
+ * scroll, never a fit -- and only while btAutoFollow is true.
  */
-function btSetVisibleRange() {
+function btApplyFixedTimeScaleOnce() {
     if (!tvChart) return;
-    const total = chartState.candles.length;
-    if (!total) return;
-    const leftBars = BT_INITIAL_VISIBLE_BARS - BT_RIGHT_MARGIN_BARS;
-    tvChart.timeScale().setVisibleLogicalRange({ from: total - leftBars, to: total + BT_RIGHT_MARGIN_BARS });
+    const container = document.getElementById('tv-chart');
+    const width = container ? container.clientWidth : 0;
+    btFixedBarSpacing = width > 0 ? width / BT_INITIAL_VISIBLE_BARS : 6;
+    tvChart.timeScale().applyOptions({ barSpacing: btFixedBarSpacing, rightOffset: BT_RIGHT_MARGIN_BARS });
+    btAutoFollow = true;
+    btScrollToLive(false);
+    btSyncJumpToLatestButton();
+}
+
+/** Pure scroll -- shifts which bars are visible without touching bar spacing.
+ *  scrollPosition() is "distance from the plot's right edge to the latest bar, in bars" --
+ *  confirmed directly against this exact build of Lightweight Charts (0 sits the latest
+ *  bar flush against the edge, NOT already offset by the rightOffset option; rightOffset
+ *  only governs the chart's own default/reset position, never an explicit scroll call) --
+ *  so getting BT_RIGHT_MARGIN_BARS of empty margin past the latest bar needs scrolling to
+ *  POSITIVE BT_RIGHT_MARGIN_BARS, not 0. */
+function btScrollToLive(animated) {
+    if (!tvChart) return;
+    try { tvChart.timeScale().scrollToPosition(BT_RIGHT_MARGIN_BARS, !!animated); } catch (e) { /* chart not ready yet */ }
+}
+
+/**
+ * v3.26.0 — "the user can still zoom and pan manually; auto-follow pauses while they do."
+ * Fires on every visible-range change, including our own btScrollToLive()/
+ * btApplyFixedTimeScaleOnce() calls -- those always leave the chart in exactly the
+ * following position below, so they read back as "still following," never a false
+ * pause. Anything else (mouse drag, wheel scroll, pinch zoom) moves scrollPosition and/or
+ * barSpacing away from that target, which is what actually flips the flag -- same
+ * "observe where the chart's own state landed, infer the user caused it" precedent
+ * btMaybeNudgeAutoScale() already established for the price axis. Scrolling/zooming back
+ * to exactly the live position by hand resumes following the same way, no separate code
+ * path needed.
+ */
+function btOnVisibleRangeChange() {
+    if (!tvChart || btFixedBarSpacing === null) return;
+    const ts = tvChart.timeScale();
+    let pos, opts;
+    try { pos = ts.scrollPosition(); opts = ts.options(); } catch (e) { return; }
+    const atLiveEdge = Math.abs(pos - BT_RIGHT_MARGIN_BARS) < 0.5;
+    const atFixedSpacing = Math.abs(opts.barSpacing - btFixedBarSpacing) < 0.05;
+    const following = atLiveEdge && atFixedSpacing;
+    if (following !== btAutoFollow) {
+        btAutoFollow = following;
+        btSyncJumpToLatestButton();
+    }
+}
+
+/** The "Jump to Latest" control (pages/backtest.php) -- resumes auto-follow and snaps
+ *  back to the fixed spacing + live edge. Deliberately NOT animated: an animated
+ *  scrollToPosition() fires subscribeVisibleLogicalRangeChange on every in-between frame
+ *  of the animation, and each of those intermediate positions reads as "not at the live
+ *  edge" to btOnVisibleRangeChange() -- which would re-pause auto-follow mid-animation,
+ *  fighting the very button that's supposed to resume it. An instant jump has exactly one
+ *  range-change event, landing already on target, so it can never race itself this way. */
+function btJumpToLatest() {
+    if (!tvChart || btFixedBarSpacing === null) return;
+    tvChart.timeScale().applyOptions({ barSpacing: btFixedBarSpacing });
+    btAutoFollow = true;
+    btScrollToLive(false);
+    btSyncJumpToLatestButton();
+}
+
+function btSyncJumpToLatestButton() {
+    const btn = document.getElementById('bt-jump-latest-btn');
+    if (btn) btn.style.display = btAutoFollow ? 'none' : '';
 }
 
 /**
@@ -1058,8 +1162,8 @@ async function setBtDisplayTimeframe(tf) {
     setBtStepLabel();
     btResetPriceRangeStabilizer();
     btResetAutoScaleTracking(); // v3.22.6 Bug 1 -- a new display resolution is a fresh view too
-    await btLoadCandleWindow();
-    if (typeof resizeTvChart === 'function') resizeTvChart();
+    if (typeof resizeTvChart === 'function') resizeTvChart(); // v3.26.0 — must run before the fresh fit below, same reasoning as openBacktestSession()
+    await btLoadCandleWindow(true);
 }
 function setActiveBtDisplayTfButton() {
     document.querySelectorAll('.bt-display-tf-btn').forEach(b => b.classList.toggle('active', b.dataset.tf === btDisplayTimeframe));
@@ -1298,6 +1402,21 @@ function btRoundPrice(v) {
  */
 async function btAdvance() {
     if (!btActiveSessionId || !btSession || btSession.status !== 'active') return;
+    // v3.26.0 — toggleBtAutoplay()'s setInterval fires on a fixed wall-clock cadence with
+    // no awareness of whether the PREVIOUS btAdvance() (API call + Gate 1 push + candle
+    // refetch) has actually finished. Under real network latency two calls can overlap;
+    // whichever response resolves last wins regardless of which one actually fired
+    // second, which can briefly render an earlier window after a later one -- visible as
+    // the chart jumping backward mid-Play. One in-flight advance at a time, full stop.
+    if (btAdvanceInFlight) return;
+    btAdvanceInFlight = true;
+    try {
+        await btAdvanceImpl();
+    } finally {
+        btAdvanceInFlight = false;
+    }
+}
+async function btAdvanceImpl() {
     const res = await btApi('backtest_advance', 'POST', { session_id: btActiveSessionId, display_timeframe: btDisplayTimeframe });
     if (!res || res.error) { toast('Advance failed — ' + (res ? res.error : 'unknown error'), 'error'); stopBtAutoplay(); return; }
 
@@ -1385,7 +1504,7 @@ async function btRewind() {
     // the briefing) -- reset() then re-push is the only implementation that satisfies
     // that, same procedure a plain session open/resume already uses.
     await btRebuildGate1FromScratch();
-    await btLoadCandleWindow();
+    await btLoadCandleWindow(true);
 }
 
 function toggleBtAutoplay() {

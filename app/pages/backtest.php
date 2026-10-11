@@ -141,8 +141,13 @@
       <div class="tf-group">
         <button class="btn btn-ghost btn-sm" onclick="btRewind()" title="Prev bar">◂ Prev Bar</button>
         <button class="btn btn-ghost btn-sm" onclick="btAdvance()" title="Next bar">Next Bar ▸</button>
-        <!-- v3.20.11: "Jump to Latest" removed -- a replay whose cursor is already the
-             latest visible point has nothing to jump to. -->
+        <!-- v3.26.0 — reintroduced ("Jump to Latest" was removed in v3.20.11 on the
+             reasoning that every step re-centers anyway). That's no longer true: the
+             trader can now pan/zoom the chart manually, which pauses auto-follow
+             (js/backtest.js::btOnVisibleRangeChange()) so a step doesn't yank their view
+             back -- this is the one way back. Hidden by default, shown only while
+             auto-follow is paused (btSyncJumpToLatestButton()). -->
+        <button class="btn btn-ghost btn-sm" id="bt-jump-latest-btn" onclick="btJumpToLatest()" title="Resume following the replay cursor" style="display:none">⏭ Jump to Latest</button>
         <select id="bt-replay-speed" style="width:auto;min-width:70px" title="Auto-play speed">
           <option value="1" selected>1x</option><option value="2">2x</option><option value="5">5x</option><option value="10">10x</option>
         </select>

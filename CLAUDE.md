@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-10 (v3.25.0 — FSA Gate 1 indicator settings dialog in Backtesting)
+**Last Updated:** 2026-10-11 (v3.26.0 — fixed-spacing replay chart + auto-follow pause/Jump to Latest in Backtesting)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.25.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.26.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -179,6 +179,45 @@ replay side-by-side with the real TradingView indicator (same standing limitatio
 v3.24.0/v3.24.1), and a real browser login/logout settings-persistence round trip — the
 harness's own proof (`drive-v3250.mjs`) is a full page reload against the mock, which
 exercises the same server-round-trip mechanism but isn't a real login.
+
+**Fixed-spacing replay chart + auto-follow (v3.26.0).** Fixes candle spacing changing
+mid-replay. Root cause wasn't drift during a plain, hands-off Play/Next Bar (a direct
+30-bar probe against the pre-fix code showed bar spacing already numerically stable
+there) — it was that the per-step `setVisibleLogicalRange()` call (`btSetVisibleRange()`,
+removed this release) had no notion of the trader having manually zoomed/panned, so the
+very next step yanked the view straight back to the fixed window, which is what actually
+reads as "stretching." `btApplyFixedTimeScaleOnce()` now sets `barSpacing`/`rightOffset`
+as real `timeScale` options exactly once, on session open/resume/rewind/display-timeframe
+switch (`btLoadCandleWindow()`'s new `resetView` param — `false`, the default, on a plain
+`btAdvance()`); every step after that only ever calls `btScrollToLive()`
+(`scrollToPosition(BT_RIGHT_MARGIN_BARS, …)` — confirmed directly against this exact
+Lightweight Charts build that a POSITIVE value is "margin to the right of the latest bar"
+and that `scrollPosition()`'s own zero is flush against the edge, NOT already offset by
+`rightOffset`), and only while `btAutoFollow` is true. Panning/zooming the chart by hand
+sets `btAutoFollow = false` (`btOnVisibleRangeChange()`, subscribed once — comparing
+`scrollPosition()`/`barSpacing` against their own just-applied targets, same inference
+technique `btMaybeNudgeAutoScale()` already established for the price axis); a step while
+paused leaves the view untouched. The reintroduced "Jump to Latest" button
+(`pages/backtest.php`, removed in v3.20.11 on since-invalidated reasoning) resumes it —
+deliberately an instant `scrollToPosition(…, false)`, not animated: an animated scroll
+fires the same range-change event on every in-between frame, each of which would
+otherwise read as "not at the live edge" and re-pause auto-follow mid-animation, fighting
+the button that's supposed to resume it. Also fixed in the same release: a resize-
+ordering bug where `resizeTvChart()` ran AFTER the first fixed-spacing computation on
+session open (so that computation could read a stale/transitional container width, then
+the canvas resized afterward without re-fitting); a `toggleBtAutoplay()` race where two
+overlapping `btAdvance()` calls under real latency could render an earlier window after a
+later one; and `chart.js`'s own plain-browsing `loadOlderCandles()` pagination no longer
+fires during an active backtest session, where it isn't replay-aware and could grow/
+corrupt the fixed lead-in window. Investigated and confirmed already correct, no change
+needed: drawing anchors (`{time, price}`, converted to pixels fresh every render via
+`btTimeToX()`/`btPriceToY()`, never pixels, never clamped off-screen); future candles are
+never in the dataset (`BacktestController::getCandles()`'s own `replay_cursor_ms` clamp);
+the price axis's `autoscaleInfoProvider` already derives its natural range from
+Lightweight Charts' own visible-bars computation. Not yet verified from this environment:
+a real mouse-driven pan/zoom in an actual browser (the dev-time probes drove the
+Lightweight Charts API directly, not real pointer events) and the full acceptance
+scenario (BTCUSDT 1H at Apr 08 18:00, Play at 1x for 30 bars) against live data.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -676,7 +715,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.25.0
+Current Version: v3.26.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

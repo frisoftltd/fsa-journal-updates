@@ -94,10 +94,29 @@ function fromDisplaySeconds(displaySec, tz) {
 }
 
 // ── RENDERING ────────────────────────────────────────────
+// v3.27.0 — confirmed via a direct Lightweight Charts repro (not guessed): a "fall back"
+// DST transition in a non-UTC display timezone (e.g. America/New_York every November)
+// makes toDisplaySeconds() produce the SAME shifted second for two different real UTC
+// candles -- 01:00-02:00 local happens twice that one night, and both hours' candles
+// shift onto it. series.setData() requires strictly ascending `time` values; fed a
+// collision, it throws internally ("Value is null") and renders nothing at all -- this
+// is the real cause of the reported "blank 1H view after ~900 bars" (coincidental to
+// whichever November a given session's own date range happens to cross in the trader's
+// own browser timezone, which is why it wasn't reproducible against this harness's
+// UTC-default headless browser until the display timezone was forced to a DST-observing
+// one). Fixed here, the one place every candle array is converted before setData(): each
+// shifted second is clamped to strictly exceed the previous one, nudging forward by
+// whole seconds only during that one real-world hour of ambiguity a year -- the display
+// label is cosmetic only (every value that leaves this file toward the API is real UTC,
+// per this file's own header comment), so a one-second nudge there is not a real-money
+// concern, only a rendering one.
 function candlesToSeriesData(candles, tz) {
     const bars = [], vols = [];
+    let lastT = -Infinity;
     for (const c of candles) {
-        const t = toDisplaySeconds(c.time, tz);
+        let t = toDisplaySeconds(c.time, tz);
+        if (t <= lastT) t = lastT + 1;
+        lastT = t;
         bars.push({ time: t, open: c.open, high: c.high, low: c.low, close: c.close });
         vols.push({
             time: t, value: c.volume,
@@ -200,16 +219,28 @@ async function loadOlderCandles() {
         const addedCount = rows.length;
         chartState.candles = rows.map(rowToCanonical).concat(chartState.candles);
 
+        // v3.27.0 — js/backtest.js's own memory cap (btEnforceCandleCap()), present only
+        // during an active backtest session (this function is also used by this file's
+        // own, currently-unreachable plain "Chart" page, which has no such cap and
+        // doesn't define it): an extended scroll-back session can't grow the array
+        // forever either. Computed from whatever the chart's CURRENT (pre-render, i.e.
+        // still pre-prepend) visible range reports -- prepending at the front never
+        // shifts where the front itself sits relative to that read, so this stays
+        // correct without needing its own copy of the addedCount math.
+        const trimmed = (typeof btEnforceCandleCap === 'function') ? btEnforceCandleCap() : 0;
+        const netShift = addedCount - trimmed;
+
         // Preserve scroll position across a prepend: Lightweight Charts' logical range
         // is a 0-based bar index into the series' current data array. Prepending N
-        // older bars shifts every existing bar's index by +N, so the previously visible
-        // window has to be shifted by the same amount or the view jumps.
+        // older bars (minus however many the cap above just trimmed back off the same
+        // front) shifts every existing bar's index by that net amount, so the
+        // previously visible window has to be shifted by it too or the view jumps.
         const prevRange = tvChart.timeScale().getVisibleLogicalRange();
         renderChartData();
         if (prevRange) {
             tvChart.timeScale().setVisibleLogicalRange({
-                from: prevRange.from + addedCount,
-                to: prevRange.to + addedCount,
+                from: prevRange.from + netShift,
+                to: prevRange.to + netShift,
             });
         }
     } finally {
@@ -295,12 +326,17 @@ function initTvChart() {
 
     tvChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
         if (!range) return;
-        // v3.26.0 — never during an active backtest session: it manages its own fixed-
-        // size lead-in window (js/backtest.js::btLoadCandleWindow()), and this plain-
-        // chart pagination would prepend candles outside that window, growing
-        // chartState.candles past what the next replay step expects and fighting the
-        // replay's own fixed bar spacing.
-        if (range.from < 10 && typeof window.btFetchCandlesOverride !== 'function') loadOlderCandles();
+        // v3.26.0 disabled this during an active backtest session entirely, on the
+        // reasoning that js/backtest.js managed its own fixed-size lead-in window and
+        // this would fight it. v3.27.0 turns it back on: backtest sessions now keep
+        // loaded history across ticks instead of replacing it (btLoadCandleWindow()'s
+        // tail-merge path) and have their own memory cap (btEnforceCandleCap()), so
+        // scroll-back paging through real history during replay is exactly what this
+        // briefing asks for -- fetchCandles() already routes through
+        // window.btFetchCandlesOverride (set by backtest.js for an active session),
+        // which still goes through get_backtest_candles' own server-side no-lookahead
+        // clamp like every other fetch in this app.
+        if (range.from < 10) loadOlderCandles();
     });
 
     // v3.26.1 — fitContent() must never run during an active backtest session: it

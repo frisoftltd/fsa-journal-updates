@@ -515,6 +515,15 @@ const BT_INITIAL_VISIBLE_BARS = 100;
 // v3.20.10 — empty bars of room to the right of the replay cursor, TradingView-replay
 // style: the cursor sits left-of-center in its window, not pinned at the right edge.
 const BT_RIGHT_MARGIN_BARS = 20;
+// v3.27.0 — how many bars a plain advance's tail fetch asks for. Normally only ONE of
+// these is actually new (or, viewing a display timeframe coarser than the replay clock,
+// zero -- the still-forming bar just gets replaced in place): this is headroom, not an
+// expected count, so a rare multi-bar jump still merges correctly in one request.
+const BT_TAIL_FETCH_BARS = 5;
+// v3.27.0 — a sanity bound against unbounded growth over a very long Play session or an
+// aggressive scroll-back, not a tight memory budget (a few thousand plain OHLCV objects
+// is trivial). See btEnforceCandleCap().
+const BT_MAX_LOADED_BARS = 5000;
 
 async function btFetchCandles(before, limit) {
     const tf = btDisplayTimeframe || (btSession ? btSession.replay_timeframe : '1H');
@@ -523,6 +532,78 @@ async function btFetchCandles(before, limit) {
     const res = await btApi(action);
     if (res && res.error) { toast('Failed to load candles — ' + res.error, 'error'); return []; }
     return (res && Array.isArray(res.candles)) ? res.candles : [];
+}
+
+function btRowToCandle(r) {
+    return { time: r.time, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume };
+}
+
+/**
+ * v3.27.0 — "keep loaded history across ticks" (see this release's own briefing): merges
+ * a small tail fetch into the EXISTING chartState.candles array instead of discarding
+ * whatever the trader has scrolled back to. freshRows is ascending by time, the most
+ * recent BT_TAIL_FETCH_BARS real candles ending at the cursor. Matched against the
+ * current last loaded candle's own time: an EQUAL time replaces it in place (the
+ * still-forming display-timeframe bar filling in further, same synthesis
+ * BacktestController::getCandles() already does -- not a new bar yet), a GREATER time
+ * appends it (a real new bar), anything older is ignored (can't happen on a forward
+ * tick, defensive only). A gap between the two (candle_sync lag, a rare skipped tick)
+ * just renders as a visual gap -- Lightweight Charts only requires strictly ascending
+ * time, never perfectly contiguous bars.
+ */
+function btMergeCandleTail(existing, freshRows) {
+    if (!existing.length) return freshRows.map(btRowToCandle);
+    const merged = existing.slice();
+    for (const r of freshRows) {
+        const row = btRowToCandle(r);
+        const lastTime = merged[merged.length - 1].time;
+        if (row.time === lastTime) merged[merged.length - 1] = row;
+        else if (row.time > lastTime) merged.push(row);
+    }
+    return merged;
+}
+
+/**
+ * v3.27.0 — "a memory cap on loaded bars, trimming from the far-left only when needed."
+ * Called after every candle-array growth (a plain advance's tail merge, or chart.js's
+ * loadOlderCandles() scroll-back prepend), so the cap self-enforces regardless of which
+ * direction grew it. Only ever trims what's safely outside the CURRENTLY VISIBLE range
+ * (plus a buffer) -- while following the replay cursor, old history is always off-screen
+ * so trimming is unconditionally safe; while the trader has scrolled back into old
+ * history, the visible range sits right where the cap would otherwise cut, so this
+ * computes a safe trim of 0 and simply lets the array grow a little past the cap rather
+ * than ever disturbing what's on screen. Returns how many bars were actually trimmed, so
+ * the caller can shift the visible logical range by the same amount in the same tick
+ * (same "shift, don't refit" convention js/chart.js's own loadOlderCandles() already
+ * uses after a prepend) -- never a reason to touch bar spacing.
+ */
+function btEnforceCandleCap() {
+    const excess = chartState.candles.length - BT_MAX_LOADED_BARS;
+    if (excess <= 0) return 0;
+    const BT_TRIM_SAFETY_BARS = 50;
+    let visFrom = 0;
+    if (tvChart) {
+        try {
+            const range = tvChart.timeScale().getVisibleLogicalRange();
+            if (range) visFrom = range.from;
+        } catch (e) { /* chart not ready yet */ }
+    }
+    const safeTrim = Math.min(excess, Math.max(0, Math.floor(visFrom) - BT_TRIM_SAFETY_BARS));
+    if (safeTrim <= 0) return 0;
+    chartState.candles = chartState.candles.slice(safeTrim);
+    chartState.exhaustedOlder = false; // trimmed data is reachable again via a fresh scroll-back fetch
+    return safeTrim;
+}
+
+/** Shared bookkeeping both the full-reset and tail-merge paths below need -- split out
+ *  so neither can drift out of sync with the other about what counts as "this session's
+ *  current symbol/timeframe/blind-mode," independent of how the candles themselves were
+ *  loaded this call. */
+function btSyncChartStateMeta() {
+    chartState.symbol = btSession ? btSession.symbol : null;
+    chartState.timeframe = btDisplayTimeframe || (btSession ? btSession.replay_timeframe : '1H');
+    chartState.timezone = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    chartState.blindMode = !!(btSession && btSession.blind_mode);
 }
 
 /**
@@ -534,32 +615,42 @@ async function btFetchCandles(before, limit) {
  * many bars are requested or what timeframe is displayed -- this only changes how much
  * HISTORY is requested, never what's allowed after the replay point.
  *
- * If the session's start date has fewer than BT_LEAD_IN_BARS candles behind it (e.g. it
- * starts at the very earliest bar this symbol/timeframe has at all), the server simply
- * returns however many actually exist -- no error, per the requirement -- and
- * exhaustedOlder correctly ends up true so loadOlderCandles() doesn't waste a request
- * trying to fetch history that was never there.
- *
  * resetView (true on open/resume/rewind/display-timeframe switch, false on a plain
  * advance): whether this load is allowed to touch bar spacing / re-fit the time scale at
  * all. v3.26.0 — this is the fix for candle spacing changing mid-replay: a plain advance
  * never calls anything that can resize a bar, and only scrolls to the live edge (and only
  * while btAutoFollow is true -- see btOnVisibleRangeChange()) instead of re-fitting a
- * range every step.
+ * range every step. v3.27.0 — a plain advance (resetView=false) no longer re-fetches and
+ * replaces the whole BT_LEAD_IN_BARS+1 window either: it merges just the tail
+ * (btMergeCandleTail()) into whatever's already loaded, so a trader who has scrolled
+ * back into real history keeps seeing it through every subsequent tick instead of it
+ * being discarded on the very next one. Only a genuinely fresh window (open/resume/
+ * rewind/display-timeframe switch -- moments where "start from the live edge" is already
+ * the correct, expected behavior) does a full replace.
  */
 async function btLoadCandleWindow(resetView = false) {
-    const rows = await btFetchCandles(null, BT_LEAD_IN_BARS + 1);
-    chartState.candles = rows.map(r => ({ time: r.time, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }));
-    chartState.exhaustedOlder = rows.length < (BT_LEAD_IN_BARS + 1);
-    chartState.symbol = btSession ? btSession.symbol : null;
-    chartState.timeframe = btDisplayTimeframe || (btSession ? btSession.replay_timeframe : '1H');
-    chartState.timezone = chartState.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    chartState.blindMode = !!(btSession && btSession.blind_mode);
-    if (typeof renderChartData === 'function') renderChartData();
     if (resetView) {
+        const rows = await btFetchCandles(null, BT_LEAD_IN_BARS + 1);
+        chartState.candles = rows.map(btRowToCandle);
+        chartState.exhaustedOlder = rows.length < (BT_LEAD_IN_BARS + 1);
+        btSyncChartStateMeta();
+        if (typeof renderChartData === 'function') renderChartData();
         btApplyFixedTimeScaleOnce();
-    } else if (btAutoFollow) {
-        btScrollToLive(false);
+    } else {
+        const rows = await btFetchCandles(null, BT_TAIL_FETCH_BARS);
+        if (rows.length) chartState.candles = btMergeCandleTail(chartState.candles, rows);
+        btSyncChartStateMeta();
+        const trimmed = btEnforceCandleCap();
+        if (typeof renderChartData === 'function') renderChartData();
+        if (trimmed > 0 && tvChart) {
+            // Shift, not refit -- keeps whatever's currently on screen in exactly the
+            // same place; redundant (but harmless) when btScrollToLive() runs right
+            // after below, since that repositions by edge-relative scrollPosition, not
+            // absolute index.
+            const r = tvChart.timeScale().getVisibleLogicalRange();
+            if (r) tvChart.timeScale().setVisibleLogicalRange({ from: r.from - trimmed, to: r.to - trimmed });
+        }
+        if (btAutoFollow) btScrollToLive(false);
     }
     // v3.21.0 — drawings are anchored to real time+price, not pixels or a bar's logical
     // index into this array, so a full replace of chartState.candles (which is exactly
@@ -938,6 +1029,11 @@ function btOnVisibleRangeChange() {
     if (following !== btAutoFollow) {
         btAutoFollow = following;
         btSyncJumpToLatestButton();
+        // v3.27.0 — a transition back to following (the trader scrolled/zoomed back to
+        // exactly the live position by hand, same as clicking Jump to Latest) must start
+        // the price-axis stabilizer clean, not carrying forward whatever range was last
+        // computed while panned away to a totally different part of history.
+        if (following) btResetPriceRangeStabilizer();
     }
 }
 
@@ -954,6 +1050,11 @@ function btJumpToLatest() {
     btAutoFollow = true;
     btScrollToLive(false);
     btSyncJumpToLatestButton();
+    // v3.27.0 — btAutoFollow is already true by the time the resulting range-change
+    // event reaches btOnVisibleRangeChange() above (set on the line above, not by that
+    // handler), so its own "reset on a transition to following" never fires for this
+    // path specifically -- reset explicitly here instead, same reasoning.
+    btResetPriceRangeStabilizer();
 }
 
 function btSyncJumpToLatestButton() {
@@ -1120,6 +1221,16 @@ function btInstallPriceRangeStabilizer() {
         autoscaleInfoProvider: (original) => {
             const res = original();
             if (!res || !res.priceRange) return res;
+            // v3.27.0 — "refit the price axis to the visible candles when the user
+            // scrolls or jumps." The widen-only union below only makes sense while
+            // actively following the replay cursor (that's what stops the vertical
+            // bounce on every step); holding onto a range built from whatever was last
+            // visible BEFORE a manual pan is exactly what stretched the axis once the
+            // trader scrolled to a different part of history. While not following,
+            // original() above already recomputes fresh every frame from whatever's
+            // actually on screen -- Lightweight Charts' own natural per-visible-range
+            // autoscale -- so just pass it straight through, no stored state involved.
+            if (!btAutoFollow) return res;
             const natural = res.priceRange;
             const pad = Math.max((natural.maxValue - natural.minValue) * 0.08, Math.abs(natural.maxValue) * 0.001, 0.0001);
             let desiredMin = natural.minValue - pad;

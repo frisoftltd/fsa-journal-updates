@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-12 (v3.26.1 — double-click on the replay chart no longer re-fits during an active session)
+**Last Updated:** 2026-10-12 (v3.27.0 — Backtesting replay keeps history across ticks, scroll-back loading restored, DST blank-chart bug fixed)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.26.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.27.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -243,6 +243,46 @@ precedence, untouched). The next, separate piece of the original briefing — le
 trader scroll back through real history during replay without a tick discarding what's
 already loaded — is deliberately **not** part of this release; see that section's own
 notes once it ships.
+
+**1H replay history scroll-back (v3.27.0).** This is that promised separate release.
+`btLoadCandleWindow(resetView)` now branches: `true` (open/resume/rewind/display-
+timeframe switch) still does the original full replace; `false` (a plain advance) fetches
+just `BT_TAIL_FETCH_BARS=5` candles and merges them into the EXISTING
+`chartState.candles` via `btMergeCandleTail()` (a fetched row's time equal to the current
+last loaded candle replaces it in place — the still-forming display-timeframe bar filling
+in further, matching `BacktestController::getCandles()`'s own partial-bar synthesis
+exactly — a greater time appends it) instead of discarding everything the trader has
+scrolled back to on every single tick. `js/chart.js`'s `loadOlderCandles()` (scroll-back
+pagination, disabled entirely for an active session in v3.26.0) is re-enabled — it
+already routed through `window.btFetchCandlesOverride` → `get_backtest_candles`, so
+re-enabling it is exactly "scroll-back loading, still clamped server-side to the replay
+cursor" with no new endpoint needed. `btEnforceCandleCap()` (5000-bar cap) trims from the
+front only when safely outside the current visible range (visible `from` minus a 50-bar
+buffer) — unconditionally safe during an active Play run (old history is always
+off-screen), computes a safe trim of 0 and defers while the trader has scrolled back into
+real history, never disturbing what's on screen. The price axis's existing "no vertical
+bounce" widen-only stabilizer (`btInstallPriceRangeStabilizer()`, v3.20.10) now only
+applies while `btAutoFollow` is true — panned away, it passes Lightweight Charts' own
+natural per-frame autoscale straight through instead of holding a range built from a
+different part of history, and `btResetPriceRangeStabilizer()` fires on every transition
+back to following so the next live-edge view starts clean. Root-caused the reported
+"blank 1H view after ~900 bars" via a direct Lightweight Charts repro, not guessed: a DST
+"fall back" transition in the trader's own display timezone (e.g. America/New_York every
+November) makes `toDisplaySeconds()` (`js/chart.js`) produce the identical shifted second
+for two different real UTC candles — confirmed to throw inside `series.setData()` and
+blank the chart entirely. Fixed in `candlesToSeriesData()`, the one place every candle
+array converts before `setData()` — each shifted second is clamped to strictly exceed the
+previous one. A competing theory (a sparse/gapped server response collapsing the chart)
+was investigated and ruled out by reading `BacktestController::fetchStoredCandles()`'s
+actual SQL — it's a row-count `LIMIT`, not a time-window one, so a real data gap just
+reaches further back in calendar time for the same row count. Verified end-to-end
+(`tools/ui-harness/drive-v3270.mjs`, 12 pre-existing drivers unedited): Play ~900 bars
+with bar spacing/auto-follow sampled at every 100-bar checkpoint, a real mouse-drag
+scroll-back far enough to actually trigger `loadOlderCandles()`, a drawing's anchors
+confirmed byte-identical and still rendering over its own real candles throughout, the
+price axis confirmed in the same ballpark as the actually-visible candles, and Jump to
+Latest confirmed still working afterward. Not yet verified from this environment: a real
+double-click/drag against real BTCUSDT 1H data on the live site.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -740,7 +780,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.26.1
+Current Version: v3.27.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

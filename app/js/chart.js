@@ -303,7 +303,22 @@ function initTvChart() {
         if (range.from < 10 && typeof window.btFetchCandlesOverride !== 'function') loadOlderCandles();
     });
 
-    container.addEventListener('dblclick', () => tvChart.timeScale().fitContent());
+    // v3.26.1 — fitContent() must never run during an active backtest session: it
+    // throws away the fixed bar spacing the replay deliberately locks in
+    // (js/backtest.js::btApplyFixedTimeScaleOnce()), which is exactly the "chart
+    // stretches" bug v3.26.0 fixed for Play/Next Bar/Rewind -- a double-click on the
+    // chart was a second, separate way to trigger the same symptom that release missed.
+    // A double-click here does what Jump to Latest does instead: restore the fixed
+    // spacing, resume auto-follow, scroll to the live edge, no fit. Plain chart
+    // browsing (this file's own "Chart" page -- currently unreachable from any route,
+    // see this file's header comment) keeps the original reset-to-fit behavior.
+    container.addEventListener('dblclick', () => {
+        if (typeof window.btFetchCandlesOverride === 'function' && typeof btJumpToLatest === 'function') {
+            btJumpToLatest();
+        } else {
+            tvChart.timeScale().fitContent();
+        }
+    });
 
     // Sidebar collapse/expand (js/app.js::toggleSidebarCollapse()) changes .main's
     // margin-left, which changes #tv-chart's actual pixel width — listened for here,

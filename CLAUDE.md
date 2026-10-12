@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-11 (v3.26.0 — fixed-spacing replay chart + auto-follow pause/Jump to Latest in Backtesting)
+**Last Updated:** 2026-10-12 (v3.26.1 — double-click on the replay chart no longer re-fits during an active session)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.26.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.26.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -218,6 +218,31 @@ Lightweight Charts' own visible-bars computation. Not yet verified from this env
 a real mouse-driven pan/zoom in an actual browser (the dev-time probes drove the
 Lightweight Charts API directly, not real pointer events) and the full acceptance
 scenario (BTCUSDT 1H at Apr 08 18:00, Play at 1x for 30 bars) against live data.
+
+**Double-click re-fit fix (v3.26.1).** A real-browser Playwright re-verification of
+v3.26.0 found a second trigger for the same "chart stretches" symptom that release's own
+audit missed: `js/chart.js`'s `initTvChart()` wires `container.addEventListener('dblclick',
+…)` unconditionally on `#tv-chart`, calling `fitContent()` — reachable during an active
+backtest session (the container is shared), and never gated the way the file's
+`subscribeVisibleLogicalRangeChange` handler already was. Fixed: the handler now checks
+the same `window.btFetchCandlesOverride` signal and calls `btJumpToLatest()` instead
+during an active session — restores the fixed bar spacing, resumes auto-follow, scrolls
+to the live edge, never fits. Falls through to the original `fitContent()` otherwise.
+Full audit of every other `fitContent()`/`setVisibleLogicalRange()`/`setVisibleRange()`
+call site in `chart.js` (per the briefing): all of them — `loadInitialWindow()`'s own
+`fitContent()`, `resetChartZoom()`, `onChartTimeframeChange()`'s `setVisibleRange()`
+fallback, `onChartTimezoneChange()`'s `fitContent()` — belong to this file's own
+standalone "Chart" page, which has had **zero** route/button/element wiring to reach it
+since the v3.20.0 Chart→Backtesting rename (confirmed by tracing every caller, not
+assumed — `resetChartZoom()` specifically has zero callers anywhere in the repo). No
+change needed there. Verified via new `tools/ui-harness/drive-v3261.mjs` (real mouse
+events): double-click on empty chart area is a no-op on spacing; double-click after a
+manual pan acts exactly like Jump to Latest; double-click on an existing drawing still
+opens its settings popover (pre-existing `btOnDrawDblClick()` `stopPropagation()`
+precedence, untouched). The next, separate piece of the original briefing — letting the
+trader scroll back through real history during replay without a tick discarding what's
+already loaded — is deliberately **not** part of this release; see that section's own
+notes once it ships.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -715,7 +740,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.26.0
+Current Version: v3.26.1
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-19 (v3.27.1 — Bitfunded import lot_size overflow on micro-cap coins fixed, price precision widened, tiny-price display fixed)
+**Last Updated:** 2026-10-19 (v3.27.2 — Risk Ladder editor added, new-challenge ladder seeding required, Calculator manual-risk-% fallback, migrate.php status view surfaces past failures)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.27.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.27.2 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -284,6 +284,63 @@ price axis confirmed in the same ballpark as the actually-visible candles, and J
 Latest confirmed still working afterward. Not yet verified from this environment: a real
 double-click/drag against real BTCUSDT 1H data on the live site.
 
+### Risk Ladder Editor (v3.27.2)
+
+Before this release, `risk_ladder_tiers` was write-only through hand-run migrations —
+`ChallengeController::add()` never inserted a row for a new challenge, and no controller
+or UI ever wrote to the table at all, which is why only challenge 6 (Bitfunded Altcoin)
+ever had an active ladder and every other challenge's Risk Calculator showed `—` for
+Risk %/Risk $/Position/Margin/Stops to Fail (all cascade from
+`helpers.php::ladderTierForBalance()` returning `null` on zero active rows for that
+`challenge_id`). Fixed on both ends:
+
+**New challenge creation** now requires one typed risk % — no hidden default —
+seeded as a single `$0+` open-ended tier in the same transaction as the `challenges`
+insert (`ChallengeController::add()`). A challenge can no longer exist with zero ladder
+rows.
+
+**Risk Ladder editor** (`modals/challenge-modal.php`'s `#ch-ladder-editor-wrap`, shown
+only when editing an existing challenge — a brand-new one shows the single required-%
+field instead, `#ch-seed-ladder-wrap`) — add/remove tiers via `+ Add Tier`/🗑;
+`lower_balance` is never typed, it's always derived from the previous tier's
+`upper_balance` (`js/challenges.js::renderLadderEditorRows()`), which makes a gap or
+overlap impossible to create in the UI rather than just caught on save.
+`ChallengeController::saveLadder()` validates server-side too
+(`validateLadderTiers()`): no gaps, no overlaps, first tier starts at exactly `$0`, only
+the last tier may be open-ended, `0 < risk_pct <= 10`. Saving deactivates the previous
+active rows and inserts the new ones — same `active=0` history pattern challenge 6's own
+rows 1-3 already established by hand — and never touches any other challenge's rows.
+An empty tier list is a valid, deliberate "clear the ladder back to unconfigured" save,
+not an error.
+
+**Calculator fallback** (`CalculatorController::autoRiskPreview()`'s new
+`manual_risk_pct` param, `js/calculator.js`) — when a challenge has zero active tiers,
+the Risk % field becomes a clearly-labelled, editable input instead of staying blank
+forever; typed fresh every time, same one-shot convention as Leverage/Entry Price on the
+same panel, never persisted to `risk_ladder_tiers`. A real ladder tier always takes
+priority when one exists — `risk_pct_source` (`'ladder'`/`'manual'`/`null`) in the
+response is what the "(manual %)" tag on the Risk output reads.
+
+Deliberately **not** done this release: hyrotrader trial, Bitfunded BTC, and Bitfunded
+tradefi were NOT auto-filled with any ladder — their tiers stay empty until set through
+this editor. Challenge 6's own $9,250/$9,500 thresholds (tied to Altcoin's specific
+balance/drawdown limits) were not copied onto any other challenge.
+
+**Migration-runner note from the same investigation**: `migrate.php`'s `mode=run` was
+already confirmed correct on both counts the briefing suspected — it never marks a
+migration `applied` unless every statement in it succeeded, and a SQL error was already
+captured in `schema_migrations.error_message` and shown in that run's own result list.
+The real, narrower gap: a migration that failed on a *previous* run showed as plain
+"pending" on every *later* `mode=status` check, with no sign anything had gone wrong.
+Fixed directly — `mode=status` now shows "failed previously — retryable" plus the
+recorded error inline for exactly that case (`$pendingDetail` in `migrate.php`). Also
+confirmed independently: the live `risk_ladder_tiers` rows for challenge 6 (`$0–9,250 /
+$9,250–9,500 / $9,500+`) don't match the only migration that seeds them
+(`2026_09_19_0001`, which seeds `$0–9,500 / $9,500–10,000 / $10,000+`) — someone
+hand-corrected the live ladder at some point, bypassing migrations entirely, the same
+pattern as the `2026_10_19_0001` `lot_size` ALTER that had to be run by hand in
+phpMyAdmin. No migration file in this repo reproduces the live ladder's real thresholds.
+
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
 ### The Core Principle
@@ -397,7 +454,10 @@ trades: id, user_id, challenge_id, trade_date, session, time_in, time_out, pair,
 
 pairs: id, user_id, symbol, active
 risk_ladder_tiers: id, challenge_id, lower_balance, upper_balance (NULL = "and above"),
-  risk_pct, active, created_at — lookup is lower-inclusive, upper-exclusive.
+  risk_pct, active, created_at — lookup is lower-inclusive, upper-exclusive. Editable via
+  ChallengeController::getLadder()/saveLadder() (v3.27.2, see below) — before that
+  release this table was write-only through hand-run migrations, which is why only
+  challenge 6 ever had rows.
 challenge_limits: id, challenge_id, max_trades_day, max_trades_week, max_losses_day,
   daily_loss_usd, created_at — one row per challenge (UNIQUE), every column independently
   nullable ("not tracked", never a zero meaning "no trades allowed").
@@ -549,7 +609,7 @@ File uploads go through `fetch()` directly with `FormData`.
 | Domain | Key actions |
 |--------|-------------|
 | Profile | `get_user`, `update_profile`, `update_settings` |
-| Challenges | `get_challenges`, `get_active_challenge`, `add_challenge`, `update_challenge`, `delete_challenge`, `switch_challenge` |
+| Challenges | `get_challenges`, `get_active_challenge`, `add_challenge`, `update_challenge`, `delete_challenge`, `switch_challenge`, `get_ladder_tiers`, `save_ladder_tiers` |
 | Trades | `get_trades`, `add_trade`, `update_trade`, `delete_trade` |
 | Stats / Alerts | `get_stats`, `get_alerts` |
 | Calculator | `calculate_risk` (legacy, unused by current UI), `size_preview`, `auto_risk_preview`, `get_risk_status` |
@@ -785,7 +845,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.27.1
+Current Version: v3.27.2
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

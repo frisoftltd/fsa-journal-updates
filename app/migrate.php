@@ -72,6 +72,15 @@ $stmt->closeCursor();
 $mismatches = []; // filename => [expected, actual]
 $pending    = []; // filename => full path
 $settled    = []; // filename => row (applied/baselined, checksum ok)
+// v3.27.2 — a migration that failed on a PREVIOUS run has always been correctly
+// retryable (shows up in $pending below, unchanged), but mode=status used to report it
+// identically to a file that was never attempted at all -- the error_message
+// recordMigration() already wrote to schema_migrations on failure was only ever visible
+// at the exact moment it failed (mode=run's own $report['results']), not on any later
+// status check. That's the real "swallowed" gap this release closes: not that the error
+// was ever lost, but that checking status later couldn't see it. $pendingDetail carries
+// it through so renderReport() can show it on every status check, not just the first one.
+$pendingDetail = []; // filename => ['attempted' => bool, 'error' => string|null, 'failed_at' => string|null]
 
 foreach ($files as $path) {
     $filename = basename($path);
@@ -80,12 +89,14 @@ foreach ($files as $path) {
 
     if ($row === null) {
         $pending[$filename] = $path;
+        $pendingDetail[$filename] = ['attempted' => false, 'error' => null, 'failed_at' => null];
         continue;
     }
 
     if ($row['status'] === 'failed') {
         // A previously failed migration is retryable — content may have been fixed.
         $pending[$filename] = $path;
+        $pendingDetail[$filename] = ['attempted' => true, 'error' => $row['error_message'], 'failed_at' => $row['applied_at']];
         continue;
     }
 
@@ -103,12 +114,13 @@ foreach ($files as $path) {
 $blocked = !empty($mismatches);
 
 $report = [
-    'mode'       => $mode,
-    'blocked'    => $blocked,
-    'mismatches' => $mismatches,
-    'settled'    => $settled,
-    'pending'    => array_keys($pending),
-    'results'    => [], // per-file outcome when mode=run or mode=baseline
+    'mode'           => $mode,
+    'blocked'        => $blocked,
+    'mismatches'     => $mismatches,
+    'settled'        => $settled,
+    'pending'        => array_keys($pending),
+    'pending_detail' => $pendingDetail,
+    'results'        => [], // per-file outcome when mode=run or mode=baseline
 ];
 
 if ($mode === 'baseline' && !$blocked) {
@@ -349,7 +361,20 @@ Error: <?= htmlspecialchars($r['error']) ?></pre>
     <?php if (empty($report['pending'])): ?>
         <div class="muted" style="font-size:13px">Nothing pending.</div>
     <?php else: foreach ($report['pending'] as $filename): ?>
-        <div class="row"><span><?= htmlspecialchars($filename) ?></span><span class="warn">pending</span></div>
+        <?php $detail = $report['pending_detail'][$filename] ?? ['attempted' => false, 'error' => null, 'failed_at' => null]; ?>
+        <div class="row">
+            <span><?= htmlspecialchars($filename) ?></span>
+            <span class="<?= $detail['attempted'] ? 'fail' : 'warn' ?>"><?= $detail['attempted'] ? 'failed previously — retryable' : 'pending' ?></span>
+        </div>
+        <?php if ($detail['attempted']): ?>
+            <!-- v3.27.2 — this is the fix: a migration that failed on a past mode=run
+                 used to show as plain "pending" here with no sign anything ever went
+                 wrong, until the next mode=run re-surfaced it. The error survives in
+                 schema_migrations.error_message the whole time; this is just the first
+                 place mode=status actually shows it. -->
+            <pre>Last failed <?= htmlspecialchars($detail['failed_at'] ?? 'unknown time') ?>:
+<?= htmlspecialchars($detail['error'] ?? '(no error message recorded)') ?></pre>
+        <?php endif; ?>
     <?php endforeach; endif; ?>
 </div>
 

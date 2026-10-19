@@ -27,6 +27,36 @@
       <div class="form-group"><label>Default Leverage (x)</label><input type="number" step="0.01" id="ch-default_leverage" placeholder="e.g. 5"></div>
       <div class="form-group"><label>Status</label><select id="ch-status"><option value="active">Active</option><option value="completed">Completed</option><option value="failed">Failed</option></select></div>
     </div>
+
+    <!-- v3.27.2 — shown only for a brand-new challenge (no ch-id yet). There is no
+         default here on purpose: Risk Calculator showed "—" for every challenge except 6
+         because nothing ever wrote a risk_ladder_tiers row for a new challenge. This one
+         required field seeds exactly one open-ended ($0+) tier at save time
+         (ChallengeController::add()) — more tiers can be added afterward from the Risk
+         Ladder editor below, once the challenge exists. -->
+    <div class="form-group full" id="ch-seed-ladder-wrap" style="margin-top:4px">
+      <label>Initial Risk Ladder — Risk % <span style="color:var(--red)">*</span></label>
+      <input type="number" id="ch-seed-ladder-risk-pct" step="0.01" placeholder="e.g. 0.5">
+      <div style="font-size:11px;color:var(--text3);margin-top:4px">Applies from $0 with no upper limit — no default, you must type a value. Add more tiers later from Edit Challenge → Risk Ladder.</div>
+    </div>
+
+    <!-- v3.27.2 — shown only when editing an existing challenge (ch-id set). Reads/
+         writes risk_ladder_tiers directly via get_ladder_tiers/save_ladder_tiers,
+         deliberately decoupled from Save Challenge above — a mistake in one can't block
+         the other, and you can fix just the ladder without resubmitting every other
+         field. Saving replaces the active tiers and keeps the previous ones as active=0
+         history, same pattern as challenge 6's own rows 1-3. -->
+    <div id="ch-ladder-editor-wrap" style="display:none;margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <label style="margin:0">Risk Ladder</label>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="addLadderTierRow()">+ Add Tier</button>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Each tier's lower balance is set automatically from the one before it, so there's no gap or overlap to create by hand. Only the last tier can be open-ended.</div>
+      <div id="ch-ladder-rows"></div>
+      <div id="ch-ladder-error" style="color:var(--red);font-size:12px;margin-top:8px;display:none"></div>
+      <button type="button" class="btn btn-primary btn-sm" style="margin-top:10px" onclick="saveLadderTiers()">💾 Save Ladder</button>
+    </div>
+
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="document.getElementById('challenge-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary" onclick="saveChallenge()">Save Challenge</button>

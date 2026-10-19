@@ -162,6 +162,25 @@ class CalculatorController {
         $today = appTodayKigali();
         $balanceAtDayStart = balanceAtDayStart($db, $challengeId, $today);
         $riskPct = ladderTierForBalance($db, $challengeId, $balanceAtDayStart);
+
+        // v3.27.2 — Calculator fallback: a challenge with zero active risk_ladder_tiers
+        // rows (every challenge except 6, until its own ladder is set in Edit Challenge)
+        // used to leave risk_pct/risk_usd/position_usd/margin_usd/stops_to_fail all null
+        // forever, with no way to size a trade from this panel at all. manual_risk_pct is
+        // a one-shot, non-persisted override — same convention as stop_pct/leverage/entry
+        // above, typed fresh every time, never written back to risk_ladder_tiers. Only
+        // used when the ladder itself has nothing to say; a real ladder tier always wins.
+        $riskPctSource = null;
+        if ($riskPct !== null) {
+            $riskPctSource = 'ladder';
+        } else {
+            $manualRiskPct = (isset($d['manual_risk_pct']) && $d['manual_risk_pct'] !== '') ? (float)$d['manual_risk_pct'] : null;
+            if ($manualRiskPct !== null && $manualRiskPct > 0) {
+                $riskPct = $manualRiskPct;
+                $riskPctSource = 'manual';
+            }
+        }
+
         $currentBalance = challengeBalance($db, $challengeId);
 
         $riskUsd = $riskPct !== null ? round($currentBalance * $riskPct / 100, 2) : null;
@@ -184,6 +203,7 @@ class CalculatorController {
             'balance' => $currentBalance,
             'balance_at_day_start' => $balanceAtDayStart,
             'risk_pct' => $riskPct,
+            'risk_pct_source' => $riskPctSource,
             'stop_pct' => $stopPct,
             'leverage' => $leverage,
             'entry' => $entry,

@@ -30,6 +30,9 @@ function onCalcChallengeChange(){
     const id = document.getElementById('calc-challenge').value;
     const ch = _calcChallenges.find(c => c.id == id);
     document.getElementById('calc-leverage').value = (ch && ch.default_leverage !== null && ch.default_leverage !== undefined) ? ch.default_leverage : '';
+    // v3.27.2 — a manual risk % typed for one challenge's missing ladder has no reason
+    // to carry over to a different challenge, same reasoning as the leverage reset above.
+    document.getElementById('calc-risk-pct-manual').value = '';
     scheduleCalcUpdate();
 }
 
@@ -119,7 +122,7 @@ function renderOpenPositions(positions){
 function renderLadderTiers(tiers){
     const wrap = document.getElementById('calc-ladder-tiers');
     if (!tiers || !tiers.length) {
-        wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px 0">No ladder configured for this challenge yet.</div>';
+        wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px 0">No ladder configured for this challenge yet — set one in Edit Challenge → Risk Ladder, or enter Risk % manually below.</div>';
         return;
     }
     wrap.innerHTML = tiers.map(t => {
@@ -146,7 +149,7 @@ function renderCalcOutputs(r){
         return;
     }
     el.innerHTML = `
-        <div style="margin-bottom:12px"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Risk</div><div style="font-family:var(--font-head);font-size:28px;color:var(--red)">${r.risk_usd!=null?'$'+r.risk_usd.toFixed(2):'—'}</div></div>
+        <div style="margin-bottom:12px"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Risk${r.risk_pct_source==='manual'?' <span style="color:var(--orange)">(manual %)</span>':''}</div><div style="font-family:var(--font-head);font-size:28px;color:var(--red)">${r.risk_usd!=null?'$'+r.risk_usd.toFixed(2):'—'}</div></div>
         <div style="height:1px;background:var(--border);margin:12px 0"></div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;text-align:left">
             <div style="background:var(--bg3);border-radius:8px;padding:12px"><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Position</div><div style="font-family:var(--font-head);font-size:20px;color:var(--green)">${r.position_usd!=null?'$'+r.position_usd.toFixed(2):'—'}</div></div>
@@ -193,7 +196,17 @@ async function runCalcUpdate(){
     document.getElementById('calc-balance-day-start-display').textContent = 'Start of day (tier basis): $' + status.balance_at_day_start.toFixed(2);
     document.getElementById('calc-margin-in-use-display').textContent = '$' + status.margin_in_use.toFixed(2);
     document.getElementById('calc-available-margin-display').textContent = '$' + status.available_margin.toFixed(2);
+
+    // v3.27.2 — fallback: a challenge with zero active risk_ladder_tiers rows (every
+    // challenge except Bitfunded Altcoin, until its own ladder is set) showed "—" here
+    // and left every sizing output blank forever. Swap the auto display for a clearly-
+    // labelled editable input instead of leaving the trader stuck. A real ladder tier
+    // always takes priority — the manual input only appears when there genuinely is none.
+    const noLadder = !status.ladder_tiers || !status.ladder_tiers.length;
     const currentTier = (status.ladder_tiers || []).find(t => t.is_current);
+    document.getElementById('calc-risk-pct-label').textContent = noLadder ? 'Risk %' : 'Risk % (ladder, auto)';
+    document.getElementById('calc-risk-pct-display').style.display = noLadder ? 'none' : 'block';
+    document.getElementById('calc-risk-pct-manual-wrap').style.display = noLadder ? 'block' : 'none';
     document.getElementById('calc-risk-pct-display').textContent = currentTier ? currentTier.risk_pct + '%' : '—';
 
     // §3/§5: any limit reached hides only the stop%-dependent sizing numbers (risk,
@@ -215,7 +228,9 @@ async function runCalcUpdate(){
 
     const leverage = document.getElementById('calc-leverage').value;
     const entry = document.getElementById('calc-entry').value;
-    const r = await api('auto_risk_preview', 'POST', { challenge_id: challengeId, stop_pct: stopPct, leverage, entry });
+    const payload = { challenge_id: challengeId, stop_pct: stopPct, leverage, entry };
+    if (noLadder) payload.manual_risk_pct = document.getElementById('calc-risk-pct-manual').value;
+    const r = await api('auto_risk_preview', 'POST', payload);
     if (!r || r.error) { renderCalcOutputs(null); return; }
     renderCalcOutputs(r);
 }

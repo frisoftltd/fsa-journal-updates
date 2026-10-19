@@ -67,6 +67,27 @@ function openChallengeModal(data=null){
         document.getElementById('ch-default_leverage').value='';
         document.getElementById('ch-status').value='active';
     }
+
+    // v3.27.2 — the seed-ladder input (new challenge, one required tier) and the full
+    // Risk Ladder editor (existing challenge) are mutually exclusive: a brand-new
+    // challenge has no id to look tiers up against yet, and an existing one already has
+    // whatever add() seeded it with, so the "type one % and we seed it" flow never
+    // applies to it again.
+    const seedWrap = document.getElementById('ch-seed-ladder-wrap');
+    const editorWrap = document.getElementById('ch-ladder-editor-wrap');
+    document.getElementById('ch-ladder-error').style.display = 'none';
+    if (data) {
+        seedWrap.style.display = 'none';
+        editorWrap.style.display = 'block';
+        loadLadderEditor(data.id);
+    } else {
+        seedWrap.style.display = 'block';
+        editorWrap.style.display = 'none';
+        document.getElementById('ch-seed-ladder-risk-pct').value = '';
+        _ladderRows = [];
+        _ladderChallengeId = null;
+    }
+
     document.getElementById('challenge-modal').classList.add('open');
 }
 
@@ -82,7 +103,19 @@ async function saveChallenge(){
         data[k]=document.getElementById('ch-'+k)?.value||null;
     });
     if(!data.name){toast('Challenge name is required','error');return;}
-    if(id) data.id=id;
+    if(id){
+        data.id=id;
+    } else {
+        // v3.27.2 — no hidden default: add_challenge rejects a missing/zero value
+        // server-side too, but failing fast here with a clear message is friendlier
+        // than a round trip just to find out the one required field was left blank.
+        const seedPct = document.getElementById('ch-seed-ladder-risk-pct').value;
+        if (!seedPct || parseFloat(seedPct) <= 0) {
+            toast('Set the initial risk ladder % — it applies from $0 with no upper limit', 'error');
+            return;
+        }
+        data.ladder_risk_pct = seedPct;
+    }
     data.set_active=!id?true:false;
     const r=await api(id?'update_challenge':'add_challenge','POST',data);
     if(r.error){toast(r.error,'error');return;}
@@ -92,6 +125,86 @@ async function saveChallenge(){
     await refreshSidebarChallenges();
     currentUser=await api('get_user');
     if(!id) showPage('dashboard');
+}
+
+// ── RISK LADDER EDITOR (v3.27.2) ────────────────────────────
+// In-memory working copy of the challenge currently open in the modal's ladder editor.
+// Each row only ever stores upper_balance/risk_pct — lower_balance is never typed, it's
+// always derived from the previous row's upper (0 for row 0), which is what makes a gap
+// or overlap impossible to create in this editor rather than just caught on save.
+let _ladderRows = [];
+let _ladderChallengeId = null;
+
+async function loadLadderEditor(challengeId){
+    _ladderChallengeId = challengeId;
+    const r = await api('get_ladder_tiers&challenge_id=' + challengeId);
+    if (r.error) { _ladderRows = []; renderLadderEditorRows(); return; }
+    _ladderRows = (r.tiers || []).map(t => ({ upper_balance: t.upper_balance, risk_pct: t.risk_pct }));
+    renderLadderEditorRows();
+}
+
+function renderLadderEditorRows(){
+    const wrap = document.getElementById('ch-ladder-rows');
+    if (!_ladderRows.length) {
+        wrap.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:6px 0">No tiers yet — click + Add Tier.</div>';
+        return;
+    }
+    let lower = 0;
+    wrap.innerHTML = _ladderRows.map((r, i) => {
+        const rowLower = lower;
+        const isLast = i === _ladderRows.length - 1;
+        lower = isLast ? null : parseFloat(r.upper_balance || 0);
+        return `<div style="display:grid;grid-template-columns:90px 1fr 90px 32px;gap:8px;align-items:center;margin-bottom:6px">
+            <div style="font-family:var(--font-head);font-size:12px;color:var(--text3)">$${fmtNum(rowLower)}</div>
+            ${isLast
+                ? `<div style="font-size:12px;color:var(--text3)">and above (no limit)</div>`
+                : `<input type="number" step="0.01" placeholder="upper $" value="${r.upper_balance ?? ''}" onchange="onLadderRowUpperChange(${i},this.value)" style="width:100%">`}
+            <input type="number" step="0.01" placeholder="risk %" value="${r.risk_pct ?? ''}" oninput="onLadderRowRiskChange(${i},this.value)" style="width:100%">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="removeLadderTierRow(${i})" title="Remove">🗑</button>
+        </div>`;
+    }).join('');
+}
+
+// Upper changes the NEXT row's displayed lower balance, so this one re-renders (onchange,
+// not oninput — fires on blur, not every keystroke, so typing isn't interrupted).
+function onLadderRowUpperChange(i, val){
+    _ladderRows[i].upper_balance = val === '' ? null : val;
+    renderLadderEditorRows();
+}
+// Risk % never affects another row's display, so this updates the model without a
+// re-render (oninput is safe here — no risk of losing focus/cursor mid-type).
+function onLadderRowRiskChange(i, val){
+    _ladderRows[i].risk_pct = val;
+}
+
+function addLadderTierRow(){
+    _ladderRows.push({ upper_balance: null, risk_pct: '' });
+    renderLadderEditorRows();
+}
+
+function removeLadderTierRow(i){
+    _ladderRows.splice(i, 1);
+    renderLadderEditorRows();
+}
+
+async function saveLadderTiers(){
+    const errEl = document.getElementById('ch-ladder-error');
+    errEl.style.display = 'none';
+    let lower = 0;
+    const tiers = _ladderRows.map((r, i) => {
+        const isLast = i === _ladderRows.length - 1;
+        const row = {
+            lower_balance: lower,
+            upper_balance: isLast ? null : (r.upper_balance === '' || r.upper_balance === null ? null : parseFloat(r.upper_balance)),
+            risk_pct: r.risk_pct === '' ? null : parseFloat(r.risk_pct),
+        };
+        lower = row.upper_balance;
+        return row;
+    });
+    const r = await api('save_ladder_tiers', 'POST', { challenge_id: _ladderChallengeId, tiers });
+    if (r.error) { errEl.textContent = r.error; errEl.style.display = 'block'; return; }
+    toast('Risk ladder saved! ✅');
+    loadLadderEditor(_ladderChallengeId);
 }
 
 async function deleteChallenge(id){

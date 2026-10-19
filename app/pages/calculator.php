@@ -50,8 +50,17 @@
             <div id="calc-balance-day-start-display" style="font-size:10px;color:var(--text3);margin-top:2px">Start of day (tier basis): —</div>
           </div>
           <div>
-            <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Risk % (ladder, auto)</div>
+            <div id="calc-risk-pct-label" style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Risk % (ladder, auto)</div>
             <div id="calc-risk-pct-display" style="font-family:var(--font-head);font-size:16px">—</div>
+            <!-- v3.27.2 — Calculator fallback for a challenge with no active ladder tier
+                 (every challenge except Bitfunded Altcoin, until its own ladder is set in
+                 Edit Challenge → Risk Ladder): a clearly-labelled, editable Risk % input
+                 instead of leaving every output blank. Never persisted — same one-shot,
+                 typed-fresh convention as Leverage/Entry Price above. -->
+            <div id="calc-risk-pct-manual-wrap" style="display:none;margin-top:4px">
+              <div style="font-size:9px;color:var(--orange);margin-bottom:2px">⚠ No ladder set for this challenge — enter Risk % manually</div>
+              <input type="number" id="calc-risk-pct-manual" step="0.01" placeholder="e.g. 0.5" oninput="scheduleCalcUpdate()" style="width:100%;font-size:13px;padding:4px 6px">
+            </div>
           </div>
           <div>
             <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Margin in Use</div>

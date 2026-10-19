@@ -19,6 +19,8 @@ $routes = [
     'update_challenge'      => ['ChallengeController', 'update'],
     'delete_challenge'      => ['ChallengeController', 'delete'],
     'switch_challenge'      => ['ChallengeController', 'switchTo'],
+    'get_ladder_tiers'      => ['ChallengeController', 'getLadder'],
+    'save_ladder_tiers'     => ['ChallengeController', 'saveLadder'],
     // Trades
     'get_trades'            => ['TradeController', 'getAll'],
     'add_trade'             => ['TradeController', 'add'],

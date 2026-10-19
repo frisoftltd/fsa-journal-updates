@@ -92,9 +92,9 @@ function renderTradesTable(trades) {
         <td><span class="badge" style="background:rgba(79,124,255,0.1);color:var(--blue2);font-size:10px">${t.session||'—'}</span></td>
         <td style="font-weight:600;color:var(--text)">${t.pair}</td>
         <td>${t.direction==='Long'?'<span class="badge badge-long">Long</span>':'<span class="badge badge-short">Short</span>'}</td>
-        <td style="font-family:var(--font-head);font-size:11px">${t.entry_price?parseFloat(t.entry_price).toFixed(2):(isOpenTrade(t)?`<span class="badge" style="background:rgba(245,158,11,0.15);color:var(--orange);font-size:9px;cursor:pointer" title="Add the fill price once Bitfunded shows it, so the importer can find this trade when it closes" onclick="editTrade(${t.id})">⚠ Add fill price</span>`:'—')}</td>
-        <td style="font-family:var(--font-head);font-size:11px;color:var(--red2)">${t.stop_loss?parseFloat(t.stop_loss).toFixed(2):'—'}</td>
-        <td style="font-family:var(--font-head);font-size:11px">${t.exit_price?parseFloat(t.exit_price).toFixed(2):'—'}</td>
+        <td style="font-family:var(--font-head);font-size:11px">${t.entry_price?fmtTradePrice(t.entry_price):(isOpenTrade(t)?`<span class="badge" style="background:rgba(245,158,11,0.15);color:var(--orange);font-size:9px;cursor:pointer" title="Add the fill price once Bitfunded shows it, so the importer can find this trade when it closes" onclick="editTrade(${t.id})">⚠ Add fill price</span>`:'—')}</td>
+        <td style="font-family:var(--font-head);font-size:11px;color:var(--red2)">${t.stop_loss?fmtTradePrice(t.stop_loss):'—'}</td>
+        <td style="font-family:var(--font-head);font-size:11px">${t.exit_price?fmtTradePrice(t.exit_price):'—'}</td>
         <td><span class="${pnlCls(t.pnl)}">${fmt(t.pnl)}</span></td>
         <td style="color:var(--orange);font-size:12px;font-family:var(--font-head)">${fmt(t.fees)}</td>
         <td><span class="${pnlCls(t.net_pnl)}">${fmt(t.net_pnl)}</span></td>
@@ -162,10 +162,10 @@ function viewTrade(id) {
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Pair</div><div style="font-family:var(--font-head);font-size:13px;color:var(--blue2)">${t.pair}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Direction</div><div>${t.direction==='Long'?'<span class="badge badge-long">Long</span>':'<span class="badge badge-short">Short</span>'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Result</div><div>${resultBadge(t.result)}</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Entry</div><div style="font-family:var(--font-head);font-size:13px">${t.entry_price?parseFloat(t.entry_price).toFixed(2):'—'}</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Stop Loss</div><div style="font-family:var(--font-head);font-size:13px;color:var(--red)">${t.stop_loss?parseFloat(t.stop_loss).toFixed(2):'—'}</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Take Profit</div><div style="font-family:var(--font-head);font-size:13px;color:var(--green)">${t.take_profit?parseFloat(t.take_profit).toFixed(2):'—'}</div></div>
-                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exit</div><div style="font-family:var(--font-head);font-size:13px">${t.exit_price?parseFloat(t.exit_price).toFixed(2):'—'}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Entry</div><div style="font-family:var(--font-head);font-size:13px">${t.entry_price?fmtTradePrice(t.entry_price):'—'}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Stop Loss</div><div style="font-family:var(--font-head);font-size:13px;color:var(--red)">${t.stop_loss?fmtTradePrice(t.stop_loss):'—'}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Take Profit</div><div style="font-family:var(--font-head);font-size:13px;color:var(--green)">${t.take_profit?fmtTradePrice(t.take_profit):'—'}</div></div>
+                    <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Exit</div><div style="font-family:var(--font-head);font-size:13px">${t.exit_price?fmtTradePrice(t.exit_price):'—'}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Net P&L</div><div class="${pnlCls(t.net_pnl)}" style="font-size:18px">${fmt(t.net_pnl)}</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">R Multiple</div><div style="font-family:var(--font-head);font-size:16px;color:${parseFloat(t.r_multiple||0)>=0?'var(--green)':'var(--red)'}">${t.r_multiple}R</div></div>
                     <div style="background:var(--bg3);padding:12px;border-radius:8px"><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Session</div><div>${t.session||'—'}</div></div>
@@ -445,8 +445,8 @@ function renderExecutionSummary(data){
     grid.innerHTML = [
         field('Time In', data.time_in),
         field('Time Out', data.time_out),
-        field('Entry', data.entry_price ? parseFloat(data.entry_price).toFixed(4) : '—'),
-        field('Exit', data.exit_price ? parseFloat(data.exit_price).toFixed(4) : '—'),
+        field('Entry', data.entry_price ? fmtTradePrice(data.entry_price) : '—'),
+        field('Exit', data.exit_price ? fmtTradePrice(data.exit_price) : '—'),
         field('Lot Size', data.lot_size ?? '—'),
         field('Fees', data.fees != null ? fmt(data.fees) : '—'),
         field('PnL', data.pnl != null ? fmt(data.pnl) : '—'),

@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-12 (v3.27.0 — Backtesting replay keeps history across ticks, scroll-back loading restored, DST blank-chart bug fixed)
+**Last Updated:** 2026-10-19 (v3.27.1 — Bitfunded import lot_size overflow on micro-cap coins fixed, price precision widened, tiny-price display fixed)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.27.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.27.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -382,7 +382,12 @@ trades: id, user_id, challenge_id, trade_date, session, time_in, time_out, pair,
   ('manual'|'import'), r_multiple_source ('recorded'|'estimated'), exit_reason,
   balance_at_entry, planned_risk_pct, actual_risk_pct, risk_deviation_pct, clean_rep,
   balance_at_day_start, target_r, exit_quality, planned_margin, funding, leverage
-  -- entry_price/exit_price/stop_loss/take_profit are DECIMAL(20,10) (range 0.0044–71,968).
+  -- entry_price/exit_price/stop_loss/take_profit are DECIMAL(20,12) (v3.27.1; range
+  -- 0.0000037719–71,968 -- widened from DECIMAL(20,10) as a precision safety margin for
+  -- micro-cap coins, not because this account's own range overflowed 10 decimals yet).
+  -- lot_size is DECIMAL(24,8) (v3.27.1, widened from a narrower column that overflowed
+  -- on a PEPEUSDT position sized in the tens of billions of units — see migration
+  -- 2026_10_19_0001).
   -- net_pnl = pnl - fees - COALESCE(funding, 0).
   -- source/exit_reason/fees/funding are importer-only — TradeController::saveTrade()
   -- never sets them (division of responsibility: pre-entry fields come from the trade
@@ -780,7 +785,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.27.0
+Current Version: v3.27.1
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

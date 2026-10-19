@@ -19,6 +19,19 @@ function fmt(n,prefix='$'){
 }
 function fmtPct(n){return parseFloat(n).toFixed(1)+'%';}
 function fmtR(n){return parseFloat(n).toFixed(2)+'R';}
+// Named fmtTradePrice (not fmtPrice) to avoid colliding with chart.js's own global
+// fmtPrice() -- same plain-global-scope hazard scan-duplicate-names.mjs checks for.
+// A fixed .toFixed(2)/.toFixed(4) renders a micro-cap coin's price (e.g. PEPEUSDT
+// 0.0000037719) as a flat "0.00"/"0.0000" -- not wrong data, just invisible on screen.
+// Scales decimals down with magnitude instead of a single fixed count.
+function fmtTradePrice(n){
+    if(n===null||n===undefined||n==='') return '—';
+    const v=parseFloat(n);
+    if(isNaN(v)) return '—';
+    const abs=Math.abs(v);
+    const dp = abs>=100 ? 2 : abs>=1 ? 4 : abs>=0.01 ? 6 : abs>=0.0001 ? 8 : 10;
+    return v.toFixed(dp);
+}
 // Shared by dashboard.js and stats.js — both render get_stats() output and both need to
 // disclose the challenge scope + open-trade exclusion, not leave it silent.
 function renderScopeCaption(elId, s){

@@ -49,7 +49,15 @@ async function bfPreview() {
         `<span style="color:var(--green)">${c.new} new</span> — will be added<br>` +
         `<span style="color:var(--blue2)">${c.matched} matched</span> — prices, fees and times will be updated<br>` +
         (c.attention ? `<span style="color:var(--orange)">${c.attention} needs attention</span> — will be skipped, resolve manually` : `<span style="color:var(--text3)">0 needs attention</span>`) +
-        (r.funding ? `<br><br>Funding total: <strong>${fmt(-1 * r.funding.funding_total)}</strong> → challenge adjustment (${r.funding.row_count} transaction rows read)` : '');
+        (r.funding ? `<br><br>Funding total: <strong>${fmt(-1 * r.funding.funding_total)}</strong> → challenge adjustment (${r.funding.row_count} transaction rows read)` : '') +
+        // v3.27.3 — margin-era Funding Fee rows are already folded into their own Close
+        // Position's returned amount; shown here so Acrob can see the era rule actually
+        // applied rather than trust the total blind (see bf_era_cutover_timestamp() in
+        // bitfunded_parser.php).
+        (r.funding && r.funding.funding_excluded_count > 0
+            ? `<br><span style="color:var(--text3)">${r.funding.funding_excluded_count} funding row${r.funding.funding_excluded_count == 1 ? '' : 's'} excluded as margin-era ` +
+              `(${fmt(r.funding.funding_excluded_total)}, already folded into their own Close Position amount) — cutover ${r.funding.era_cutover_time}</span>`
+            : '');
 
     // v3.17.3 — Bitfunded's own reported balance is the free wallet balance, excluding
     // margin locked in open positions. When every open position's planned_margin is

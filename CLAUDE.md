@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-19 (v3.27.2 — Risk Ladder editor added, new-challenge ladder seeding required, Calculator manual-risk-% fallback, migrate.php status view surfaces past failures)
+**Last Updated:** 2026-10-27 (v3.27.3 — Bitfunded importer no longer double-counts margin-era funding on a ledger that spans both Transaction History formats)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.27.2 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.27.3 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -340,6 +340,52 @@ $9,250–9,500 / $9,500+`) don't match the only migration that seeds them
 hand-corrected the live ladder at some point, bypassing migrations entirely, the same
 pattern as the `2026_10_19_0001` `lot_size` ALTER that had to be run by hand in
 phpMyAdmin. No migration file in this repo reproduces the live ladder's real thresholds.
+
+### Bitfunded Transaction History: margin-era funding double-count (v3.27.3)
+
+Bitfunded's Transaction History paste comes in two formats, and which one a given account
+uses is a fact about the data, never a hardcoded date. **Margin era**: Open Position
+carries the real margin as a negative Amount; Close Position returns margin+PnL with
+funding already netted out of it; Funding Fee rows in this era are informational and don't
+move the Balance column. **Zero era**: Open Position is always `0.0000`, Close Position
+carries only realised PnL, and Funding Fee rows move the balance directly. Before this
+release `parseTransactionHistory()` (`includes/bitfunded_parser.php`) summed every Funding
+Fee row into the challenge-level total regardless of era — on a ledger spanning both (the
+Bitfunded "15 Minutes Entry" challenge's full history), this double-counted the margin-era
+rows already folded into their own Close Position's returned amount, a real 17.45
+overcount. Bitfunded Altcoin never showed this because its entire history is zero-era.
+
+**Fix**: `bf_era_cutover_timestamp()` pairs each symbol's Open/Close Position rows FIFO in
+chronological order (ties on an identical Time broken by paste order, so the real ledger's
+same-timestamp double-fill case collapses into one open slot) to find, for every Close,
+whether its own Open had a non-zero Amount. The cutover is the latest such Close's own
+Time — margin-era Funding Fee rows at or before it are excluded from
+`parseTransactionHistory()`'s `funding_total` (still what `confirm()` writes wholesale to
+`challenges.funding_adjustment`, replacing it each import as before); rows after it are
+counted exactly as before this fix. A paste with no non-zero Open Position row at all (every
+pre-fix ledger) gets a null cutover and is completely unchanged. `bf_attribute_funding()`
+(the per-trade, display-only `trades.funding` figure) now branches the same way: the
+existing open-margin/returned-margin/pnl formula for a margin-era position, a sum of
+Funding Fee rows inside the position's own open→close window for a zero-era one (Funding
+Fee rows carry no symbol at all, so this is a time-window sum, not a per-symbol one — a
+non-issue for correctness since this value never feeds `net_pnl` or `funding_adjustment`,
+same v3.18.1 division as before).
+
+`parseTransactionHistory()`'s return gained `funding_excluded_count`/`funding_excluded_total`/
+`funding_counted_count`/`funding_counted_total`/`era_cutover_time`, surfaced in the Bitfunded
+import preview (`js/bfimport.js`) as an explicit "N funding rows excluded as margin-era"
+line so the rule applied is visible, not trusted blind. No schema change — this is parsing
+logic only, no migration shipped or needed.
+
+Verified against the real ledger this was built for (`ledger-15min-entry.txt`, 876 rows,
+not committed to this repo): cutover `2026-01-26 23:36:16`, 201 Funding Fee rows excluded
+(`-17.4617`), 188 counted (`+4.5880`); Recharge + every Open/Close Position amount + every
+fee + only the counted funding rows = `9240.3604` against the ledger's own final Balance
+column `9240.3514` (0.009 off, inside the $0.05 tolerance) — the pre-fix sum would have been
+`9222.8987`, wrong by 17.45, matching the incident exactly. Margin-era funding lives inside
+each affected trade's own `net_pnl` (via Position History's realised PnL, which already
+reflects the funding-adjusted margin return); zero-era funding lives in
+`challenges.funding_adjustment` — the two never overlap, so nothing is counted twice.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -845,7 +891,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.27.2
+Current Version: v3.27.3
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

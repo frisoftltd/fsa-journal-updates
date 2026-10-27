@@ -325,7 +325,6 @@ function parseTransactionHistory(string $raw): array {
 
     $EXPECTED_COLS = 5;
     $headerSkipped = false;
-    $fundingSum = 0.0;
     $latestBalance = null;
     $latestTs = null;
     $rowCount = 0;
@@ -355,9 +354,6 @@ function parseTransactionHistory(string $raw): array {
         $rowCount++;
 
         $amount = bf_parse_num($amountRaw, $lineNo, 'Amount');
-        if (strcasecmp($type, 'Funding Fee') === 0) {
-            $fundingSum += $amount;
-        }
 
         $balance = bf_parse_num($balanceRaw, $lineNo, 'Balance');
         $ts = strtotime(trim($timeRaw));
@@ -391,12 +387,102 @@ function parseTransactionHistory(string $raw): array {
         throw new BitfundedParseException('No transaction rows found after the header — paste looks empty or header-only.');
     }
 
+    // v3.27.3 — margin-era Funding Fee rows (see bf_era_cutover_timestamp() below) are
+    // already folded into what Close Position returns; summing them again into the
+    // challenge-level total double-counts, which is exactly what overcounted funding by
+    // 17.45 on a real mixed-era paste before this fix. Only rows after the cutover
+    // (or every row, when the paste has no margin era at all) feed funding_total.
+    $cutoverTs = bf_era_cutover_timestamp($rows);
+    $excludedCount = 0; $excludedSum = 0.0;
+    $countedCount = 0; $countedSum = 0.0;
+    foreach ($rows as $r) {
+        if (strcasecmp($r['type'], 'Funding Fee') !== 0) continue;
+        if ($cutoverTs !== null && strtotime($r['time']) <= $cutoverTs) {
+            $excludedCount++; $excludedSum += $r['amount'];
+        } else {
+            $countedCount++; $countedSum += $r['amount'];
+        }
+    }
+
     return [
-        'funding_total'  => round(-1 * $fundingSum, 4),
+        'funding_total'  => round(-1 * $countedSum, 4),
         'latest_balance' => $latestBalance,
         'row_count'      => $rowCount,
         'rows'           => $rows,
+        // v3.27.3 — surfaced so the import preview can show Acrob the rule actually
+        // applied, rather than a total he has to trust blind. excluded/counted totals are
+        // the raw signed Amount sums (not the negated funding_total convention) so they
+        // read the same way the ledger's own rows do.
+        'funding_excluded_count' => $excludedCount,
+        'funding_excluded_total' => round($excludedSum, 4),
+        'funding_counted_count'  => $countedCount,
+        'funding_counted_total'  => round($countedSum, 4),
+        'era_cutover_time'       => $cutoverTs !== null ? date('Y-m-d H:i:s', $cutoverTs) : null,
     ];
+}
+
+/**
+ * v3.27.3 — Bitfunded's Transaction History comes in two formats, and which one a given
+ * paste uses is a fact about the data, never a hardcoded date (Bitfunded could change
+ * format again, and a different account switched on a different day than this one did):
+ * margin era, where Open Position carries the real margin as a negative Amount and Close
+ * Position returns margin+PnL with funding already netted out of it; zero era, where Open
+ * Position is always 0.0000 and Close Position carries only realised PnL, with Funding Fee
+ * rows moving the balance directly. Mixing the two — summing every Funding Fee row
+ * regardless of era — double-counts whatever margin-era funding is already folded into a
+ * Close Position's own returned amount (see CLAUDE.md v3.27.3 for the incident this closes,
+ * a real 17.45 overcount on a ledger that spans both eras).
+ *
+ * Pairs each symbol's Open/Close Position rows FIFO in chronological order (ties on an
+ * identical Time broken by original paste order, so the real ledger's same-timestamp
+ * double-fill case collapses into one open slot rather than being treated as two) to find,
+ * for every Close, whether ITS OWN Open had a non-zero Amount. The cutover returned is the
+ * latest such Close's own Time — margin-era Funding Fee rows at or before it are
+ * informational (already inside the margin return), rows after it move the balance and
+ * must be counted.
+ *
+ * This FIFO pairing is not exact for two genuinely concurrent same-symbol positions
+ * (confirmed to happen later in the real ledger this was built against, entirely within the
+ * zero era) — but that's harmless specifically for era detection: every Open in a given era
+ * shares the same zero/non-zero Amount, so whichever exact Open a mis-paired Close lands on
+ * never changes the era it gets tagged with.
+ *
+ * Returns null when no Open Position row has a non-zero Amount — the caller's behaviour is
+ * then unchanged from before this fix (every pre-fix ledger, e.g. Bitfunded Altcoin, is
+ * entirely zero-era and takes this path).
+ */
+function bf_era_cutover_timestamp(array $rows): ?int {
+    $ordered = [];
+    foreach ($rows as $i => $r) {
+        $r['_n'] = $i;
+        $r['_ts'] = strtotime($r['time']);
+        $ordered[] = $r;
+    }
+    usort($ordered, function ($a, $b) {
+        if ($a['_ts'] === $b['_ts']) return $a['_n'] <=> $b['_n'];
+        return $a['_ts'] <=> $b['_ts'];
+    });
+
+    $openIsMargin = []; // symbol => bool, for whichever position of that symbol is currently open
+    $cutoverTs = null;
+    foreach ($ordered as $r) {
+        if (strcasecmp($r['type'], 'Open Position') === 0) {
+            if (!array_key_exists($r['symbol'], $openIsMargin)) {
+                $openIsMargin[$r['symbol']] = (abs($r['amount']) > 0.00005);
+            }
+            // else: an extra fill of the already-open position — era already recorded,
+            // never overwritten.
+        } elseif (strcasecmp($r['type'], 'Close Position') === 0) {
+            if (array_key_exists($r['symbol'], $openIsMargin)) {
+                $isMargin = $openIsMargin[$r['symbol']];
+                unset($openIsMargin[$r['symbol']]);
+                if ($isMargin && ($cutoverTs === null || $r['_ts'] > $cutoverTs)) {
+                    $cutoverTs = $r['_ts'];
+                }
+            }
+        }
+    }
+    return $cutoverTs;
 }
 
 /**
@@ -416,18 +502,30 @@ function parseTransactionHistory(string $raw): array {
  * shape. This importer has no way to detect which margin mode an account uses, so this is
  * a documented precondition of calling it, not a runtime guard.
  *
- * Formula (verified against real data — see CLAUDE.md v3.17.3 for the full reconciliation
- * against three real Funding Fee rows): funding = open_margin − returned_margin + pnl,
- * where open_margin/returned_margin are the ABSOLUTE VALUES of the matched Open/Close
- * Position rows' Amount and pnl is the position's own signed realized P&L (from Position
- * History, not Transaction History — no 'Realized PnL' row type exists in a real paste).
- * The result is NOT clamped to a sign: a trader can be paid to hold a position (funding
- * flows the account's way instead of out of it), and a negative return here is a real,
- * expected outcome that must be able to increase $net, not just decrease it.
+ * v3.27.3 — branches on era (see bf_era_cutover_timestamp()'s doc for the two formats).
+ *
+ * Margin era (the matched Open Position row's own Amount is non-zero): funding =
+ * open_margin − returned_margin + pnl, where open_margin/returned_margin are the ABSOLUTE
+ * VALUES of the matched Open/Close Position rows' Amount and pnl is the position's own
+ * signed realized P&L (from Position History, not Transaction History — no 'Realized PnL'
+ * row type exists in a real paste). Verified against real data (CLAUDE.md v3.17.3/v3.27.3):
+ * TRX open margin 3488.4954, returned 3394.5281, pnl -91.288 -> 2.6793, matching three real
+ * Funding Fee rows (0.1527+0.7599+1.7664) to the same sub-cent rounding gap documented
+ * elsewhere. Not clamped to a sign: a trader can be paid to hold a position, and a negative
+ * result here is real and must be able to increase $net, not just decrease it.
+ *
+ * Zero era (the matched Open Position row's own Amount is zero): Close Position carries
+ * only realised PnL, nothing is folded into it, so funding instead has to be read directly
+ * off whichever Funding Fee rows fall inside this position's own open->close window.
+ * Funding Fee rows never carry a symbol (see file header) — this is a time-window sum, not
+ * a per-symbol one. Display-only (trades.funding, never net_pnl or funding_adjustment — see
+ * this file's confirm() caller), so a brief overlap with a concurrent different-symbol
+ * position's own funding is an accepted imprecision here, not a correctness bug.
  *
  * Returns null — unknown, never a guessed 0 — whenever either leg can't be found
  * unambiguously: no candidate row, or more than one equally-good candidate. See
- * bf_find_position_row() for exactly what "unambiguous" requires.
+ * bf_find_position_row() for exactly what "unambiguous" requires. A found zero-era window
+ * with no Funding Fee rows inside it is a real, legitimate 0.0, not unknown.
  */
 function bf_attribute_funding(array $txRows, string $pair, string $timeIn, string $timeOut, float $pnl): ?float {
     $openRow = bf_find_position_row($txRows, 'open position', $pair, $timeIn);
@@ -436,9 +534,21 @@ function bf_attribute_funding(array $txRows, string $pair, string $timeIn, strin
     $closeRow = bf_find_position_row($txRows, 'close position', $pair, $timeOut);
     if ($closeRow === null) return null;
 
-    $openMargin = abs($openRow['amount']);
-    $returnedMargin = abs($closeRow['amount']);
-    return round($openMargin - $returnedMargin + $pnl, 4);
+    if (abs($openRow['amount']) > 0.00005) {
+        $openMargin = abs($openRow['amount']);
+        $returnedMargin = abs($closeRow['amount']);
+        return round($openMargin - $returnedMargin + $pnl, 4);
+    }
+
+    $openTs = strtotime($openRow['time']);
+    $closeTs = strtotime($closeRow['time']);
+    $sum = 0.0;
+    foreach ($txRows as $r) {
+        if (strcasecmp($r['type'], 'Funding Fee') !== 0) continue;
+        $ts = strtotime($r['time']);
+        if ($ts >= $openTs && $ts <= $closeTs) $sum += $r['amount'];
+    }
+    return round(-1 * $sum, 4);
 }
 
 /**
@@ -823,7 +933,20 @@ TXT;
         // row in the paste or a running total. 8623.6757 is the 18:00:17 row, the most
         // recent Time in the whole paste, not the first row (paste order here is
         // newest-first, which this assertion deliberately does not rely on).
-        $check('funding_total (7 real Funding Fee rows)', $txResult['funding_total'], 4.1869);
+        //
+        // v3.27.3 — this paste's own TRX Open Position Amount (-3488.4954) is non-zero,
+        // so it's margin era by the data-driven rule, and its cutover is TRX's own Close
+        // (2026-09-22 15:43:20). Of the 7 Funding Fee rows, only the one after that
+        // (18:00:17, -0.1441) counts; the other 6 (sum -4.0428) are the margin-era rows
+        // already folded into TRX's own Close Position return and are excluded. Before
+        // this fix, funding_total summed all 7 (4.1869) — this fixture is exactly the
+        // double-counting bug the fix closes, not a pre-existing passing case.
+        $check('funding_total (only the 1 post-cutover Funding Fee row counts)', $txResult['funding_total'], 0.1441);
+        $check('funding_excluded_count (margin-era rows folded into TRX\'s own Close)', $txResult['funding_excluded_count'], 6);
+        $check('funding_excluded_total', $txResult['funding_excluded_total'], -4.0428);
+        $check('funding_counted_count', $txResult['funding_counted_count'], 1);
+        $check('funding_counted_total', $txResult['funding_counted_total'], -0.1441);
+        $check('era_cutover_time (TRX\'s own Close, BNB never closes so doesn\'t count)', $txResult['era_cutover_time'], '2026-09-22 15:43:20');
         $check('latest_balance (by Time, not row order/count)', $txResult['latest_balance'], 8623.6757);
         $check('row_count', $txResult['row_count'], 13);
     } catch (BitfundedParseException $e) {
@@ -898,6 +1021,72 @@ TXT;
     } catch (BitfundedParseException $e) {
         $fail++;
         fwrite(STDERR, "FAIL: synthetic Transaction History (bf_attribute_funding edge cases) threw: " . $e->getMessage() . "\n");
+    }
+
+    // v3.27.3 — dedicated mixed-era fixture: one margin-era position (SYM1, non-zero Open
+    // Amount) followed by one zero-era position (SYM2, Open Amount exactly 0.0000),
+    // exercising bf_era_cutover_timestamp()'s own boundary (a Funding Fee row at the exact
+    // cutover second must be excluded, "at or before") and both branches of
+    // bf_attribute_funding() in the same paste.
+    $mixedEra = <<<'TXT'
+Type	Transaction	Amount	Time	Balance
+Open Position	SYM1/USDT	-1000.0000	2026-01-01 00:00:00	5000.0000
+Funding Fee	USDT	-0.5000	2026-01-01 00:30:00	5000.0000
+Funding Fee	USDT	-0.3000	2026-01-01 00:45:00	5000.0000
+Close Position	SYM1/USDT	1050.0000	2026-01-01 01:00:00	5000.0000
+Funding Fee	USDT	-0.0500	2026-01-01 01:00:00	5000.0000
+Open Position	SYM2/USDT	0.0000	2026-01-02 00:00:00	5000.0000
+Funding Fee	USDT	-0.2000	2026-01-02 00:30:00	5000.0000
+Funding Fee	USDT	0.1000	2026-01-02 00:45:00	5000.0000
+Close Position	SYM2/USDT	20.0000	2026-01-02 01:00:00	5000.0000
+TXT;
+    try {
+        $mixedResult = parseTransactionHistory($mixedEra);
+        $check('mixed-era cutover is SYM1\'s own Close (the only margin-era close)', $mixedResult['era_cutover_time'], '2026-01-01 01:00:00');
+        // 3 excluded: the two inside SYM1's window (-0.5, -0.3) plus the one at the exact
+        // cutover second (-0.05) -- "at or before" must include an exact boundary match,
+        // not just strictly-before.
+        $check('mixed-era funding_excluded_count (2 inside SYM1 + 1 exactly at cutover)', $mixedResult['funding_excluded_count'], 3);
+        $check('mixed-era funding_excluded_total', $mixedResult['funding_excluded_total'], -0.85);
+        $check('mixed-era funding_counted_count (SYM2\'s own 2 rows, after cutover)', $mixedResult['funding_counted_count'], 2);
+        $check('mixed-era funding_counted_total', $mixedResult['funding_counted_total'], -0.1);
+        $check('mixed-era funding_total (challenge adjustment from counted rows only)', $mixedResult['funding_total'], 0.1);
+
+        // SYM1 (margin era): same open/returned-margin/pnl formula as the SIG case above --
+        // 1000 - 1050 + 10 = -40 (paid to hold).
+        $sym1Funding = bf_attribute_funding($mixedResult['rows'], 'SYM1USDT', '2026-01-01 00:00:00', '2026-01-01 01:00:00', 10.0);
+        $check('bf_attribute_funding margin-era branch unaffected by the era fix', $sym1Funding, -40.0);
+
+        // SYM2 (zero era): Open Amount is 0, so this must take the new branch -- sum of
+        // Funding Fee rows strictly inside [time_in, time_out] (-0.2 + 0.1 = -0.1),
+        // negated to the same "positive = cost" convention as the margin-era branch and
+        // funding_total. Using the OLD margin formula here (0 - |20| + 20 = 0) would have
+        // silently returned 0 instead of the real 0.1 -- exactly the bug this branch fixes.
+        $sym2Funding = bf_attribute_funding($mixedResult['rows'], 'SYM2USDT', '2026-01-02 00:00:00', '2026-01-02 01:00:00', 20.0);
+        $check('bf_attribute_funding zero-era branch sums Funding Fee rows in the window', $sym2Funding, 0.1);
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: mixed-era Transaction History fixture threw: " . $e->getMessage() . "\n");
+    }
+
+    // A ledger with no margin-era rows at all must behave exactly as before this fix --
+    // era_cutover_time null, every Funding Fee row counted, funding_total unchanged. This
+    // is what every pre-fix ledger (e.g. Bitfunded Altcoin) actually is.
+    $zeroEraOnly = <<<'TXT'
+Type	Transaction	Amount	Time	Balance
+Open Position	SYM3/USDT	0.0000	2026-06-01 00:00:00	5000.0000
+Funding Fee	USDT	-0.4000	2026-06-01 00:30:00	5000.0000
+Close Position	SYM3/USDT	15.0000	2026-06-01 01:00:00	5000.0000
+TXT;
+    try {
+        $zeroEraResult = parseTransactionHistory($zeroEraOnly);
+        $check('zero-era-only paste has no cutover (unchanged behaviour)', $zeroEraResult['era_cutover_time'], null);
+        $check('zero-era-only paste counts every Funding Fee row', $zeroEraResult['funding_counted_count'], 1);
+        $check('zero-era-only paste excludes none', $zeroEraResult['funding_excluded_count'], 0);
+        $check('zero-era-only paste funding_total', $zeroEraResult['funding_total'], 0.4);
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: zero-era-only Transaction History fixture threw: " . $e->getMessage() . "\n");
     }
 
     fwrite(STDOUT, "bitfunded_parser.php self-test: $pass passed, $fail failed\n");

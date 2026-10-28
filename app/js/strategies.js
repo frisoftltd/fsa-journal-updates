@@ -5,6 +5,12 @@
  */
 let allStrategies = [];
 let currentVarRows = [];
+// v3.29.1 — modal-session state for the redesigned New/Edit Strategy modal. Kept as
+// plain module state (not re-read from the DOM on every change) so toggling "All
+// challenges" off and back on restores the exact previous tile selection, per the brief.
+let sbAppliesAll = true;
+let sbSelectedChallengeIds = [];
+let sbEditingId = null;
 
 // v3.29.0 (req #7) — this list is never scoped to any challenge, by design: it shows
 // every strategy the user has, each with its own real assignment, so the Lab is the one
@@ -44,7 +50,7 @@ async function loadStrategies(){
                     <span style="font-family:var(--font-head);font-size:13px;letter-spacing:0.5px">${st.name}</span>
                 </div>
                 <div style="font-size:12px;color:var(--text2)">${(st.variables||[]).filter(v=>v.is_active==1).length} active variable${(st.variables||[]).filter(v=>v.is_active==1).length===1?'':'s'}${(st.variables||[]).some(v=>v.is_active==0)?` (${(st.variables||[]).filter(v=>v.is_active==0).length} inactive)`:''}</div>
-                <div style="font-size:12px;color:var(--blue2);margin-top:2px">${strategyChallengeLabel(st)}</div>
+                <div style="font-size:12px;color:var(--text2);margin-top:4px">Used on: ${strategyChallengeChips(st)}</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center">
                 <button class="btn btn-ghost btn-sm" onclick="openVariablesModal(${st.id})" title="Edit Variables">⚙️ Variables</button>
@@ -56,36 +62,165 @@ async function loadStrategies(){
     </div>`).join('');
 }
 
-// v3.29.0 — same label text on the card and (via renderStrategyChallengeList() below)
-// implied in the modal, one place this gets worded rather than two.
-function strategyChallengeLabel(st){
-    if(st.applies_all_challenges == 1) return 'All challenges';
+// v3.29.1 — same wording/chip styling as the modal's own summary line (req #9), one
+// place this gets worded rather than two independently-maintained copies.
+function strategyChallengeChips(st){
+    if(st.applies_all_challenges == 1){
+        return `<span class="badge" style="background:rgba(79,124,255,0.15);color:var(--blue2)">All challenges</span>`;
+    }
     const names = (st.challenge_ids||[]).map(id => (allChallenges||[]).find(c=>c.id==id)?.name).filter(Boolean);
-    return names.length ? names.join(', ') : 'No challenges assigned — hidden everywhere until reassigned';
+    if(!names.length){
+        return `<span class="badge" style="background:rgba(255,179,71,0.15);color:var(--orange)">Not assigned — hidden until reassigned</span>`;
+    }
+    return names.map(n => `<span class="badge" style="background:rgba(79,124,255,0.1);color:var(--text2);margin-right:4px">${escapeHtml(n)}</span>`).join('');
 }
 
-// v3.29.0 (req #1) — new strategy defaults to "all challenges" checked; editing an
-// existing one reflects its real applies_all_challenges/challenge_ids.
+// v3.29.1 — redesigned New/Edit Strategy modal: a toggle switch for "All challenges"
+// plus a grid of selectable challenge tiles, replacing the old misaligned checkbox
+// list. `data == null` (missing field, e.g. a strategy read before this release's own
+// migration ran) is treated the same as applies_all_challenges=1 -- "every strategy
+// that existed before this release keeps working everywhere" is the whole point of
+// that migration's DEFAULT 1, so a genuinely missing field should read the same way,
+// not default to the opposite (scoped/unchecked).
 function openStrategyModal(data=null){
     document.getElementById('sb-id').value = data?.id || '';
-    document.getElementById('strategy-builder-modal-title').textContent = data ? '✏️ RENAME STRATEGY' : '🧪 NEW STRATEGY';
+    document.getElementById('strategy-builder-modal-title').textContent = data ? 'Edit strategy' : 'New strategy';
     document.getElementById('sb-name').value = data?.name || '';
-    document.getElementById('sb-applies-all').checked = data ? (data.applies_all_challenges == 1) : true;
-    renderStrategyChallengeList(data?.challenge_ids || []);
-    toggleStrategyChallengeList();
+
+    sbEditingId = data?.id || null;
+    sbAppliesAll = data ? (data.applies_all_challenges == null ? true : data.applies_all_challenges == 1) : true;
+    sbSelectedChallengeIds = (data?.challenge_ids || []).slice();
+
+    renderStrategyChallengeGrid();
+    refreshStrategyModalState();
     document.getElementById('strategy-builder-modal').classList.add('open');
+    document.getElementById('sb-name').focus();
 }
 
-function toggleStrategyChallengeList(){
-    const allChecked = document.getElementById('sb-applies-all').checked;
-    document.getElementById('sb-challenge-list-wrap').style.display = allChecked ? 'none' : 'block';
+function closeStrategyModal(){
+    document.getElementById('strategy-builder-modal').classList.remove('open');
 }
 
-function renderStrategyChallengeList(selectedIds=[]){
-    const wrap = document.getElementById('sb-challenge-list');
-    wrap.innerHTML = (allChallenges||[]).map(c => `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-weight:normal">
-        <input type="checkbox" class="sb-ch-cb" value="${c.id}" ${selectedIds.includes(c.id)?'checked':''}> ${c.name}
-    </label>`).join('') || '<div style="color:var(--text3);font-size:12px">No challenges yet.</div>';
+function toggleStrategyAppliesAll(){
+    sbAppliesAll = !sbAppliesAll;
+    refreshStrategyModalState();
+}
+
+// One place that re-syncs every piece of the modal's UI (toggle, tile disabled state,
+// summary line, save button, cleared-default notice) after anything changes -- avoids
+// four call sites each remembering their own subset of what needs updating.
+function refreshStrategyModalState(){
+    const toggle = document.getElementById('sb-applies-all');
+    toggle.setAttribute('aria-checked', sbAppliesAll ? 'true' : 'false');
+
+    const grid = document.getElementById('sb-challenge-list');
+    grid.classList.toggle('sb-grid-dimmed', sbAppliesAll);
+    grid.querySelectorAll('.sb-challenge-tile').forEach(t => {
+        const disabled = sbAppliesAll;
+        t.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+        t.tabIndex = disabled ? -1 : 0;
+    });
+
+    updateStrategySaveState();
+    updateStrategyDefaultNotice();
+}
+
+// req #7 — the picker shows exactly the same challenge list every other dropdown in
+// the app reads (get_challenges, unfiltered -- there's no archived/hidden concept
+// anywhere else in this app either, so there's nothing extra to exclude here).
+function renderStrategyChallengeGrid(){
+    const grid = document.getElementById('sb-challenge-list');
+    const emptyNote = document.getElementById('sb-challenge-empty');
+    if(!allChallenges || !allChallenges.length){
+        grid.innerHTML = '';
+        grid.style.display = 'none';
+        emptyNote.style.display = 'block';
+        return;
+    }
+    emptyNote.style.display = 'none';
+    grid.style.display = 'grid';
+    grid.innerHTML = allChallenges.map(c => {
+        const checked = sbSelectedChallengeIds.includes(c.id);
+        const meta = [c.prop_firm, c.challenge_phase].filter(Boolean).join(' · ');
+        return `<div class="sb-challenge-tile" role="checkbox" aria-checked="${checked}" tabindex="0" data-id="${c.id}"
+                     onclick="toggleStrategyChallengeTile(${c.id})" onkeydown="handleStrategyTileKeydown(event,${c.id})">
+            <span class="sb-tile-check" aria-hidden="true">${checked ? '✓' : ''}</span>
+            <span class="sb-tile-text">
+                <span class="sb-tile-name">${escapeHtml(c.name)}</span>
+                ${meta ? `<span class="sb-tile-meta">${escapeHtml(meta)}</span>` : ''}
+            </span>
+        </div>`;
+    }).join('');
+}
+
+// Mutates the one affected tile's own attributes in place rather than re-rendering the
+// whole grid — a full re-render replaces every tile's DOM node, which silently drops
+// keyboard focus (confirmed via the harness: Space to toggle a tile off worked, but a
+// second Space/Enter right after did nothing, because the node that keydown fired on
+// no longer existed by the time it bubbled). req #3's "keyboard operable" requirement
+// means toggling can never cost the tile its own focus.
+function toggleStrategyChallengeTile(id){
+    if(sbAppliesAll) return; // dimmed/disabled while "All challenges" is on
+    const idx = sbSelectedChallengeIds.indexOf(id);
+    const nowChecked = idx === -1;
+    if(nowChecked) sbSelectedChallengeIds.push(id); else sbSelectedChallengeIds.splice(idx, 1);
+
+    const tile = document.querySelector(`.sb-challenge-tile[data-id="${id}"]`);
+    if(tile){
+        tile.setAttribute('aria-checked', nowChecked ? 'true' : 'false');
+        const checkEl = tile.querySelector('.sb-tile-check');
+        if(checkEl) checkEl.textContent = nowChecked ? '✓' : '';
+    }
+    refreshStrategyModalState();
+}
+
+// req #3 — space or enter toggles the tile, same as a real checkbox would.
+function handleStrategyTileKeydown(e, id){
+    if(e.key === ' ' || e.key === 'Enter'){
+        e.preventDefault();
+        toggleStrategyChallengeTile(id);
+    }
+}
+
+// req #5 — Save is disabled until a name is present and either All is on or at least
+// one tile is selected; the reason is always stated in words next to the button, never
+// left as a silently-disabled control.
+function updateStrategySaveState(){
+    const name = document.getElementById('sb-name').value.trim();
+    const n = sbSelectedChallengeIds.length;
+    const summaryEl = document.getElementById('sb-summary');
+    const saveBtn = document.getElementById('sb-save-btn');
+    const reasonEl = document.getElementById('sb-save-reason');
+
+    const scopeValid = sbAppliesAll || n > 0;
+    summaryEl.textContent = sbAppliesAll
+        ? 'Used on: All challenges'
+        : (n > 0 ? `Used on: ${n} challenge${n === 1 ? '' : 's'}` : 'Select at least one challenge, or turn on All challenges');
+    summaryEl.classList.toggle('sb-summary-warn', !scopeValid);
+
+    const nameValid = name.length > 0;
+    saveBtn.disabled = !nameValid || !scopeValid;
+    reasonEl.textContent = !nameValid
+        ? 'Enter a strategy name to save.'
+        : (!scopeValid ? 'Select at least one challenge, or turn on All challenges.' : '');
+}
+
+// req #6 — the Phase-0 follow-up check, surfaced before saving rather than only after:
+// a challenge whose default_strategy_id already points at this strategy, but which is
+// about to be dropped from its assignment set, will have that default cleared on save
+// (StrategyBuilderController::clearInvalidDefaultStrategyPointers()). Named explicitly,
+// shown only when it will actually happen -- never a generic "this might affect
+// something" warning.
+function updateStrategyDefaultNotice(){
+    const notice = document.getElementById('sb-default-notice');
+    if(!sbEditingId || sbAppliesAll){ notice.style.display = 'none'; return; }
+
+    const affected = (allChallenges || []).filter(c => c.default_strategy_id == sbEditingId && !sbSelectedChallengeIds.includes(c.id));
+    if(!affected.length){ notice.style.display = 'none'; return; }
+
+    const names = affected.map(c => c.name).join(', ');
+    notice.textContent = `Heads up: ${names} currently use${affected.length === 1 ? 's' : ''} this strategy as the Pre-Trade Checklist default. Saving will clear that, since this strategy won't be assigned there anymore.`;
+    notice.style.display = 'block';
 }
 
 function editStrategy(id){
@@ -97,14 +232,13 @@ async function saveStrategyMeta(){
     const id = document.getElementById('sb-id').value;
     const name = document.getElementById('sb-name').value.trim();
     if(!name){ toast('Strategy name is required','error'); return; }
-    const appliesAll = document.getElementById('sb-applies-all').checked;
-    const challengeIds = Array.from(document.querySelectorAll('.sb-ch-cb:checked')).map(cb=>parseInt(cb.value));
-    const data = { name, applies_all_challenges: appliesAll, challenge_ids: challengeIds };
+    if(!sbAppliesAll && sbSelectedChallengeIds.length === 0){ toast('Select at least one challenge, or turn on All challenges','error'); return; }
+    const data = { name, applies_all_challenges: sbAppliesAll, challenge_ids: sbSelectedChallengeIds };
     if(id) data.id = id;
     const r = await api(id ? 'update_strategy' : 'add_strategy', 'POST', data);
     if(r.error){ toast(r.error,'error'); return; }
     toast(id ? 'Strategy updated!' : 'Strategy created! ✅');
-    document.getElementById('strategy-builder-modal').classList.remove('open');
+    closeStrategyModal();
     loadStrategies();
 }
 

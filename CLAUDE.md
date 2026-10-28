@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-28 (v3.29.0 — strategies are now assignable to specific challenges, so the Strategy dropdown/filter/bulk-action only ever offer the right ones per challenge)
+**Last Updated:** 2026-10-28 (v3.29.1 — New/Edit Strategy modal redesign: toggle switch + selectable challenge tiles, replacing the misaligned checkbox list)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.29.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.29.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -588,6 +588,70 @@ stale rows, a new strategy defaulting to all-challenges, and deleting a challeng
 removing only its own assignment row (confirmed against a strategy assigned to two
 challenges) without touching the strategy itself or any other strategy.
 
+### New/Edit Strategy modal redesign (v3.29.1)
+
+UI-only follow-up to v3.29.0 above — same API contract (`add_strategy`/`update_strategy`
+still take exactly `name`/`applies_all_challenges`/`challenge_ids`), same migration,
+nothing server-side touched. Replaces the old "Applies to all challenges" checkbox +
+checkbox-list-in-a-tiny-scroll-box (`modals/strategy-builder-modal.php`) with a toggle
+switch (`#sb-applies-all`, `role="switch"`) and a responsive grid of selectable
+challenge tiles (`.sb-challenge-tile`, `role="checkbox"`), per Acrob's screenshot of the
+live modal showing every checkbox floating at a different horizontal position with its
+label small, grey, all-caps, and wrapping onto two lines.
+
+**The reported "new strategy defaults to unchecked" bug was not in the code** —
+`openStrategyModal(data=null)` already set the default true (`data ? ... : true`) in the
+shipped v3.29.0 JS, and both real call sites (`pages/strategies.php`'s "+ New Strategy",
+`js/strategies.js`'s own empty-state "+ Create Strategy") call it with no arguments. The
+live screenshot most likely reflects a deploy/cache gap (see the "Current Version" note
+above — a repo/tag bump never guarantees live actually pulled it) rather than a real
+regression. The v3.29.1 toggle keeps the same default (`sbAppliesAll = data ? (...) :
+true`), confirmed on by default via the new harness driver below.
+
+Toggling "All challenges" off dims/disables the tile grid but **does not clear the
+selection** — `sbSelectedChallengeIds` is kept as module state, not re-read from the DOM,
+so switching back on then off again restores exactly what was selected before (req #2).
+Save is disabled until a name is present and either All is on or ≥1 tile is selected,
+with the reason always stated in plain words next to the button
+(`updateStrategySaveState()`) — this replaces the old silent-failure path where saving
+with nothing selected could create a strategy nobody can see. Edit mode shows a notice
+before saving if re-scoping will clear a challenge's `default_strategy_id` (only when it
+actually will — `updateStrategyDefaultNotice()`, reusing v3.29.0's own
+`clearInvalidDefaultStrategyPointers()` server-side behavior, just surfaced client-side
+first). Zero challenges shows the toggle alone with "Create a challenge first..." instead
+of an empty grid. Strategy Lab list cards (`strategyChallengeChips()`,
+`js/strategies.js`) now render the same "Used on: ..." wording + chip styling as the
+modal's own summary line, one wording instead of two (req #9).
+
+One real bug caught during development: re-rendering the whole tile grid on every toggle
+replaced every tile's DOM node, which silently dropped keyboard focus (confirmed via the
+harness — Space toggled a tile off, but a second Space/Enter right after did nothing).
+Fixed in `toggleStrategyChallengeTile()` by mutating only the one affected tile's own
+`aria-checked`/check-mark in place instead of calling `renderStrategyChallengeGrid()`
+again.
+
+No inner scroll box (`.sb-challenge-grid` has no `overflow-y`) — only `.sb-modal-body`
+scrolls, and only if the viewport is short; `.sb-modal-footer` (summary + Save/Cancel) is
+a flex-shrink:0 sibling outside the scrolling body, so it always stays visible. 2-column
+grid collapses to 1 column under 480px. `prefers-reduced-motion:reduce` strips the
+toggle-knob/tile transitions.
+
+Verified via a new driver, `tools/ui-harness/drive-v3291.mjs` — unlike every other driver
+in that directory this one needs no DB/PHP stub at all (the modal has zero backend
+behavior of its own), so it builds a small standalone HTML fixture at run time by reading
+the real current `modals/strategy-builder-modal.php`/`js/strategies.js`/`css/style.css`
+directly off disk (plus `git show HEAD:...` of the same three files for the "before"
+screenshots) rather than keeping a hand-maintained copy that could drift stale. 26/26
+assertions: default-on toggle, dimmed/disabled tiles while All is on, Save
+disabled+reasoned (missing name, then no challenge selected), the on/off/on round-trip
+selection restore, the keyboard-focus regression above, edit-mode pre-fill, the
+cleared-default notice shown/hidden correctly, the zero-challenges empty state, the
+360px single-column layout, no independent scrollbar on the tile grid, and the sticky
+footer staying inside a short viewport. `php -l`/`node --check` clean; duplicate-name
+scan clean; full 13-driver suite passes (one driver hit a transient network-wait timeout
+under shared-port contention running all 13 back-to-back, re-ran standalone immediately
+after and passed clean — unrelated, no backtest file touched this release).
+
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
 ### The Core Principle
@@ -1100,7 +1164,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.29.0
+Current Version: v3.29.1
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

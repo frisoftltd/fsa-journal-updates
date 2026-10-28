@@ -173,6 +173,52 @@ textarea{resize:vertical;min-height:65px}
 .section-divider{grid-column:1/-1;border-top:1px solid var(--border);margin:4px 0;padding-top:10px}
 .section-label{grid-column:1/-1;font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:-4px}
 
+/* ── STRATEGY MODAL (v3.29.1) — toggle switch + selectable challenge tiles, replacing
+   a misaligned checkbox list. Scoped under .sb-modal so none of this leaks into any
+   other modal's own checkbox/label/scroll behaviour. ── */
+.sb-modal{display:flex;flex-direction:column;max-height:90vh}
+.sb-modal-body{overflow-y:auto;flex:1;min-height:0}
+.sb-modal-footer{flex-shrink:0;padding-top:12px;margin-top:4px;border-top:1px solid var(--border)}
+.sb-section{margin-top:18px}
+.sb-section-title{font-family:var(--font-head);font-size:11px;letter-spacing:1px;color:var(--text);margin-bottom:4px}
+.sb-section-help{font-size:12px;color:var(--text3);line-height:1.5;margin-bottom:12px}
+
+.sb-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--border);margin-bottom:14px}
+.sb-toggle-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sb-toggle-label{font-size:13px;color:var(--text);font-weight:500}
+.sb-toggle-desc{font-size:11px;color:var(--text3)}
+.sb-toggle{position:relative;width:42px;height:24px;border-radius:12px;border:1px solid var(--border2);background:var(--bg3);cursor:pointer;flex-shrink:0;padding:0;transition:background-color 0.2s,border-color 0.2s}
+.sb-toggle[aria-checked="true"]{background:var(--blue);border-color:var(--blue)}
+.sb-toggle-knob{position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform 0.2s}
+.sb-toggle[aria-checked="true"] .sb-toggle-knob{transform:translateX(18px)}
+.sb-toggle:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+
+.sb-challenge-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.sb-challenge-grid.sb-grid-dimmed{opacity:0.45}
+.sb-challenge-tile{position:relative;display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg3);cursor:pointer;transition:border-color 0.2s,background-color 0.2s;text-align:left;min-width:0}
+.sb-challenge-tile:hover{border-color:var(--border2)}
+.sb-challenge-tile[aria-checked="true"]{border-color:var(--blue);background:rgba(79,124,255,0.12)}
+.sb-challenge-tile[aria-disabled="true"]{cursor:not-allowed}
+.sb-challenge-tile:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.sb-tile-check{width:16px;height:16px;border-radius:50%;border:1px solid var(--border2);flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;line-height:1;color:transparent;margin-top:1px;background:var(--bg2)}
+.sb-challenge-tile[aria-checked="true"] .sb-tile-check{background:var(--blue);border-color:var(--blue);color:#fff}
+.sb-tile-text{display:flex;flex-direction:column;gap:1px;min-width:0}
+.sb-tile-name{font-size:13px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-tile-meta{font-size:11px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-empty-note{font-size:12px;color:var(--text3);padding:10px 0}
+
+.sb-summary{font-size:12px;color:var(--text2);margin-bottom:8px}
+.sb-summary.sb-summary-warn{color:var(--orange)}
+.sb-default-notice{font-size:12px;color:var(--orange);background:rgba(255,179,71,0.1);border:1px solid rgba(255,179,71,0.3);border-radius:var(--radius-sm);padding:8px 10px;margin-bottom:10px;line-height:1.5}
+.sb-save-reason{font-size:11px;color:var(--text3);text-align:right;margin-top:4px}
+
+@media(max-width:480px){
+    .sb-challenge-grid{grid-template-columns:1fr}
+}
+@media(prefers-reduced-motion:reduce){
+    .sb-toggle,.sb-toggle-knob,.sb-challenge-tile{transition:none}
+}
+
 /* ── TRADE JOURNAL (v3.11.0) — emotion grid pieces, reused at all three phases ── */
 .emotion-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
 .emotion-desc-panel{margin-top:8px;padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text2);line-height:1.5}

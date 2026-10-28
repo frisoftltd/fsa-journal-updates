@@ -1,24 +1,43 @@
 
-<!-- ══ NEW / RENAME STRATEGY MODAL ══ -->
+<!-- ══ NEW / EDIT STRATEGY MODAL (v3.29.1 redesign — chips/tiles, toggle switch) ══ -->
 <div class="modal-overlay" id="strategy-builder-modal">
-  <div class="modal" style="max-width:440px">
-    <h3 id="strategy-builder-modal-title">🧪 NEW STRATEGY</h3>
-    <input type="hidden" id="sb-id">
-    <div class="form-group full"><label>Strategy Name</label><input type="text" id="sb-name" placeholder="e.g. ICT Concepts, Price Action, FSA"></div>
-    <!-- v3.29.0 (req #1) — default is "applies to all challenges" (checked) for a new
-         strategy; unchecking reveals which specific challenges it's used on. -->
-    <div class="form-group full">
-      <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
-        <input type="checkbox" id="sb-applies-all" checked onchange="toggleStrategyChallengeList()"> Applies to all challenges
-      </label>
+  <div class="modal sb-modal" style="max-width:480px">
+    <h3 id="strategy-builder-modal-title">New strategy</h3>
+    <div class="sb-modal-body">
+      <input type="hidden" id="sb-id">
+      <div class="form-group full">
+        <label>Strategy Name</label>
+        <input type="text" id="sb-name" placeholder="e.g. ICT Concepts, Price Action, FSA" oninput="updateStrategySaveState()">
+      </div>
+
+      <div class="sb-section">
+        <div class="sb-section-title">Where is this strategy used?</div>
+        <div class="sb-section-help">Pick the challenge accounts that use it. It will only appear on those accounts.</div>
+
+        <div class="sb-toggle-row">
+          <div class="sb-toggle-text">
+            <div class="sb-toggle-label">All challenges</div>
+            <div class="sb-toggle-desc">Available on every account, including future ones</div>
+          </div>
+          <button type="button" class="sb-toggle" id="sb-applies-all" role="switch" aria-checked="true"
+                  aria-label="All challenges" onclick="toggleStrategyAppliesAll()">
+            <span class="sb-toggle-knob"></span>
+          </button>
+        </div>
+
+        <div class="sb-challenge-grid" id="sb-challenge-list"></div>
+        <div class="sb-empty-note" id="sb-challenge-empty" style="display:none">Create a challenge first to scope this strategy.</div>
+      </div>
     </div>
-    <div class="form-group full" id="sb-challenge-list-wrap" style="display:none">
-      <label>Used on these challenges</label>
-      <div id="sb-challenge-list" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px"></div>
-    </div>
-    <div class="form-actions">
-      <button class="btn btn-ghost" onclick="document.getElementById('strategy-builder-modal').classList.remove('open')">Cancel</button>
-      <button class="btn btn-primary" onclick="saveStrategyMeta()">Save Strategy</button>
+
+    <div class="sb-modal-footer">
+      <div class="sb-default-notice" id="sb-default-notice" style="display:none"></div>
+      <div class="sb-summary" id="sb-summary"></div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" onclick="closeStrategyModal()">Cancel</button>
+        <button class="btn btn-primary" id="sb-save-btn" onclick="saveStrategyMeta()">Save Strategy</button>
+      </div>
+      <div class="sb-save-reason" id="sb-save-reason"></div>
     </div>
   </div>
 </div>

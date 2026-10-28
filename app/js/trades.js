@@ -604,10 +604,12 @@ function collectTradeVariables(){
     return vars;
 }
 
-// ── TRADE JOURNAL (v3.11.0) ──────────────────────────────
+// ── TRADE JOURNAL (v3.11.0, emotion lists split per-phase in v3.30.0) ───
 // Three phases (pre_entry/during/post_close), each with its own emotion grid instance
-// (same window.EMOTION_STATES taxonomy, reused per phase rather than one global field —
-// the emotion at entry, mid-trade, and at close are three different data points). Answers
+// AND, since v3.30.0, its own option list (emotionStatesForPhase() below reads
+// window.EMOTION_STATES_PRE_ENTRY/_DURING/_POST_CLOSE — the emotion at entry, mid-trade,
+// and at close are three different data points, and now three different questions too).
+// Answers
 // live in window._journalState rather than per-field hidden inputs, since the whole
 // section is collected as one JSON blob (collectTradeJournal()) for the save request, not
 // read back out of the form generically the way trade_date/pair/etc. are.
@@ -729,37 +731,62 @@ function collectTradeJournal(){
     ];
 }
 
+// v3.30.0 — the one place a phase id maps to its own option list, mirroring
+// includes/emotion_states.php::journalEmotionOptions() server-side.
+function emotionStatesForPhase(phase){
+    if (phase === 'during') return window.EMOTION_STATES_DURING || [];
+    if (phase === 'post_close') return window.EMOTION_STATES_POST_CLOSE || [];
+    return window.EMOTION_STATES_PRE_ENTRY || [];
+}
+
 function renderEmotionGrid(phase, selectedCode=null){
     const grid = document.getElementById('emotion-grid-'+phase);
     if (!grid) return;
-    const states = window.EMOTION_STATES || [];
-    grid.innerHTML = states.map(s=>`
+    const states = emotionStatesForPhase(phase);
+    const known = states.some(s=>s.code===selectedCode);
+
+    // v3.30.0 (req #2) — a code saved before this release (every phase rendered the same
+    // shared list back then) or under what is now a different phase's own list may not
+    // be in THIS phase's current options. Append one more chip, built from the exact
+    // same markup as every other pill, rather than dropping it — a real extra selected
+    // chip, not just a text-only fallback.
+    const extraLabel = (selectedCode && !known)
+        ? ((window.ALL_EMOTION_CODES||[]).find(s=>s.code===selectedCode)?.label || (window.LEGACY_EMOTION_LABELS||{})[selectedCode] || selectedCode)
+        : null;
+    const extra = extraLabel ? [{ code: selectedCode, label: extraLabel }] : [];
+
+    grid.innerHTML = states.concat(extra).map(s=>`
         <span style="display:inline-flex;align-items:stretch">
             <button type="button" class="btn btn-ghost btn-sm emotion-pill" data-code="${s.code}" onclick="toggleEmotionSelect('${phase}','${s.code}')" style="border-top-right-radius:0;border-bottom-right-radius:0;border-right:none">${s.label}</button>
             <button type="button" class="btn btn-ghost btn-sm emotion-info-btn" data-code="${s.code}" onclick="previewEmotion('${phase}','${s.code}')" title="What does '${s.label}' mean?" style="border-top-left-radius:0;border-bottom-left-radius:0;padding:0 9px;font-weight:700">ⓘ</button>
         </span>
     `).join('');
 
-    const known = states.some(s=>s.code===selectedCode);
-    // Preserve whatever was already stored (new code, legacy code, or nothing) until the
-    // user actively changes it — only a tap should ever change this value.
+    // Preserve whatever was already stored (current code, older-list code, or nothing)
+    // until the user actively changes it — only a tap should ever change this value.
     window._journalState[phase].emotion_code = selectedCode || null;
     highlightEmotionPill(phase, selectedCode);
     document.getElementById('emotion-description-'+phase).style.display = 'none';
-
-    // A legacy (pre-v3.10.0, single-field) code won't match any pill above — surface it
-    // rather than let the grid look empty/unanswered, and warn before it gets silently
-    // overwritten. This can only appear on the pre_entry grid, since legacy trades only
-    // ever had one emotion_tag value and no phase concept.
-    const legacyNote = document.getElementById('emotion-legacy-note-'+phase);
-    if (selectedCode && !known) {
-        const legacyLabel = (window.LEGACY_EMOTION_LABELS||{})[selectedCode] || selectedCode;
-        legacyNote.textContent = `Previously recorded: "${legacyLabel}" — a retired state, no longer selectable. Picking one below replaces it.`;
-        legacyNote.style.display = 'block';
-    } else {
-        legacyNote.style.display = 'none';
-    }
+    updateEmotionLegacyNote(phase);
     toggleEmotionClearBtn(phase);
+}
+
+// req #2 — states in words that the current selection is the extra "from an older
+// list" chip renderEmotionGrid() appended, rather than leaving it unexplained.
+// Re-derived from the live selection (not just at initial render) so toggling away from
+// it clears the note instead of leaving a stale claim sitting below the grid.
+function updateEmotionLegacyNote(phase){
+    const note = document.getElementById('emotion-legacy-note-'+phase);
+    if (!note) return;
+    const code = window._journalState[phase].emotion_code;
+    const current = emotionStatesForPhase(phase).some(s=>s.code===code);
+    if (code && !current) {
+        const label = (window.ALL_EMOTION_CODES||[]).find(s=>s.code===code)?.label || (window.LEGACY_EMOTION_LABELS||{})[code] || code;
+        note.textContent = `"${label}" is from an older list for this stage — kept selected above rather than dropped. Pick a different one to replace it.`;
+        note.style.display = 'block';
+    } else {
+        note.style.display = 'none';
+    }
 }
 
 function highlightEmotionPill(phase, code){
@@ -779,7 +806,7 @@ function toggleEmotionSelect(phase, code){
     const next = cur === code ? null : code;
     window._journalState[phase].emotion_code = next;
     highlightEmotionPill(phase, next);
-    document.getElementById('emotion-legacy-note-'+phase).style.display = 'none';
+    updateEmotionLegacyNote(phase);
     if (next) previewEmotion(phase, next); else document.getElementById('emotion-description-'+phase).style.display = 'none';
     toggleEmotionClearBtn(phase);
 }
@@ -788,7 +815,7 @@ function clearEmotion(phase){
     window._journalState[phase].emotion_code = null;
     highlightEmotionPill(phase, null);
     document.getElementById('emotion-description-'+phase).style.display = 'none';
-    document.getElementById('emotion-legacy-note-'+phase).style.display = 'none';
+    updateEmotionLegacyNote(phase);
     toggleEmotionClearBtn(phase);
 }
 
@@ -799,20 +826,30 @@ function toggleEmotionClearBtn(phase){
 
 // Reveals a state's description WITHOUT selecting it — tapping "ⓘ" never touches the
 // hidden field or the selected pill, so reading what a state means is fully non-committal.
+// v3.30.0 — checks this phase's own list first, then falls back to ALL_EMOTION_CODES so
+// the info button on an "older list" extra chip (any phase, any era except the pure
+// pre-v3.10.0 8-state set) still explains itself instead of silently doing nothing.
 function previewEmotion(phase, code){
-    const s = (window.EMOTION_STATES||[]).find(x=>x.code===code);
+    const s = emotionStatesForPhase(phase).find(x=>x.code===code) || (window.ALL_EMOTION_CODES||[]).find(x=>x.code===code);
     const panel = document.getElementById('emotion-description-'+phase);
-    if (!s) { panel.style.display = 'none'; return; }
+    if (!s) {
+        const legacyLabel = (window.LEGACY_EMOTION_LABELS||{})[code];
+        if (!legacyLabel) { panel.style.display = 'none'; return; }
+        panel.innerHTML = `<strong style="color:var(--text)">${legacyLabel}</strong><br>Retired before descriptions were tracked — kept here so this trade's own history still reads clearly, not offered as a new answer.`;
+        panel.style.display = 'block';
+        return;
+    }
     panel.innerHTML = `<strong style="color:var(--text)">${s.label}</strong><br>${s.description}`;
     panel.style.display = 'block';
 }
 
-// Readable label for any emotion_tag/emotion_code value — current code, legacy code, or
-// unrecognized. Mirrors includes/emotion_states.php::emotionLabel(), reading the same
-// embedded data rather than a second hardcoded copy.
+// Readable label for any emotion_tag/emotion_code value from any phase or era — current
+// code (any of the three phase lists), legacy code, or unrecognized. Mirrors
+// includes/emotion_states.php::emotionLabel(), reading the same embedded data rather
+// than a second hardcoded copy.
 function emotionLabel(code){
     if (!code) return null;
-    const s = (window.EMOTION_STATES||[]).find(x=>x.code===code);
+    const s = (window.ALL_EMOTION_CODES||[]).find(x=>x.code===code);
     if (s) return s.label;
     const legacy = (window.LEGACY_EMOTION_LABELS||{})[code];
     return legacy || code;

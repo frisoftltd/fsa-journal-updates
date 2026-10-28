@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-28 (v3.29.1 — New/Edit Strategy modal redesign: toggle switch + selectable challenge tiles, replacing the misaligned checkbox list)
+**Last Updated:** 2026-10-28 (v3.30.0 — separate feeling option lists for While-Open and After-Close in the trade journal, replacing the one shared 9-state list every phase used to render)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.29.1 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.30.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -652,6 +652,82 @@ scan clean; full 13-driver suite passes (one driver hit a transient network-wait
 under shared-port contention running all 13 back-to-back, re-ran standalone immediately
 after and passed clean — unrelated, no backtest file touched this release).
 
+### Separate feeling lists per trade-journal phase (v3.30.0)
+
+Acrob's point: how a trade feels with money still at risk is not the same set of states
+as the reaction once it's closed. Before this release all three journal phases
+(`pre_entry`/`during`/`post_close`) rendered the exact same 9-state
+`includes/emotion_states.php::emotionStates()` list — confirmed, not assumed:
+`journal_taxonomy.php`'s own doc comment said so outright ("the nine states are shared
+across all three journal phases, not journal-specific"), and `js/trades.js`'s
+`renderEmotionGrid(phase, selectedCode)` took a phase purely to scope DOM ids, reading
+the one shared `window.EMOTION_STATES` global for all three.
+
+**Before-Entry is untouched, per the briefing** — `emotionStates()` itself, its 9 codes/
+labels/descriptions, and its order are all exactly what they were. **While-Open**
+(`emotionStatesDuring()`, 9 new codes: `calm_trusting`/`anxious_stop`/
+`hoping_reversal`/`greedy_add`/`wanting_out_early`/`tempted_move_stop`/
+`checking_constantly`/`bored_impatient`/`fear_giving_back`) and **After-Close**
+(`emotionStatesPostClose()`, 10 new codes: `accepting_plan`/`relieved`/
+`satisfied_process`/`frustrated_angry`/`revenge_urge`/`regret_early`/`regret_late`/
+`overconfident_win`/`flat_numb`/`eager_rebound`) are brand-new code strings, not reused
+or aliased from the old shared list even where a new option is conceptually close to an
+old one (e.g. `hoping_reversal` vs. the old shared `hoping`) — the old codes' own
+labels/descriptions stay pinned to what Before-Entry has always shown, so they couldn't
+be reworded for the new phases without changing what Before-Entry displays too.
+`journalEmotionOptions(string $phase): array` is the one dispatcher mapping a phase to
+its list, mirrored in JS by `emotionStatesForPhase()`.
+
+**No migration** — both `trade_journal.emotion_code` and `trade_checkins.emotion_code`
+are already free-text `VARCHAR(30)` with no server-side whitelist (`TradeController::
+saveJournal()`/`saveCheckin()` just `trim()` whatever arrives), so a new phase list is
+purely additive from the database's point of view.
+
+**Old stored values are never dropped or silently remapped.** A code saved before this
+release (any of the old shared 9, regardless of which phase it was saved under — a
+During check-in could have `vengeful` from back when During rendered the same list as
+every other phase) that isn't in its own phase's new list renders as one more chip
+appended to that phase's grid, pre-selected, built from the exact same pill markup as
+every real option — not a separate text-only fallback — with a one-line note identifying
+it as "from an older list for this stage." `allEmotionCodes()` (PHP) /
+`window.ALL_EMOTION_CODES` (JS, embedded by `index.php` the same way the three phase
+lists are) is the merged lookup this resolves against; `emotionLabel()` (both the PHP
+and JS copies) was widened from searching `emotionStates()` alone to searching this
+merged set, so the read-only Trade Journal panel and the Check-In History timeline
+(`js/trades.js`) pick up the fix automatically — one function, not four separately
+patched call sites. Picking a different, current option for that phase simply overwrites
+the stored code on next save, same as it always has; nothing rewrites existing rows in
+bulk.
+
+**Review Engine is unaffected, and was already not reading this data.** Investigated,
+not assumed: `ReviewEngineController::ruleEmotionOutcome()`/`ruleNegativeStateFrequency()`
+(the only emotion-aware insight rules) read `trades.emotion_tag` — a legacy, single-value
+column that nothing has written to since v3.11.0 introduced the three-phase journal
+(`TradeController::saveTrade()`'s column whitelist still includes it, but the trade form
+has no field for it; `BitfundedImportController` inserts it as `NULL` explicitly). These
+rules were already only ever reflecting pre-v3.11.0 trades' emotion data, never
+`trade_journal`/`trade_checkins` — a separate, pre-existing gap, flagged for Acrob but
+out of scope for this release. Statistics, Report Card, and the Leaderboard reference
+neither column at all. `good_process` (the existing "Was this good process, regardless
+of outcome?" Yes/No on `post_close`) was kept as-is, not duplicated with a second "Did I
+follow my plan?" field, per Acrob's explicit instruction — the two questions already
+overlap and the data model has no other natural slot for it without a migration.
+
+Verified via a new standalone Playwright driver, `tools/ui-harness/drive-v3300.mjs` —
+same no-DB-needed pattern as `drive-v3291.mjs`, except the embedded option-list globals
+come from actually invoking the real `includes/emotion_states.php`/`journal_taxonomy.php`
+functions via a generated one-shot `php` script (not hand-copied JSON), so the fixture
+can't drift from what the server actually embeds. 15/15 assertions: Before-Entry's 9
+codes unchanged, While-Open's 9 and After-Close's 10 new codes in the right order and
+mutually disjoint from each other and from the old shared list, info-icon descriptions
+render, an old During value (`vengeful`) and an old After-Close value (`invincible`, both
+from the pre-v3.30.0 shared list) each show as a real pre-selected extra chip with the
+"older list" note, `emotionLabel()` still resolves an old code to its label (the
+read-only panel's own code path), selecting a current option clears the note, and a
+newly saved After-Close code round-trips through `collectTradeJournal()` and shows
+selected again on reopen. `php -l`/`node --check` clean, duplicate-name scan clean, full
+14-driver suite passes.
+
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
 ### The Core Principle
@@ -846,7 +922,15 @@ challenges (1) ──→ (many) risk_ladder_tiers; (1) challenge_limits
   happen for me to be wrong?"), `during` (optional, goes to `trade_checkins` — its
   absence is itself data, no "skipped" marker), `post_close` (exit type, emotion,
   good-process). Codes (not labels) stored throughout, from
-  `includes/journal_taxonomy.php` for journal-specific fields.
+  `includes/journal_taxonomy.php` for journal-specific fields. **Each phase has its own
+  emotion option list** (v3.30.0) — `includes/emotion_states.php::journalEmotionOptions($phase)`
+  is the one place a phase maps to its list (`emotionStates()` for `pre_entry`, unchanged
+  since v3.10.0; `emotionStatesDuring()`/`emotionStatesPostClose()` are new, brand-new
+  codes, never aliased onto an old shared-list code even where the concept is similar).
+  A stored code no longer in its own phase's list (saved before v3.30.0, when every phase
+  rendered the same shared 9) still displays, pre-selected, as an extra chip — never
+  dropped, never silently remapped — see that file's own doc comment and
+  `js/trades.js::renderEmotionGrid()`/`emotionStatesForPhase()`.
 - **Execution data is importer-only.** `TradeController::saveTrade()` never sets
   `pnl`/`fees`/`time_in`/`time_out`/`exit_reason`/`r_multiple`/`risk_amount` —
   those come from `BitfundedImportController`/backtest fills only. The trade form
@@ -1164,7 +1248,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.29.1
+Current Version: v3.30.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

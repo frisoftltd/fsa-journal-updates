@@ -162,7 +162,14 @@ foreach ($modals as $m) {
 <script>
 // Single source of truth for emotion codes/labels/descriptions lives in
 // includes/emotion_states.php — trades.js reads this, it never hardcodes the list.
-window.EMOTION_STATES = <?= json_encode(emotionStates()) ?>;
+// v3.30.0 — one list per journal phase (how a trade feels before entry, while it's
+// open, and after close are three different questions); ALL_EMOTION_CODES is every
+// code any phase has ever offered, for resolving a stored value that isn't in its own
+// phase's current list ("from an older list" — see js/trades.js renderEmotionGrid()).
+window.EMOTION_STATES_PRE_ENTRY = <?= json_encode(emotionStates()) ?>;
+window.EMOTION_STATES_DURING = <?= json_encode(emotionStatesDuring()) ?>;
+window.EMOTION_STATES_POST_CLOSE = <?= json_encode(emotionStatesPostClose()) ?>;
+window.ALL_EMOTION_CODES = <?= json_encode(allEmotionCodes()) ?>;
 window.LEGACY_EMOTION_LABELS = <?= json_encode(legacyEmotionLabels()) ?>;
 // Same single-source-of-truth pattern for the trade journal's other enumerated answers —
 // includes/journal_taxonomy.php, never hardcoded in trades.js.

@@ -68,10 +68,14 @@
              historical trades (see trade-view-modal / viewTrade()) but no longer written
              by this form — CLAUDE.md has the full design rationale.
 
-             Pills/options render from window.EMOTION_STATES, window.JOURNAL_ACTIONS,
-             window.JOURNAL_EXIT_TYPES (includes/emotion_states.php and
-             includes/journal_taxonomy.php via index.php) — nothing here hardcodes a code
-             or label. js/trades.js's renderEmotionGrid()/renderActionsGrid()/
+             Pills/options render from window.EMOTION_STATES_PRE_ENTRY/_DURING/
+             _POST_CLOSE, window.JOURNAL_ACTIONS, window.JOURNAL_EXIT_TYPES
+             (includes/emotion_states.php and includes/journal_taxonomy.php via
+             index.php) — nothing here hardcodes a code or label. v3.30.0: each phase's
+             emotion grid has its own option list (js/trades.js's
+             emotionStatesForPhase()) — how a trade feels before entry, while it's open,
+             and after close are three different questions, not one list reused three
+             times. js/trades.js's renderEmotionGrid()/renderActionsGrid()/
              renderExitTypeSelect() are all parameterized by phase, not copy-pasted three
              times, and write into window._journalState rather than per-field hidden
              inputs, since this section's answers are collected as one JSON blob

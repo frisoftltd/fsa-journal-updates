@@ -9,6 +9,10 @@
     <select id="stat-year" style="max-width:100px">
       <?php for($y=date('Y');$y>=2024;$y--) echo "<option value='$y'>$y</option>"; ?>
     </select>
+    <!-- v3.28.0 — strategy/tag filter. Performance figures only (win rate, net P&L,
+         profit factor, avg R, streak, every curve/breakdown below) -- balance, the
+         drawdown banner and the risk ladder never read it, see stats-scope-caption. -->
+    <select id="stat-strategy" style="max-width:220px" title="Filter performance figures by strategy"><option value="">All trades</option></select>
     <button class="btn btn-primary btn-sm" onclick="loadStats()">Apply</button>
   </div>
   <div id="stats-scope-caption" style="font-size:11px;color:var(--text3);margin-bottom:8px"></div>

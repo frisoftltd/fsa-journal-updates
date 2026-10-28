@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-28 (v3.27.4 — margin-era funding is now attributed per trade and lands in net_pnl, closing the gap v3.27.3 left — that release stopped double-counting it but never routed it anywhere)
+**Last Updated:** 2026-10-28 (v3.28.0 — strategy/tag filter on Statistics/Dashboard + bulk "Set Strategy" in the Trade Log, drawdown curve no longer flatlines on an all-losses stretch, sidebar DD badge refreshes on every page)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.27.4 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.28.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -441,6 +441,74 @@ funding ≈ `-17.4617` across the real 120 cards, final balance `9240.36`) need 
 Position History paste to confirm independently of the live re-import already planned as
 this release's own after-the-fact check.
 
+### Strategy/tag filter + bulk tagging + drawdown fixes (v3.28.0)
+
+Built for the "signal-follow" use case: a trader wants a group of real, balance-counting
+trades (e.g. 12 copied from a YouTuber's signals, not his own FSA five-gate rules) excluded
+from his own performance stats without touching the challenge's account-level truths.
+
+**Bulk "Set Strategy"** (`TradeController::bulkSetStrategy()`, `bulk_set_trade_strategy`) —
+checkboxes + a "Set Strategy (N)" button in the Trade Log (`pages/trades.php`,
+`js/trades.js`), the same single-field write the pencil-icon edit form already made one
+trade at a time (`trades.strategy_id`, never touched by the Bitfunded importer — confirmed
+re-import-safe before this release even started). `challenge_id` is an **exact match**
+(never the `(challenge_id=? OR challenge_id IS NULL)` reading pattern) so a legacy
+no-challenge trade can never be bulk-touched by accident; an id that doesn't belong to the
+submitted user+challenge is silently excluded, not an error — the response's `updated`
+count can be lower than the selection if it went stale. `confirm()` before running shows
+how many trades will change.
+
+**Strategy filter on Statistics/Dashboard** (`StatsController::strategyFilterClause()`,
+`get_stats`'s new `strategy_filter` param — `all` default, `none`, a numeric strategy id,
+or `exclude:<id>`) — reuses the existing `trades.strategy_id`/`strategies` mechanism, no
+new tagging concept. Applied to `$where`/`$chWhere` uniformly, so it covers every
+performance figure (win rate, net P&L, profit factor, avg R, streak, the cumulative/
+drawdown curve, every breakdown table) by construction. **Deliberately excluded**:
+`challengeBalance()` (not even called from this file), `dd_pct`/`current_drawdown_pct`
+(read the challenge row via `staticDrawdownPct($ch)` — a 'trailing'-type challenge's own
+banner is recomputed from `$whereNoStrategy`, a second, pre-filter-only cumulative pass,
+specifically so it can't be changed by tagging), the risk ladder (a different controller
+entirely), and today's daily-loss check (its own always-separate inline query). Dropdown
+UI (`js/app.js::populateStrategyFilterSelect()`, shared by `stats.php`/`dashboard.php`)
+lists "All trades" / "No strategy" / each strategy / "All except \<strategy\>" for each
+one. `renderScopeCaption()` states the active filter so what's shown never looks silently
+narrowed.
+
+**Drawdown curve no longer flatlines on an all-losses stretch** —
+`StatsController::getStats()`'s per-trade `$cum[]` (`:121`, used for both the dashboard
+curve and `max_drawdown_pct`) guarded `$dd`'s computation on `$peak > 0`, not just
+`$starting_bal > 0`. `$peak` starts at 0 and only rises on a profitable stretch; an
+all-losses account (confirmed live: TradeFI, 12 trades, -884.42) never has one, so `$peak`
+stayed exactly 0 forever and every single row's `$dd` was forced to 0 despite real, growing
+losses. Fixed by dropping the `$peak > 0` half of the guard — `$peak === 0` ("never been
+above the starting point") is a legitimate state, not a divide-by-zero. `max_drawdown_pct`
+needed no separate fix; it's `max(array_column($cum,'drawdown'))` over the same corrected
+array.
+
+**Sidebar "DD: X%" badge no longer stuck at its placeholder** — `index.php` hardcodes
+`dd-fill`/`dd-label`/`dd-max-label` to a literal 0%, and the only code that ever set them
+to a real number was `dashboard.js::loadDashboard()`, which only runs once the Dashboard
+page itself loads. A session that opened on any other page first (e.g. Trade Log) showed
+the dead placeholder the whole time. Fixed by adding the same `dd_pct` figure (via
+`ProfileController::getUser()`'s new field, `staticDrawdownPct($ch)` — the same helper
+`StatsController`'s own figure already used, one implementation) to
+`js/challenges.js::updateSidebarFromUser()`, which already runs on every page load
+(`app.js`'s `DOMContentLoaded`, right after `get_user` resolves). `dashboard.js`'s own
+pre-existing (and now redundant, but harmless and consistent with how `sidebar-balance` is
+already set in two places) copy was left as-is rather than removed, to keep this release's
+blast radius to exactly what was asked.
+
+No schema change, no migration. Verified with a disposable local integration test (not
+committed — needs a local MySQL/MariaDB instance, which this environment happened to have
+one of, confirmed unrelated to this project before use, dropped again at the end): 29/29
+assertions against the real controllers over a real HTTP loopback (`php -S`, needed because
+CLI SAPI has no `php://input` at all for `bulkSetStrategy`'s real `jsonInput()`) — the
+8.8442% drawdown figure (matching the account-level banner, not 0) on an all-losses 12-trade
+series; the strategy filter's 12/0 split before and after tagging; `challengeBalance()` and
+`dd_pct`/`current_drawdown_pct` genuinely unchanged by both tagging and every filter value;
+`strategy_id` surviving a re-import-shaped matched-row `UPDATE`; and re-tagging the same
+trades twice being idempotent.
+
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
 ### The Core Principle
@@ -710,7 +778,7 @@ File uploads go through `fetch()` directly with `FormData`.
 |--------|-------------|
 | Profile | `get_user`, `update_profile`, `update_settings` |
 | Challenges | `get_challenges`, `get_active_challenge`, `add_challenge`, `update_challenge`, `delete_challenge`, `switch_challenge`, `get_ladder_tiers`, `save_ladder_tiers` |
-| Trades | `get_trades`, `add_trade`, `update_trade`, `delete_trade` |
+| Trades | `get_trades`, `add_trade`, `update_trade`, `delete_trade`, `bulk_set_trade_strategy` |
 | Stats / Alerts | `get_stats`, `get_alerts` |
 | Calculator | `calculate_risk` (legacy, unused by current UI), `size_preview`, `auto_risk_preview`, `get_risk_status` |
 | Pairs | `get_pairs`, `add_pair`, `delete_pair` |
@@ -945,7 +1013,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.27.4
+Current Version: v3.28.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

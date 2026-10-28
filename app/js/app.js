@@ -32,6 +32,24 @@ function fmtTradePrice(n){
     const dp = abs>=100 ? 2 : abs>=1 ? 4 : abs>=0.01 ? 6 : abs>=0.0001 ? 8 : 10;
     return v.toFixed(dp);
 }
+// v3.28.0 — shared by dashboard.js and stats.js, same reason renderScopeCaption() below
+// is shared: both pages read get_stats() and both need the same strategy_filter options.
+// Preserves whatever's already selected (same pattern as trades.js's own loadPairs())
+// rather than resetting to "All trades" every reload.
+async function populateStrategyFilterSelect(selectId){
+    const sel = document.getElementById(selectId);
+    if(!sel) return;
+    const cur = sel.value;
+    const strategies = (await api('get_strategies')).filter(s=>s.is_active==1);
+    const opts = ['<option value="">All trades</option>', '<option value="none">No strategy</option>'];
+    strategies.forEach(s=>{
+        opts.push(`<option value="${s.id}">${s.name}</option>`);
+        opts.push(`<option value="exclude:${s.id}">All except "${s.name}"</option>`);
+    });
+    sel.innerHTML = opts.join('');
+    if(cur) sel.value = cur;
+}
+
 // Shared by dashboard.js and stats.js — both render get_stats() output and both need to
 // disclose the challenge scope + open-trade exclusion, not leave it silent.
 function renderScopeCaption(elId, s){
@@ -41,6 +59,16 @@ function renderScopeCaption(elId, s){
     const parts=[];
     if(scope.challenge_name) parts.push(`Scoped to "${scope.challenge_name}"`);
     if(s.open_trades) parts.push(`${s.open_trades} open trade${s.open_trades>1?'s':''} excluded from Win Rate & Avg R`);
+    // v3.28.0 — strategy_filter's own caption. Performance figures only (win rate, net
+    // P&L, profit factor, avg R, streak, every curve/breakdown) -- balance, the drawdown
+    // banner, the sidebar and the risk ladder never read this filter, so the caption is
+    // worded to make that split explicit rather than implying "everything below" is scoped.
+    const strat = s.strategy_scope;
+    if(strat && strat.mode !== 'all'){
+        if(strat.mode === 'none') parts.push('Performance figures: no strategy only');
+        else if(strat.mode === 'only') parts.push(`Performance figures: "${strat.strategy_name||'—'}" only`);
+        else if(strat.mode === 'exclude') parts.push(`Performance figures: all except "${strat.strategy_name||'—'}"`);
+    }
     el.textContent = parts.join(' · ');
 }
 function pnlCls(n){return parseFloat(n)>=0?'pnl-pos':'pnl-neg';}

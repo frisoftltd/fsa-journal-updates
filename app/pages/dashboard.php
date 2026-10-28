@@ -2,6 +2,12 @@
 <!-- ── DASHBOARD ── -->
 <div class="page active" id="page-dashboard">
   <div class="alert-bar" id="alert-bar"></div>
+  <!-- v3.28.0 — strategy/tag filter, same options and same performance-figures-only
+       scope as the Statistics page's own (stats.php). Balance, the drawdown banner, the
+       sidebar and the risk ladder never read it -- see dash-scope-caption. -->
+  <div class="filter-bar" style="margin-bottom:8px">
+    <select id="dash-strategy" style="max-width:220px" title="Filter performance figures by strategy" onchange="loadDashboard()"><option value="">All trades</option></select>
+  </div>
   <div id="dash-scope-caption" style="font-size:11px;color:var(--text3);margin-bottom:8px"></div>
   <div class="kpi-grid">
     <div class="kpi"><div class="kpi-label">Total Trades</div><div class="kpi-val blue" id="kpi-trades">—</div></div>

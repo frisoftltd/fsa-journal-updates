@@ -7,7 +7,11 @@
 async function loadStats(){
     const m=document.getElementById('stat-month')?.value||'';
     const y=document.getElementById('stat-year')?.value||'';
-    const s=await api('get_stats'+(m&&y?`&month=${m}&year=${y}`:''));
+    await populateStrategyFilterSelect('stat-strategy');
+    const strat=document.getElementById('stat-strategy')?.value||'';
+    let url='get_stats'+(m&&y?`&month=${m}&year=${y}`:'');
+    if(strat) url+='&strategy_filter='+encodeURIComponent(strat);
+    const s=await api(url);
     renderScopeCaption('stats-scope-caption', s);
     const set=(id,val)=>{const el=document.getElementById(id);if(el)el.textContent=val;};
     set('s-total',s.total_trades); set('s-wins',s.wins); set('s-losses',s.losses);

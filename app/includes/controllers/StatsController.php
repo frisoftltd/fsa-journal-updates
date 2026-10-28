@@ -34,6 +34,26 @@ class StatsController {
         $p = [$this->uid, $chId];
         if ($month && $year) { $where .= " AND MONTH(trade_date)=? AND YEAR(trade_date)=?"; $p[] = intval($month); $p[] = intval($year); }
 
+        // v3.28.0 — strategy/tag filter: performance figures only. $stratSql/$stratParams
+        // get appended to every $where- and $chWhere-based query below (win rate, net
+        // P&L, profit factor, avg R, streak, the cumulative/drawdown curve, every
+        // breakdown) — see strategyFilterClause()'s own docblock for exactly which
+        // figures deliberately do NOT read it: challengeBalance() (not computed in this
+        // controller at all), current_drawdown_pct/dd_pct (staticDrawdownPct($ch), reads
+        // the challenge row, never trades), the risk ladder (CalculatorController, not
+        // touched by this file), and today's daily-loss check below (deliberately
+        // account-wide — a live risk control, not a performance report).
+        [$stratSql, $stratParams, $stratScope] = $this->strategyFilterClause($_GET['strategy_filter'] ?? 'all');
+        // $whereNoStrategy/$pNoStrategy keep the pre-filter scope (challenge + month/year
+        // only) for the one figure below that must NOT follow this filter despite reading
+        // trades: a 'trailing' challenge's current_drawdown_pct (the account-level
+        // drawdown banner). Everything else from here on uses $where/$p, now with the
+        // strategy clause folded in.
+        $whereNoStrategy = $where;
+        $pNoStrategy = $p;
+        $where .= $stratSql;
+        $p = array_merge($p, $stratParams);
+
         $qv = function($sql, $p) { $s = $this->db->prepare($sql); $s->execute($p); return $s->fetchColumn(); };
         $qa = function($sql, $p) { $s = $this->db->prepare($sql); $s->execute($p); return $s->fetchAll(); };
 
@@ -43,6 +63,7 @@ class StatsController {
         $closedFilter = "result IN ('Win','Loss','Break Even')";
 
         $stats = [];
+        $stats['strategy_scope'] = $stratScope;
         $stats['total_trades']  = $qv("SELECT COUNT(*) FROM trades $where", $p);
         $stats['wins']          = $qv("SELECT COUNT(*) FROM trades $where AND result='Win'", $p);
         $stats['losses']        = $qv("SELECT COUNT(*) FROM trades $where AND result='Loss'", $p);
@@ -118,7 +139,15 @@ class StatsController {
             // "Max Drawdown" below reports as the account's historical worst, and that
             // figure doesn't change meaning based on which rule the prop firm actually
             // enforces (see CLAUDE.md v3.14.7).
-            $dd = ($peak > 0 && $starting_bal > 0) ? (($peak - $running) / $starting_bal) * 100 : 0;
+            //
+            // v3.28.0 — dropped the old `$peak > 0 &&` half of this guard. $peak starts at
+            // 0 and only ever rises above it on a profitable stretch -- an all-losses
+            // account (confirmed live on a real 12-trade, -884.42 series) never has one, so
+            // $peak stays exactly 0 forever and the old guard flatlined every single row's
+            // $dd at 0 despite real, growing losses. $peak === 0 is a legitimate "never
+            // been above the starting point" state, not a reason to skip the computation --
+            // only $starting_bal itself being 0 is an actual divide-by-zero to guard.
+            $dd = ($starting_bal > 0) ? (($peak - $running) / $starting_bal) * 100 : 0;
             $cum[] = ['trade' => $i + 1, 'net_pnl' => round($t['net_pnl'], 2), 'cumulative' => round($running, 2), 'drawdown' => round($dd, 2), 'date' => $t['trade_date']];
         }
         $stats['cumulative'] = $cum;
@@ -137,14 +166,31 @@ class StatsController {
         // correct only if the prop firm's own rule genuinely is trailing.
         $drawdownType = $ch['drawdown_type'] ?? 'static';
         $stats['drawdown_type'] = $drawdownType;
-        $stats['current_drawdown_pct'] = $drawdownType === 'trailing'
-            ? (count($cum) > 0 ? end($cum)['drawdown'] : 0)
-            : round(staticDrawdownPct($ch), 2);
+        if ($drawdownType === 'trailing') {
+            // v3.28.0 — this is an account-level figure (the drawdown banner) and must
+            // NOT follow the strategy filter the way the chart's own $cum deliberately
+            // does now -- reusing $cum here would let tagging trades change what the
+            // banner reports, the exact thing this release's filter is required not to
+            // do. Recomputed over $whereNoStrategy instead of reusing $cum.
+            $cumAll = $qa("SELECT net_pnl FROM trades $whereNoStrategy ORDER BY trade_date,id", $pNoStrategy);
+            $runningAll = 0; $peakAll = 0; $ddAll = 0;
+            foreach ($cumAll as $t) {
+                $runningAll += $t['net_pnl'];
+                if ($runningAll > $peakAll) $peakAll = $runningAll;
+                $ddAll = ($starting_bal > 0) ? (($peakAll - $runningAll) / $starting_bal) * 100 : 0;
+            }
+            $stats['current_drawdown_pct'] = round($ddAll, 2);
+        } else {
+            $stats['current_drawdown_pct'] = round(staticDrawdownPct($ch), 2);
+        }
 
         // Streak
         // v3.20.0 — same source != 'backtest' requirement as $where above.
-        $chWhere = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest'";
-        $all_results = $qa("SELECT result FROM trades $chWhere AND result IN ('Win','Loss') ORDER BY trade_date,id", [$this->uid, $chId]);
+        // v3.28.0 — $stratSql/$stratParams appended too: streak is explicitly named as a
+        // performance figure that follows the strategy filter.
+        $chWhere = "WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest'" . $stratSql;
+        $chParams = array_merge([$this->uid, $chId], $stratParams);
+        $all_results = $qa("SELECT result FROM trades $chWhere AND result IN ('Win','Loss') ORDER BY trade_date,id", $chParams);
         $max_win = 0; $max_loss = 0; $tmp = 0; $tmp_type = '';
         foreach ($all_results as $t) {
             if ($t['result'] === $tmp_type) { $tmp++; } else { $tmp = 1; $tmp_type = $t['result']; }
@@ -154,11 +200,15 @@ class StatsController {
         $last = end($all_results);
         $stats['streak'] = ['current' => $last ? $tmp : 0, 'type' => $last ? $last['result'] : '', 'max_win' => $max_win, 'max_loss' => $max_loss];
 
-        // Hours + calendar
-        $stats['by_hour']   = $qa("SELECT HOUR(time_in) as hour, COUNT(*) as trades, SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins, COALESCE(SUM(net_pnl),0) as pnl FROM trades $chWhere AND time_in IS NOT NULL GROUP BY HOUR(time_in) ORDER BY hour", [$this->uid, $chId]);
-        $stats['calendar']  = $qa("SELECT trade_date, COALESCE(SUM(net_pnl),0) as pnl, COUNT(*) as trades FROM trades $chWhere GROUP BY trade_date ORDER BY trade_date", [$this->uid, $chId]);
+        // Hours + calendar -- charts/curves, same filter as everything else above.
+        $stats['by_hour']   = $qa("SELECT HOUR(time_in) as hour, COUNT(*) as trades, SUM(CASE WHEN result='Win' THEN 1 ELSE 0 END) as wins, COALESCE(SUM(net_pnl),0) as pnl FROM trades $chWhere AND time_in IS NOT NULL GROUP BY HOUR(time_in) ORDER BY hour", $chParams);
+        $stats['calendar']  = $qa("SELECT trade_date, COALESCE(SUM(net_pnl),0) as pnl, COUNT(*) as trades FROM trades $chWhere GROUP BY trade_date ORDER BY trade_date", $chParams);
 
-        // Daily loss check
+        // Daily loss check — deliberately account-wide, NOT filtered by strategy (v3.28.0):
+        // this is a live risk control (today's real daily loss against the real limit),
+        // not a performance report, same reasoning as dd_pct and current_drawdown_pct
+        // above. Its own inline WHERE never referenced $where/$chWhere/$stratSql to begin
+        // with, so this is unaffected by construction, not by an extra guard.
         // v3.20.0 — same source != 'backtest' requirement as $where above.
         $today_pnl = $qv("SELECT COALESCE(SUM(net_pnl),0) FROM trades WHERE user_id=? AND (challenge_id=? OR challenge_id IS NULL) AND source != 'backtest' AND trade_date=CURDATE()", [$this->uid, $chId]);
         $daily_limit = floatval($ch['daily_loss_limit'] ?? 500);
@@ -169,6 +219,62 @@ class StatsController {
         $stats['dd_pct'] = staticDrawdownPct($ch);
 
         jsonResponse($stats);
+    }
+
+    /**
+     * v3.28.0 — resolves the strategy_filter GET param into a SQL fragment + params, plus
+     * a small caption object the frontend renders (js/stats.js / js/dashboard.js, both via
+     * renderScopeCaption()). Every $where/$chWhere-based query in getStats() reads this
+     * once and gets filtered identically -- performance figures only, by construction:
+     * this never touches challengeBalance() (not even called from this file), dd_pct/
+     * current_drawdown_pct (both read the challenge row via staticDrawdownPct($ch) or, for
+     * a trailing challenge, $whereNoStrategy -- see that block's own comment), the risk
+     * ladder (CalculatorController, a different file entirely), or today's daily-loss
+     * check (its own inline, always-unfiltered query).
+     *
+     * 'all' (default, or anything unrecognised/empty) -> no filter.
+     * 'none' -> only trades with no strategy_id at all.
+     * a numeric id -> only that strategy (validId()'d; an id for a strategy that doesn't
+     * exist, or belongs to a different user, isn't checked here -- it would just match
+     * zero rows, same as any other filter value with nothing to show. strategyName()
+     * below returns null in that case, so the caption just omits a name rather than
+     * showing a wrong one).
+     * 'exclude:<id>' -> every trade NOT tagged with that strategy, INCLUDING untagged
+     * ones -- "all except Signal-follow" must still show a trader's own FSA trades that
+     * have no strategy set at all, not just ones tagged with some OTHER strategy.
+     */
+    private function strategyFilterClause(string $raw): array {
+        $raw = trim($raw);
+        if ($raw === '' || $raw === 'all') return ['', [], ['mode' => 'all', 'strategy_id' => null, 'strategy_name' => null]];
+
+        if ($raw === 'none') return [' AND strategy_id IS NULL', [], ['mode' => 'none', 'strategy_id' => null, 'strategy_name' => null]];
+
+        if (preg_match('/^exclude:(\d+)$/', $raw, $m)) {
+            $excludeId = validId($m[1]);
+            if ($excludeId) {
+                return [
+                    ' AND (strategy_id IS NULL OR strategy_id <> ?)', [$excludeId],
+                    ['mode' => 'exclude', 'strategy_id' => $excludeId, 'strategy_name' => $this->strategyName($excludeId)],
+                ];
+            }
+        }
+
+        $onlyId = validId($raw);
+        if ($onlyId) {
+            return [
+                ' AND strategy_id = ?', [$onlyId],
+                ['mode' => 'only', 'strategy_id' => $onlyId, 'strategy_name' => $this->strategyName($onlyId)],
+            ];
+        }
+
+        return ['', [], ['mode' => 'all', 'strategy_id' => null, 'strategy_name' => null]];
+    }
+
+    private function strategyName(int $id): ?string {
+        $s = $this->db->prepare("SELECT name FROM strategies WHERE id=? AND user_id=?");
+        $s->execute([$id, $this->uid]);
+        $name = $s->fetchColumn();
+        return $name !== false ? $name : null;
     }
 
     /**

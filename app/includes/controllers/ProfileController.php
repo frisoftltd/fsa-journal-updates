@@ -25,6 +25,13 @@ class ProfileController {
             'account_balance'     => $ch['current_balance'] ?? $u['account_balance'] ?? 10000,
             'starting_balance'    => $ch['starting_balance'] ?? $u['starting_balance'] ?? 10000,
             'max_drawdown_pct'    => $ch['max_drawdown_pct'] ?? $u['max_drawdown_pct'] ?? 10,
+            // v3.28.0 — same formula StatsController's own sidebar dd_pct already uses
+            // (helpers.php::staticDrawdownPct(), one implementation). get_user is loaded
+            // on every page via app.js's DOMContentLoaded, unlike get_stats which only
+            // ever ran from the Dashboard page — this is what lets the sidebar DD badge
+            // refresh everywhere instead of being stuck at index.php's own placeholder
+            // until Dashboard happened to load first in the session.
+            'dd_pct'              => round(staticDrawdownPct($ch ?: []), 2),
             'daily_loss_limit'    => $ch['daily_loss_limit'] ?? $u['daily_loss_limit'] ?? 500,
             'risk_per_trade_pct'  => $ch['risk_per_trade_pct'] ?? $u['risk_per_trade_pct'] ?? 0.5,
             'prop_firm'           => $ch['prop_firm'] ?? $u['prop_firm'] ?? '',

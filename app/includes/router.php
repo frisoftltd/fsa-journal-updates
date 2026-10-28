@@ -26,6 +26,7 @@ $routes = [
     'add_trade'             => ['TradeController', 'add'],
     'update_trade'          => ['TradeController', 'update'],
     'delete_trade'          => ['TradeController', 'delete'],
+    'bulk_set_trade_strategy' => ['TradeController', 'bulkSetStrategy'],
     // Stats
     'get_stats'             => ['StatsController', 'getStats'],
     // Alerts

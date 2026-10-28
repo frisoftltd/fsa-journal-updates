@@ -15,10 +15,18 @@
     <button class="btn btn-ghost btn-sm" onclick="openPairsModal()">⚙️ Pairs</button>
     <button class="btn btn-success" id="new-trade-btn" onclick="openChecklist()">+ New Trade</button>
   </div>
+  <!-- v3.28.0 — bulk "Set Strategy", scoped to whichever challenge the Trade Log is
+       currently showing. Only visible/meaningful once at least one row is checked --
+       the button stays disabled with a 0 count until then. -->
+  <div class="filter-bar" id="bulk-strategy-bar" style="margin-top:-4px;margin-bottom:10px">
+    <select id="bulk-strategy-select" style="max-width:220px"><option value="">— none —</option></select>
+    <button class="btn btn-ghost btn-sm" id="bulk-set-strategy-btn" disabled onclick="bulkSetStrategy()">Set Strategy (0)</button>
+  </div>
   <div class="card">
     <div class="table-wrap">
       <table>
         <thead><tr>
+          <th><input type="checkbox" id="trade-select-all" onchange="toggleSelectAllTrades(this)"></th>
           <th>Date</th><th>Session</th><th>Pair</th><th>Dir</th>
           <th>Entry</th><th>SL</th><th>Exit</th>
           <th>Gross P&amp;L</th><th>Fees</th><th>Funding</th><th>Net P&amp;L</th><th>R</th>

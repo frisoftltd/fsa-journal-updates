@@ -242,6 +242,24 @@ function updateSidebarFromUser(){
     const prop=document.getElementById('sidebar-prop');
     if(prop) prop.textContent=u.prop_firm||u.active_challenge_name||'';
     document.getElementById('sidebar-balance').textContent='$'+parseFloat(u.account_balance||10000).toFixed(2);
+
+    // v3.28.0 — dd-fill/dd-label/dd-max-label used to only ever get set inside
+    // dashboard.js::loadDashboard(), so a session that opened on any other page first
+    // left them stuck on index.php's own literal "DD: 0%" placeholder. This function
+    // already runs on every page load (app.js's DOMContentLoaded calls it right after
+    // get_user resolves), so it's the one place guaranteed to run regardless of which
+    // page loads first. u.dd_pct comes from the same staticDrawdownPct() helper
+    // StatsController's own sidebar figure already used -- one formula, not a second copy.
+    const ddPct = Math.min(100, parseFloat(u.dd_pct||0));
+    const ddFill = document.getElementById('dd-fill');
+    if(ddFill){
+        ddFill.style.width = ddPct+'%';
+        ddFill.style.background = ddPct>80?'var(--red)':ddPct>50?'var(--orange)':'var(--green)';
+    }
+    const ddLabel = document.getElementById('dd-label');
+    if(ddLabel) ddLabel.textContent = `DD: ${ddPct.toFixed(1)}%`;
+    const ddMax = document.getElementById('dd-max-label');
+    if(ddMax) ddMax.textContent = `${u.max_drawdown_pct||10}% max`;
 }
 
 async function refreshSidebarChallenges(){

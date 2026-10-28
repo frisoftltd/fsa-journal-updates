@@ -1,20 +1,26 @@
 {
-    "current_version": "3.27.4",
+    "current_version": "3.28.0",
     "release_date": "2026-10-28",
     "changelog": [
-        "v3.27.3 stopped margin-era Bitfunded funding from being double-counted into challenges.funding_adjustment, but never routed it anywhere else -- Position History's own card PnL is gross of that same funding, which margin era nets out of Close Position's own returned amount before Bitfunded ever reports it, so net_pnl silently dropped it. A real ~$17.46 hole, caught immediately on a live re-import.",
-        "Fixed: for every margin-era trade, realised PnL is now read directly off the ledger (Close Position's own Amount plus the sum of its matched Open Position row(s) -- a same-symbol, same-exact-second group is multiple fills of one position and is summed, never picked), and net_pnl is computed from that instead of the card's gross PnL. Per-trade funding (card PnL minus that ledger figure) is stored on the trade exactly as before. trades.pnl itself is left untouched so re-import matching stays stable.",
-        "challenges.funding_adjustment is unaffected -- still only the counted (post-cutover) funding total from v3.27.3. Margin-era funding now lives inside net_pnl; zero-era funding lives in funding_adjustment; the two never overlap, and re-importing the same data twice is idempotent.",
-        "Import preview gained a 'Margin-era funding attributed to N trades' line. Trade Log table and trade detail panel both gained a Funding column/field -- trades.funding was written since v3.17.3 but never shown anywhere in the UI until now.",
-        "Zero-era trades are deliberately left as-is this release (card PnL vs. ledger's own Close Position amount, a smaller ~0.2 cent-rounding gap) -- judged lower priority than the real bug this release closes, not an oversight."
+        "Bulk 'Set Strategy' in the Trade Log: checkboxes + a 'Set Strategy (N)' action, scoped strictly to one challenge, with a confirmation stating how many trades will change. Reuses the existing trades.strategy_id mechanism (already re-import-safe) instead of inventing a new tagging concept.",
+        "Strategy/tag filter on Statistics and the Dashboard: All trades, No strategy, each strategy, or All except <strategy>. Applies only to performance figures (win rate, net P&L, profit factor, avg R, streak, every curve/breakdown) -- balance, the drawdown banner, the sidebar DD badge and the risk ladder never read it, so tagging 12 signal-follow trades can't change what those report.",
+        "Fixed: the Dashboard's drawdown curve (and max_drawdown_pct) flatlined at 0% for any account whose cumulative P&L never goes positive (e.g. an all-losses stretch) -- the peak-tracking guard required peak > 0, which an all-losses series never satisfies, even as real losses accumulated. Dropped that half of the guard; a real 12-trade, -884.42 series now correctly ends the curve at 8.84%, matching the account-level banner.",
+        "Fixed: the sidebar 'DD: X%' badge was a dead placeholder (index.php's own hardcoded 0%) until the Dashboard page happened to load first in the session -- the one function that refreshes the sidebar on every page load never touched it. Now wired through get_user's new dd_pct field (same staticDrawdownPct() formula the banner already used), so it's correct from the very first page load, Trade Log included."
     ],
-    "release_notes": "No DB migration -- parsing logic (includes/bitfunded_parser.php), controller logic (includes/controllers/BitfundedImportController.php), and three small UI additions (js/bfimport.js, js/trades.js, pages/trades.php), no schema change. Self-test (php includes/bitfunded_parser.php) extended to 93 assertions: bf_reconcile_trade_funding() against the existing mixed-era fixture, a dedicated double-fill fixture modeled on the real ledger's own documented same-second-opens case, and a no-ledger-rows-found fallback case. Verified structurally against the real ledger (ledger-15min-entry.txt, 876 rows, not in this repo): the exact TRX figure already verified in v3.27.3/v3.17.3 (funding 2.6793) reproduces bit-for-bit; every one of the real ledger's 56 actual margin-era positions resolves to the margin branch through the real matching functions, not a hand-picked example. The full aggregate acceptance numbers from the briefing (margin-era funding ~-17.4617 across the real 120 Position History cards, final balance 9240.36) need Acrob's real card paste to confirm independently of the live re-import this release's own briefing already plans as the final check. php -l and node --check pass clean on every changed file; duplicate-name scan clean; full tools/ui-harness suite (13 drivers) passes.",
+    "release_notes": "No DB migration -- application code only (StatsController.php, TradeController.php, ProfileController.php, router.php, three page templates, five JS files), no schema change. Verified with a disposable local integration test (not committed to this repo -- needs a local MySQL/MariaDB instance) against the real controllers over a real HTTP loopback (php -S; CLI SAPI has no php://input at all for bulkSetStrategy's real jsonInput()): 29/29 assertions, including the 8.8442% drawdown figure on an all-losses 12-trade series (not flatlined at 0, matching the account-level banner), the strategy filter's exact 12/0 split before and after tagging, challengeBalance()/dd_pct/current_drawdown_pct genuinely unchanged by both tagging and every filter value, strategy_id surviving a re-import-shaped matched-row UPDATE, and idempotent re-tagging. php -l and node --check pass clean on every changed file; duplicate-name scan clean; full tools/ui-harness suite (13 drivers, none touching this release's files) passes -- one timing-sensitive assertion in drive-v3225.mjs failed once under concurrent load and passed clean on an isolated re-run, confirmed as an environment flake, not a regression.",
     "files": [
-        {"path": "includes/bitfunded_parser.php", "critical": false},
-        {"path": "includes/controllers/BitfundedImportController.php", "critical": false},
-        {"path": "js/bfimport.js", "critical": false},
-        {"path": "js/trades.js", "critical": false},
-        {"path": "pages/trades.php", "critical": false}
+        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "includes/controllers/TradeController.php", "critical": false},
+        {"path": "includes/controllers/ProfileController.php", "critical": false},
+        {"path": "includes/router.php", "critical": false},
+        {"path": "pages/trades.php", "critical": false},
+        {"path": "pages/stats.php", "critical": false},
+        {"path": "pages/dashboard.php", "critical": false},
+        {"path": "js/app.js", "critical": false},
+        {"path": "js/challenges.js", "critical": false},
+        {"path": "js/dashboard.js", "critical": false},
+        {"path": "js/stats.js", "critical": false},
+        {"path": "js/trades.js", "critical": false}
     ],
     "db_migrations": []
 }

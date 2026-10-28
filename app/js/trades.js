@@ -19,6 +19,50 @@ async function loadTrades() {
     allTrades = await api(url);
     renderTradesTable(allTrades);
     refreshNewTradeGate();
+    populateBulkStrategySelect();
+}
+
+// ── BULK "SET STRATEGY" (v3.28.0) ────────────────────────
+// Checkboxes + one action, scoped to whichever challenge the Trade Log is currently
+// showing -- same single-field write the pencil-icon edit form already makes one trade
+// at a time (see TradeController::bulkSetStrategy()'s own docblock for the scoping rule).
+function toggleSelectAllTrades(headerCb){
+    document.querySelectorAll('.trade-select-cb').forEach(cb=>cb.checked=headerCb.checked);
+    updateBulkStrategyBar();
+}
+function selectedTradeIds(){
+    return Array.from(document.querySelectorAll('.trade-select-cb:checked')).map(cb=>parseInt(cb.dataset.id));
+}
+function updateBulkStrategyBar(){
+    const n = selectedTradeIds().length;
+    const btn = document.getElementById('bulk-set-strategy-btn');
+    if(btn){ btn.disabled = n===0; btn.textContent = `Set Strategy (${n})`; }
+    const selectAll = document.getElementById('trade-select-all');
+    const boxes = document.querySelectorAll('.trade-select-cb');
+    if(selectAll) selectAll.checked = boxes.length>0 && n===boxes.length;
+}
+async function populateBulkStrategySelect(){
+    const sel = document.getElementById('bulk-strategy-select');
+    if(!sel) return;
+    const cur = sel.value;
+    const strategies = (await api('get_strategies')).filter(s=>s.is_active==1);
+    sel.innerHTML = '<option value="">— none —</option>' + strategies.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+    if(cur) sel.value = cur;
+}
+async function bulkSetStrategy(){
+    const ids = selectedTradeIds();
+    if(!ids.length) return;
+    const sel = document.getElementById('bulk-strategy-select');
+    const strategyId = sel.value;
+    const label = strategyId ? sel.options[sel.selectedIndex].textContent : '— none —';
+    if(!confirm(`Set strategy to "${label}" on ${ids.length} trade${ids.length===1?'':'s'}?`)) return;
+
+    const ch = await api('get_active_challenge');
+    if(!ch || !ch.id){ toast('No active challenge to scope this to', 'error'); return; }
+    const r = await api('bulk_set_trade_strategy', 'POST', {challenge_id: ch.id, trade_ids: ids, strategy_id: strategyId || null});
+    if(r.error){ toast(r.error, 'error'); return; }
+    toast(`Strategy updated on ${r.updated} trade${r.updated===1?'':'s'}`);
+    loadTrades();
 }
 
 // v3.17.0/v3.17.1 — trade-limits gate for "+ New Trade" (Trades page) and "+ Trade" (the
@@ -86,8 +130,9 @@ function isOpenTrade(t){
 
 function renderTradesTable(trades) {
     const tbody=document.getElementById('trades-tbody');
-    if(!trades.length){tbody.innerHTML='<tr><td colspan="14" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';return;}
+    if(!trades.length){tbody.innerHTML='<tr><td colspan="15" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';updateBulkStrategyBar();return;}
     tbody.innerHTML = trades.map((t,i)=>`<tr>
+        <td><input type="checkbox" class="trade-select-cb" data-id="${t.id}" onchange="updateBulkStrategyBar()"></td>
         <td style="white-space:nowrap">${t.trade_date}</td>
         <td><span class="badge" style="background:rgba(79,124,255,0.1);color:var(--blue2);font-size:10px">${t.session||'—'}</span></td>
         <td style="font-weight:600;color:var(--text)">${t.pair}</td>
@@ -107,6 +152,9 @@ function renderTradesTable(trades) {
             <button class="btn btn-danger btn-sm" onclick="deleteTrade(${t.id})">🗑</button>
         </td>
     </tr>`).join('');
+    const selectAll = document.getElementById('trade-select-all');
+    if(selectAll) selectAll.checked = false;
+    updateBulkStrategyBar();
 }
 
 // ── VIEW TRADE WITH SLIDESHOW ────────────────────────────

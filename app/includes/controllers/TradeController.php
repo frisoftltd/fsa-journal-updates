@@ -495,4 +495,47 @@ class TradeController {
         $this->db->prepare("DELETE FROM trades WHERE id=? AND user_id=?")->execute([$trade_id, $this->uid]);
         jsonResponse(['success' => true]);
     }
+
+    /**
+     * v3.28.0 — bulk "Set Strategy" action for the Trade Log (checkboxes + one action,
+     * same single-field write the pencil-icon edit form already makes one trade at a
+     * time — this just does it for many rows in one request). Never touches any other
+     * column.
+     *
+     * Scoped strictly to one challenge, explicitly supplied by the caller rather than
+     * trusting "whatever's active right now" — the Trade Log always knows which challenge
+     * it's showing (challenge_id=? is an exact match, never the (challenge_id=? OR
+     * challenge_id IS NULL) pattern get()/get_trades uses for reading, so a legacy
+     * no-challenge trade can never be bulk-touched by accident).
+     *
+     * IDs that don't belong to this user+challenge are silently excluded, not an error —
+     * returns how many rows actually changed (rowCount()), which can be fewer than
+     * submitted if the selection went stale between page load and this request. A null/
+     * empty strategy_id clears the strategy (same "— none —" option the single-trade
+     * form already offers), rather than being rejected as missing input.
+     */
+    public function bulkSetStrategy() {
+        $d = jsonInput();
+        $challengeId = validId($d['challenge_id'] ?? 0);
+        if (!$challengeId) jsonError('Select a challenge first.');
+
+        $ids = array_values(array_unique(array_filter(array_map('validId', $d['trade_ids'] ?? []))));
+        if (!$ids) jsonError('No trades selected.');
+
+        $strategyId = null;
+        if (!empty($d['strategy_id'])) {
+            $strategyId = validId($d['strategy_id']);
+            if (!$strategyId) jsonError('Invalid strategy.');
+            $sCheck = $this->db->prepare("SELECT id FROM strategies WHERE id=? AND user_id=?");
+            $sCheck->execute([$strategyId, $this->uid]);
+            if (!$sCheck->fetch()) jsonError('Strategy not found.');
+        }
+
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $params = array_merge([$strategyId], $ids, [$this->uid, $challengeId]);
+        $stmt = $this->db->prepare("UPDATE trades SET strategy_id=? WHERE id IN ($ph) AND user_id=? AND challenge_id=?");
+        $stmt->execute($params);
+
+        jsonResponse(['success' => true, 'updated' => $stmt->rowCount()]);
+    }
 }

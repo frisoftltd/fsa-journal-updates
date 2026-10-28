@@ -31,7 +31,9 @@ async function loadAlerts() {
 // ── DASHBOARD ────────────────────────────────────────────
 async function loadDashboard() {
     await loadAlerts();
-    const s = await api('get_stats');
+    await populateStrategyFilterSelect('dash-strategy');
+    const stratFilter = document.getElementById('dash-strategy')?.value || '';
+    const s = await api('get_stats' + (stratFilter ? '&strategy_filter=' + encodeURIComponent(stratFilter) : ''));
     const u = currentUser;
 
     renderScopeCaption('dash-scope-caption', s);

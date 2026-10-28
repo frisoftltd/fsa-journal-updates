@@ -5,6 +5,17 @@
     <h3 id="strategy-builder-modal-title">🧪 NEW STRATEGY</h3>
     <input type="hidden" id="sb-id">
     <div class="form-group full"><label>Strategy Name</label><input type="text" id="sb-name" placeholder="e.g. ICT Concepts, Price Action, FSA"></div>
+    <!-- v3.29.0 (req #1) — default is "applies to all challenges" (checked) for a new
+         strategy; unchecking reveals which specific challenges it's used on. -->
+    <div class="form-group full">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
+        <input type="checkbox" id="sb-applies-all" checked onchange="toggleStrategyChallengeList()"> Applies to all challenges
+      </label>
+    </div>
+    <div class="form-group full" id="sb-challenge-list-wrap" style="display:none">
+      <label>Used on these challenges</label>
+      <div id="sb-challenge-list" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px"></div>
+    </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="document.getElementById('strategy-builder-modal').classList.remove('open')">Cancel</button>
       <button class="btn btn-primary" onclick="saveStrategyMeta()">Save Strategy</button>

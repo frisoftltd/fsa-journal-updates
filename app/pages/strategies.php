@@ -9,6 +9,10 @@
       </div>
       <button class="btn btn-success" onclick="openStrategyModal()">+ New Strategy</button>
     </div>
+    <!-- v3.29.0 (req #7) — the sidebar's own challenge selector is global/shared, not
+         scoped to this page; stated here explicitly so it's clear that assigning
+         challenges to a strategy below never depends on, or changes, that selection. -->
+    <div id="strategy-lab-active-caption" style="font-size:12px;color:var(--text3);margin-bottom:12px"></div>
     <div id="strategies-list"></div>
   </div>
 </div>

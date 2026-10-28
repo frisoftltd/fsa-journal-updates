@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-28 (v3.28.0 — strategy/tag filter on Statistics/Dashboard + bulk "Set Strategy" in the Trade Log, drawdown curve no longer flatlines on an all-losses stretch, sidebar DD badge refreshes on every page)
+**Last Updated:** 2026-10-28 (v3.29.0 — strategies are now assignable to specific challenges, so the Strategy dropdown/filter/bulk-action only ever offer the right ones per challenge)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.28.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.29.0 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -509,6 +509,85 @@ series; the strategy filter's 12/0 split before and after tagging; `challengeBal
 `strategy_id` surviving a re-import-shaped matched-row `UPDATE`; and re-tagging the same
 trades twice being idempotent.
 
+### Strategies become assignable to specific challenges (v3.29.0)
+
+Closes the gap the v3.28.0 work above exposed: a strategy belonged to the user, not a
+challenge, so every strategy showed up in every challenge's dropdown — nothing stopped a
+TradeFI signal-follow trade being tagged with an FSA strategy, or the reverse.
+
+`strategies.applies_all_challenges` (new column, `TINYINT(1) NOT NULL DEFAULT 1`) plus a
+new `strategy_challenges` link table (`strategy_id`, `challenge_id`, unique pair, `ON
+DELETE CASCADE` both directions). **"All challenges" is explicit, never inferred from
+zero assignment rows** — inferring it would mean a strategy deliberately scoped to one
+challenge silently becomes "all challenges" the instant that challenge is deleted
+(`strategy_challenges`'s own cascade removes its last row). A strategy stays scoped even
+when every one of its assigned challenges is gone; it just has zero rows AND flag=0, so
+it matches neither half of the validity rule for any challenge and appears nowhere until
+reassigned — no extra code needed to detect that state, it falls straight out of the
+rule. `helpers.php::strategyValidForChallenge()` is the one implementation of that rule
+(`applies_all_challenges=1`, OR an explicit row for that exact challenge).
+
+**Every existing strategy keeps working everywhere** — the guarded `ALTER TABLE`'s
+`DEFAULT 1` means this is true immediately on migration, zero rows written to
+`strategy_challenges` for anything that existed before this release. No trade's
+`strategy_id`, no challenge's balance/drawdown figures, are touched by the migration.
+
+**`StrategyBuilderController::getAll()`** (`get_strategies`) is the one endpoint every
+caller still uses, now branching on an optional `?challenge_id=`: omitted (Strategy Lab,
+backtest session setup, the Leaderboard — all deliberately unscoped per the briefing),
+every strategy comes back unfiltered, each with its own `applies_all_challenges`/
+`challenge_ids` so the Lab can render "All challenges" or the real names. Supplied (trade
+form, bulk "Set Strategy", the Statistics/Dashboard filter), the same full list gains a
+`valid_for_challenge` flag per strategy — callers filter their own dropdown to that flag,
+except the trade form, which also always keeps a trade's own already-set strategy
+visible even when invalid (never silently blanked), labelled "(not assigned to this
+challenge)".
+
+**`add_strategy`/`update_strategy`** accept `applies_all_challenges` (defaults true when
+omitted — req #1's new-strategy default) and `challenge_ids` (only written when scoped).
+Switching to "all challenges" clears any stale `strategy_challenges` rows for that
+strategy, rather than leaving them to misleadingly suggest a scoped set later.
+
+**The Phase-0 follow-up check**: `challenges.default_strategy_id` (the Pre-Trade
+Checklist's own source) is explicitly **cleared to NULL** — not left pointing at an
+invalid strategy — whenever `update_strategy` re-scopes a strategy away from a challenge
+that currently defaults to it (`StrategyBuilderController::clearInvalidDefaultStrategyPointers()`,
+run after the new assignment set is written, so it reads the post-update state). Chosen
+over "keep it working" because a challenge whose own trade-form dropdown no longer
+offers that strategy showing its checklist anyway would be the more confusing of the two
+inconsistent states.
+
+**Bulk "Set Strategy" now validates server-side too** (req #4) —
+`TradeController::bulkSetStrategy()` calls the same `strategyValidForChallenge()` before
+touching any row; a mismatch is rejected outright (no partial update across the
+selection), not just hidden from the dropdown.
+
+**Deliberately unscoped, per the approved Phase 0 plan**: the Strategy Lab's own list
+(shows everything, each card labelled with its real assignment), the Leaderboard (already
+had no `challenge_id` filter at all, by original design — cross-challenge performance
+ranking), the Pre-Trade Checklist's lookup (resolves one specific id via
+`default_strategy_id`, never a dropdown), and the backtest session setup picker
+(`backtest_sessions` has no real FK to `challenges` at all, so there's nothing to scope
+against).
+
+Migration: `migrations/2026_10_28_0001_create_strategy_challenges.sql` — guarded `ALTER
+TABLE` (information_schema check + `PREPARE`/`EXECUTE`, MySQL 8.4 has no `ADD COLUMN IF
+NOT EXISTS`) plus a plain `CREATE TABLE IF NOT EXISTS`. Rollback: `DROP TABLE
+strategy_challenges;` then `ALTER TABLE strategies DROP COLUMN applies_all_challenges;` —
+safe in either order, nothing else in the schema references either object.
+
+Verified against the REAL migration file (not a hand-built equivalent schema) on a
+disposable local test database: run against a pre-migration shape with a pre-existing
+strategy and trades already carrying its `strategy_id`, confirmed both completely
+untouched afterward and the new column defaulting to 1. 30/30 integration assertions
+against the real controllers over a real HTTP loopback, including both directions of the
+acceptance criteria's own cross-challenge-visibility example, the bulk action's
+server-side rejection with zero partial change (both mismatch directions), the
+`default_strategy_id` cleanup, switching a strategy to "all challenges" clearing its
+stale rows, a new strategy defaulting to all-challenges, and deleting a challenge
+removing only its own assignment row (confirmed against a strategy assigned to two
+challenges) without touching the strategy itself or any other strategy.
+
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
 ### The Core Principle
@@ -630,7 +709,15 @@ challenge_limits: id, challenge_id, max_trades_day, max_trades_week, max_losses_
   daily_loss_usd, created_at — one row per challenge (UNIQUE), every column independently
   nullable ("not tracked", never a zero meaning "no trades allowed").
 strategy_tests: legacy sandbox, separate from the Strategy Lab below. Do not merge.
-strategies: id, user_id, name, is_active, created_at
+strategies: id, user_id, name, is_active, applies_all_challenges (v3.29.0, DEFAULT 1 —
+  explicit "works on every challenge," never inferred from zero strategy_challenges rows,
+  see that table's own note below for why), created_at
+strategy_challenges: id, strategy_id, challenge_id, created_at (v3.29.0) — UNIQUE
+  (strategy_id, challenge_id), FK CASCADE both directions. Only read when
+  applies_all_challenges=0; a scoped strategy whose every assigned challenge is deleted
+  has zero rows here AND flag=0, so it matches neither half of
+  helpers.php::strategyValidForChallenge()'s rule and appears nowhere until reassigned —
+  deliberately not "becomes all-challenges by default."
 strategy_variables: id, strategy_id, label, input_type (checkbox/scale/select/text),
   options, role ('gate'|'tag'), timeframe, criteria, sort_order, is_active, created_at
 trade_variables: id, trade_id, variable_id, value — FK CASCADE from trades, FK RESTRICT
@@ -1013,7 +1100,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.28.0
+Current Version: v3.29.0
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md

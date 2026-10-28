@@ -223,6 +223,32 @@ function appTodayKigali(): string {
 }
 
 /**
+ * v3.29.0 — true when $strategyId is usable on $challengeId: either the strategy applies
+ * to every challenge (`strategies.applies_all_challenges`, the explicit default — never
+ * inferred from an empty `strategy_challenges` set, see that migration's own comment for
+ * why: inferring it would silently turn a deliberately-scoped strategy into "all
+ * challenges" the moment its last assigned challenge is deleted), or it has an explicit
+ * row in `strategy_challenges` for this exact challenge.
+ *
+ * Used wherever a strategy is being ASSIGNED to a trade on a specific challenge (the
+ * bulk "Set Strategy" action's own server-side check) — never for reading or filtering
+ * already-recorded trades, which may legitimately carry a `strategy_id` that's since
+ * been scoped away from that challenge; that history isn't rewritten by a later
+ * reassignment and must stay visible, not silently excluded.
+ */
+function strategyValidForChallenge(PDO $db, int $strategyId, int $challengeId): bool {
+    $s = $db->prepare("SELECT applies_all_challenges FROM strategies WHERE id=?");
+    $s->execute([$strategyId]);
+    $appliesAll = $s->fetchColumn();
+    if ($appliesAll === false) return false; // strategy doesn't exist
+    if ((int)$appliesAll === 1) return true;
+
+    $c = $db->prepare("SELECT 1 FROM strategy_challenges WHERE strategy_id=? AND challenge_id=?");
+    $c->execute([$strategyId, $challengeId]);
+    return (bool)$c->fetchColumn();
+}
+
+/**
  * v3.17.0 (Auto Risk Calculator) — [Monday, Sunday] of the week containing $date
  * (Y-m-d), inclusive on both ends. PHP's 'N' format (ISO-8601 day-of-week, 1=Monday,
  * 7=Sunday) makes this a plain offset rather than a special-cased "what if today is

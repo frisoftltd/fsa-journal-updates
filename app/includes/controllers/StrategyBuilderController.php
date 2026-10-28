@@ -18,27 +18,84 @@ class StrategyBuilderController {
         $this->uid = uid();
     }
 
+    /**
+     * v3.29.0 — `?challenge_id=` is optional. Omitted (Strategy Lab, backtest session
+     * setup, the Leaderboard): every strategy comes back, unfiltered, each with its own
+     * `applies_all_challenges`/`challenge_ids` so the Lab can render "All challenges" or
+     * the real challenge names on its own cards — this list is never scoped (req #7).
+     * Supplied (trade form, bulk "Set Strategy", the Statistics/Dashboard filter): same
+     * full list, PLUS a `valid_for_challenge` flag per strategy, so a caller can filter
+     * its own dropdown down to the valid ones while the trade form specifically can still
+     * find and keep showing a trade's already-set, now-invalid strategy (never silently
+     * blanked — see js/trades.js::populateStrategySelect()).
+     */
     public function getAll() {
+        $challengeId = validId($_GET['challenge_id'] ?? 0);
+
         $s = $this->db->prepare("SELECT * FROM strategies WHERE user_id=? ORDER BY created_at DESC");
         $s->execute([$this->uid]);
         $strategies = $s->fetchAll();
 
         $v = $this->db->prepare("SELECT id,strategy_id,label,input_type,options,role,timeframe,criteria,sort_order,is_active FROM strategy_variables WHERE strategy_id=? ORDER BY sort_order ASC, id ASC");
+        $c = $this->db->prepare("SELECT challenge_id FROM strategy_challenges WHERE strategy_id=?");
         foreach ($strategies as &$st) {
             $v->execute([$st['id']]);
             $st['variables'] = $v->fetchAll();
+            $c->execute([$st['id']]);
+            $st['challenge_ids'] = array_map('intval', array_column($c->fetchAll(), 'challenge_id'));
+            $st['applies_all_challenges'] = (int)$st['applies_all_challenges'];
+            if ($challengeId) {
+                $st['valid_for_challenge'] = $st['applies_all_challenges'] === 1 || in_array($challengeId, $st['challenge_ids'], true);
+            }
         }
+        unset($st);
+
         jsonResponse($strategies);
     }
 
+    /**
+     * v3.29.0 — `applies_all_challenges` defaults to true (the required new-strategy
+     * default, req #1) when the field is omitted entirely, so every pre-v3.29.0 client
+     * call still creates a strategy that works everywhere, same as before this release.
+     * `challenge_ids` is only ever written when `applies_all_challenges` is explicitly
+     * false — sanitizeChallengeIds() drops anything not owned by this user.
+     */
     public function add() {
         $d = jsonInput();
         if (empty($d['name'])) jsonError('Strategy name required');
-        $this->db->prepare("INSERT INTO strategies (user_id, name) VALUES (?, ?)")
-            ->execute([$this->uid, trim($d['name'])]);
-        jsonResponse(['success' => true, 'id' => $this->db->lastInsertId()]);
+        $appliesAll = !array_key_exists('applies_all_challenges', $d) || !!$d['applies_all_challenges'];
+
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare("INSERT INTO strategies (user_id, name, applies_all_challenges) VALUES (?, ?, ?)")
+                ->execute([$this->uid, trim($d['name']), $appliesAll ? 1 : 0]);
+            $id = (int)$this->db->lastInsertId();
+            if (!$appliesAll) {
+                $this->replaceChallengeAssignments($id, $this->sanitizeChallengeIds($d['challenge_ids'] ?? []));
+            }
+            $this->db->commit();
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) $this->db->rollBack();
+            jsonError('Strategy save failed, nothing was changed: ' . $e->getMessage());
+        }
+        jsonResponse(['success' => true, 'id' => $id]);
     }
 
+    /**
+     * v3.29.0 — `applies_all_challenges`/`challenge_ids` are only touched when
+     * `applies_all_challenges` is explicitly present in the request (same optional-field
+     * convention `name`/`is_active` already use here) — a plain rename or activate/
+     * deactivate call that never mentions assignment leaves it exactly as it was.
+     *
+     * Switching TO "all challenges" clears any stale `strategy_challenges` rows — they'd
+     * be ignored anyway (applies_all_challenges=1 always wins), but leaving them around
+     * would misleadingly suggest a scoped set the next time someone edits this strategy.
+     * Switching to (or staying) scoped replaces the full assignment set and then clears
+     * any challenge's `default_strategy_id` that pointed at this strategy but is no
+     * longer in that set (clearInvalidDefaultStrategyPointers() — the Pre-Trade
+     * Checklist must never resolve a default pointer to a strategy this challenge can no
+     * longer use).
+     */
     public function update() {
         $d = jsonInput();
         $id = validId($d['id'] ?? 0);
@@ -51,10 +108,61 @@ class StrategyBuilderController {
         $name = array_key_exists('name', $d) ? trim($d['name']) : null;
         if ($name === '') $name = null;
         $is_active = array_key_exists('is_active', $d) ? (int)!!$d['is_active'] : null;
+        $appliesAllProvided = array_key_exists('applies_all_challenges', $d);
+        $appliesAll = $appliesAllProvided ? ((!!$d['applies_all_challenges']) ? 1 : 0) : null;
 
-        $this->db->prepare("UPDATE strategies SET name=COALESCE(?,name), is_active=COALESCE(?,is_active) WHERE id=? AND user_id=?")
-            ->execute([$name, $is_active, $id, $this->uid]);
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare("UPDATE strategies SET name=COALESCE(?,name), is_active=COALESCE(?,is_active), applies_all_challenges=COALESCE(?,applies_all_challenges) WHERE id=? AND user_id=?")
+                ->execute([$name, $is_active, $appliesAll, $id, $this->uid]);
+
+            if ($appliesAllProvided) {
+                if ($appliesAll) {
+                    $this->db->prepare("DELETE FROM strategy_challenges WHERE strategy_id=?")->execute([$id]);
+                } else {
+                    $this->replaceChallengeAssignments($id, $this->sanitizeChallengeIds($d['challenge_ids'] ?? []));
+                    $this->clearInvalidDefaultStrategyPointers($id);
+                }
+            }
+            $this->db->commit();
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) $this->db->rollBack();
+            jsonError('Strategy save failed, nothing was changed: ' . $e->getMessage());
+        }
         jsonResponse(['success' => true]);
+    }
+
+    /** Drops anything not a real, positive id owned by this user — never trusts the id list blind. */
+    private function sanitizeChallengeIds(array $rawIds): array {
+        $ids = array_values(array_unique(array_filter(array_map('validId', $rawIds))));
+        if (!$ids) return [];
+        $ph = implode(',', array_fill(0, count($ids), '?'));
+        $s = $this->db->prepare("SELECT id FROM challenges WHERE id IN ($ph) AND user_id=?");
+        $s->execute(array_merge($ids, [$this->uid]));
+        return array_map('intval', array_column($s->fetchAll(), 'id'));
+    }
+
+    /** Full replace, not a diff — simpler and correct since there's no assignment history to preserve. */
+    private function replaceChallengeAssignments(int $strategyId, array $challengeIds): void {
+        $this->db->prepare("DELETE FROM strategy_challenges WHERE strategy_id=?")->execute([$strategyId]);
+        if (!$challengeIds) return;
+        $ins = $this->db->prepare("INSERT INTO strategy_challenges (strategy_id, challenge_id) VALUES (?, ?)");
+        foreach ($challengeIds as $cid) $ins->execute([$strategyId, $cid]);
+    }
+
+    /**
+     * v3.29.0 — the Phase-0-follow-up check: a challenge's own default_strategy_id (the
+     * Pre-Trade Checklist's source, js/trades.js::openChecklist()) must never keep
+     * pointing at a strategy that challenge can no longer use. Called only after this
+     * strategy's own assignment set has just been written, so the subquery reflects the
+     * new state, not the one being replaced.
+     */
+    private function clearInvalidDefaultStrategyPointers(int $strategyId): void {
+        $this->db->prepare(
+            "UPDATE challenges SET default_strategy_id = NULL
+             WHERE user_id = ? AND default_strategy_id = ?
+               AND id NOT IN (SELECT challenge_id FROM strategy_challenges WHERE strategy_id = ?)"
+        )->execute([$this->uid, $strategyId, $strategyId]);
     }
 
     public function delete() {

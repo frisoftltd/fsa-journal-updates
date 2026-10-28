@@ -6,8 +6,25 @@
 let allStrategies = [];
 let currentVarRows = [];
 
+// v3.29.0 (req #7) — this list is never scoped to any challenge, by design: it shows
+// every strategy the user has, each with its own real assignment, so the Lab is the one
+// place you can see and change the whole picture at once. allChallenges is the same
+// shared global challenges.js's own sidebar code populates -- kept fresh here too so a
+// strategy card's assignment names and the modal's own checkbox list always match
+// whatever challenges actually exist right now.
 async function loadStrategies(){
-    allStrategies = await api('get_strategies');
+    const [strategies, challenges] = await Promise.all([api('get_strategies'), api('get_challenges')]);
+    allStrategies = strategies;
+    allChallenges = challenges;
+
+    const caption = document.getElementById('strategy-lab-active-caption');
+    if(caption){
+        const activeCh = (allChallenges||[]).find(c=>c.is_active==1);
+        caption.textContent = activeCh
+            ? `Active challenge in the sidebar: "${activeCh.name}". Assigning challenges to a strategy below is independent of that selection — it only controls where a strategy can be used, not what you're currently viewing.`
+            : '';
+    }
+
     const list = document.getElementById('strategies-list');
     if(!allStrategies.length){
         list.innerHTML = `<div class="card" style="text-align:center;padding:40px">
@@ -27,6 +44,7 @@ async function loadStrategies(){
                     <span style="font-family:var(--font-head);font-size:13px;letter-spacing:0.5px">${st.name}</span>
                 </div>
                 <div style="font-size:12px;color:var(--text2)">${(st.variables||[]).filter(v=>v.is_active==1).length} active variable${(st.variables||[]).filter(v=>v.is_active==1).length===1?'':'s'}${(st.variables||[]).some(v=>v.is_active==0)?` (${(st.variables||[]).filter(v=>v.is_active==0).length} inactive)`:''}</div>
+                <div style="font-size:12px;color:var(--blue2);margin-top:2px">${strategyChallengeLabel(st)}</div>
             </div>
             <div style="display:flex;gap:8px;align-items:center">
                 <button class="btn btn-ghost btn-sm" onclick="openVariablesModal(${st.id})" title="Edit Variables">⚙️ Variables</button>
@@ -38,11 +56,36 @@ async function loadStrategies(){
     </div>`).join('');
 }
 
+// v3.29.0 — same label text on the card and (via renderStrategyChallengeList() below)
+// implied in the modal, one place this gets worded rather than two.
+function strategyChallengeLabel(st){
+    if(st.applies_all_challenges == 1) return 'All challenges';
+    const names = (st.challenge_ids||[]).map(id => (allChallenges||[]).find(c=>c.id==id)?.name).filter(Boolean);
+    return names.length ? names.join(', ') : 'No challenges assigned — hidden everywhere until reassigned';
+}
+
+// v3.29.0 (req #1) — new strategy defaults to "all challenges" checked; editing an
+// existing one reflects its real applies_all_challenges/challenge_ids.
 function openStrategyModal(data=null){
     document.getElementById('sb-id').value = data?.id || '';
     document.getElementById('strategy-builder-modal-title').textContent = data ? '✏️ RENAME STRATEGY' : '🧪 NEW STRATEGY';
     document.getElementById('sb-name').value = data?.name || '';
+    document.getElementById('sb-applies-all').checked = data ? (data.applies_all_challenges == 1) : true;
+    renderStrategyChallengeList(data?.challenge_ids || []);
+    toggleStrategyChallengeList();
     document.getElementById('strategy-builder-modal').classList.add('open');
+}
+
+function toggleStrategyChallengeList(){
+    const allChecked = document.getElementById('sb-applies-all').checked;
+    document.getElementById('sb-challenge-list-wrap').style.display = allChecked ? 'none' : 'block';
+}
+
+function renderStrategyChallengeList(selectedIds=[]){
+    const wrap = document.getElementById('sb-challenge-list');
+    wrap.innerHTML = (allChallenges||[]).map(c => `<label style="display:flex;align-items:center;gap:8px;padding:4px 0;font-weight:normal">
+        <input type="checkbox" class="sb-ch-cb" value="${c.id}" ${selectedIds.includes(c.id)?'checked':''}> ${c.name}
+    </label>`).join('') || '<div style="color:var(--text3);font-size:12px">No challenges yet.</div>';
 }
 
 function editStrategy(id){
@@ -54,7 +97,9 @@ async function saveStrategyMeta(){
     const id = document.getElementById('sb-id').value;
     const name = document.getElementById('sb-name').value.trim();
     if(!name){ toast('Strategy name is required','error'); return; }
-    const data = { name };
+    const appliesAll = document.getElementById('sb-applies-all').checked;
+    const challengeIds = Array.from(document.querySelectorAll('.sb-ch-cb:checked')).map(cb=>parseInt(cb.value));
+    const data = { name, applies_all_challenges: appliesAll, challenge_ids: challengeIds };
     if(id) data.id = id;
     const r = await api(id ? 'update_strategy' : 'add_strategy', 'POST', data);
     if(r.error){ toast(r.error,'error'); return; }

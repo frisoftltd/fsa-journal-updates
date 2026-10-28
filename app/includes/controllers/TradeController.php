@@ -529,6 +529,15 @@ class TradeController {
             $sCheck = $this->db->prepare("SELECT id FROM strategies WHERE id=? AND user_id=?");
             $sCheck->execute([$strategyId, $this->uid]);
             if (!$sCheck->fetch()) jsonError('Strategy not found.');
+            // v3.29.0 — server-side enforcement of the per-challenge assignment: the UI
+            // only ever offers a valid strategy in this dropdown, but a stale page (the
+            // selection was made before someone re-scoped the strategy away from this
+            // challenge in another tab) must be rejected here, not trusted. Checked before
+            // any row is touched — rejecting here means nothing changes at all, never a
+            // partial update across the selected ids.
+            if (!strategyValidForChallenge($this->db, $strategyId, $challengeId)) {
+                jsonError('This strategy is not assigned to this challenge.');
+            }
         }
 
         $ph = implode(',', array_fill(0, count($ids), '?'));

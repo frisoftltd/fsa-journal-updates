@@ -1,26 +1,26 @@
 {
-    "current_version": "3.28.0",
+    "current_version": "3.29.0",
     "release_date": "2026-10-28",
     "changelog": [
-        "Bulk 'Set Strategy' in the Trade Log: checkboxes + a 'Set Strategy (N)' action, scoped strictly to one challenge, with a confirmation stating how many trades will change. Reuses the existing trades.strategy_id mechanism (already re-import-safe) instead of inventing a new tagging concept.",
-        "Strategy/tag filter on Statistics and the Dashboard: All trades, No strategy, each strategy, or All except <strategy>. Applies only to performance figures (win rate, net P&L, profit factor, avg R, streak, every curve/breakdown) -- balance, the drawdown banner, the sidebar DD badge and the risk ladder never read it, so tagging 12 signal-follow trades can't change what those report.",
-        "Fixed: the Dashboard's drawdown curve (and max_drawdown_pct) flatlined at 0% for any account whose cumulative P&L never goes positive (e.g. an all-losses stretch) -- the peak-tracking guard required peak > 0, which an all-losses series never satisfies, even as real losses accumulated. Dropped that half of the guard; a real 12-trade, -884.42 series now correctly ends the curve at 8.84%, matching the account-level banner.",
-        "Fixed: the sidebar 'DD: X%' badge was a dead placeholder (index.php's own hardcoded 0%) until the Dashboard page happened to load first in the session -- the one function that refreshes the sidebar on every page load never touched it. Now wired through get_user's new dd_pct field (same staticDrawdownPct() formula the banner already used), so it's correct from the very first page load, Trade Log included."
+        "Strategies are now assignable to specific challenges, so the Strategy dropdown (trade form, bulk 'Set Strategy'), the Statistics/Dashboard filter only ever offer the right ones per challenge -- a TradeFI signal-follow trade can no longer be mistagged with an FSA strategy, or the reverse.",
+        "Strategy Lab: creating or renaming a strategy shows a multi-select 'Used on these challenges', defaulting to 'All challenges' for a new strategy. Every strategy card shows its own assignment. The Lab's own list stays unfiltered by design -- it's the one place to see and change the whole picture.",
+        "Every strategy that existed before this release keeps working on every challenge, unconditionally (the new column defaults to 'all challenges'; the migration writes zero assignment rows for anything that already existed). No trade's strategy_id and no challenge's balance/drawdown figures are touched by the migration.",
+        "Trade form: the Strategy dropdown lists only strategies valid for that trade's own challenge, plus 'all challenges' ones. A trade that already has a strategy no longer valid for its challenge keeps showing it -- never silently blanked -- labelled '(not assigned to this challenge)'.",
+        "Bulk 'Set Strategy' and the Statistics/Dashboard filter now also only offer strategies valid for the active challenge. Bulk 'Set Strategy' validates this again server-side: a mismatch is rejected outright, with no partial change across the selection.",
+        "'All challenges' is stored explicitly on the strategy (applies_all_challenges), never inferred from an empty assignment set -- a strategy deliberately scoped to one challenge stays scoped, and simply stops appearing anywhere, if that challenge is later deleted. Deleting a challenge removes only its own assignment rows, never the strategy itself and never another challenge's assignments.",
+        "A challenge's own default_strategy_id (the Pre-Trade Checklist's source) is cleared to NULL, not left dangling, whenever a strategy is re-scoped away from a challenge that currently defaults to it."
     ],
-    "release_notes": "No DB migration -- application code only (StatsController.php, TradeController.php, ProfileController.php, router.php, three page templates, five JS files), no schema change. Verified with a disposable local integration test (not committed to this repo -- needs a local MySQL/MariaDB instance) against the real controllers over a real HTTP loopback (php -S; CLI SAPI has no php://input at all for bulkSetStrategy's real jsonInput()): 29/29 assertions, including the 8.8442% drawdown figure on an all-losses 12-trade series (not flatlined at 0, matching the account-level banner), the strategy filter's exact 12/0 split before and after tagging, challengeBalance()/dd_pct/current_drawdown_pct genuinely unchanged by both tagging and every filter value, strategy_id surviving a re-import-shaped matched-row UPDATE, and idempotent re-tagging. php -l and node --check pass clean on every changed file; duplicate-name scan clean; full tools/ui-harness suite (13 drivers, none touching this release's files) passes -- one timing-sensitive assertion in drive-v3225.mjs failed once under concurrent load and passed clean on an isolated re-run, confirmed as an environment flake, not a regression.",
+    "release_notes": "One migration: migrations/2026_10_28_0001_create_strategy_challenges.sql -- a guarded ALTER (information_schema check + PREPARE/EXECUTE, MySQL 8.4 has no ADD COLUMN IF NOT EXISTS) adding strategies.applies_all_challenges (DEFAULT 1), plus CREATE TABLE IF NOT EXISTS strategy_challenges. Run migrate.php?mode=run after Update Now, same as any other release with a migration -- back up the live DB first. Rollback: DROP TABLE strategy_challenges; then ALTER TABLE strategies DROP COLUMN applies_all_challenges; safe in either order. Verified against the REAL migration file (not a hand-built equivalent) on a disposable local test database: run against a pre-migration shape with a pre-existing strategy and trades already carrying its strategy_id, both confirmed completely untouched afterward. 30/30 integration assertions against the real controllers over a real HTTP loopback, covering both directions of cross-challenge visibility, the bulk action's server-side rejection with zero partial change (both mismatch directions), the default_strategy_id cleanup, switching to all-challenges clearing stale rows, a new strategy defaulting to all-challenges, and a challenge delete removing only its own assignment row without touching the strategy or any other strategy's assignments. php -l and node --check pass clean on every changed file; duplicate-name scan clean; full tools/ui-harness suite (13 drivers) passes.",
     "files": [
-        {"path": "includes/controllers/StatsController.php", "critical": false},
+        {"path": "migrations/2026_10_28_0001_create_strategy_challenges.sql", "critical": false},
+        {"path": "includes/helpers.php", "critical": false},
+        {"path": "includes/controllers/StrategyBuilderController.php", "critical": false},
         {"path": "includes/controllers/TradeController.php", "critical": false},
-        {"path": "includes/controllers/ProfileController.php", "critical": false},
-        {"path": "includes/router.php", "critical": false},
-        {"path": "pages/trades.php", "critical": false},
-        {"path": "pages/stats.php", "critical": false},
-        {"path": "pages/dashboard.php", "critical": false},
+        {"path": "pages/strategies.php", "critical": false},
+        {"path": "modals/strategy-builder-modal.php", "critical": false},
         {"path": "js/app.js", "critical": false},
-        {"path": "js/challenges.js", "critical": false},
-        {"path": "js/dashboard.js", "critical": false},
-        {"path": "js/stats.js", "critical": false},
-        {"path": "js/trades.js", "critical": false}
+        {"path": "js/trades.js", "critical": false},
+        {"path": "js/strategies.js", "critical": false}
     ],
     "db_migrations": []
 }

@@ -41,11 +41,18 @@ function updateBulkStrategyBar(){
     const boxes = document.querySelectorAll('.trade-select-cb');
     if(selectAll) selectAll.checked = boxes.length>0 && n===boxes.length;
 }
+// v3.29.0 — scoped to the active challenge (req #4): offers only a strategy valid for
+// it, same `valid_for_challenge` flag the stats filter reads. The server validates this
+// again in bulkSetStrategy() itself -- this is just so the dropdown never offers a
+// choice it would then reject.
 async function populateBulkStrategySelect(){
     const sel = document.getElementById('bulk-strategy-select');
     if(!sel) return;
     const cur = sel.value;
-    const strategies = (await api('get_strategies')).filter(s=>s.is_active==1);
+    const ch = await api('get_active_challenge');
+    const chId = ch && ch.id ? ch.id : 0;
+    const all = await api('get_strategies' + (chId ? '&challenge_id=' + chId : ''));
+    const strategies = all.filter(s=>s.is_active==1 && (!chId || s.valid_for_challenge));
     sel.innerHTML = '<option value="">— none —</option>' + strategies.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
     if(cur) sel.value = cur;
 }
@@ -516,16 +523,30 @@ function toggleJournalSection(phase){
     chevron.textContent = open ? '▸' : '▾';
 }
 
+// v3.29.0 — scoped to the trade's own challenge (req #3): an editing trade uses its own
+// stored challenge_id; a brand-new trade uses the active challenge (same lookup this
+// function already made for default_strategy_id). A strategy this trade already has set
+// is ALWAYS kept in the list even when it's no longer valid for that challenge -- never
+// silently blanked -- just labelled so it's clear it's not a normal choice anymore.
 async function populateStrategySelect(data=null){
-    allStrategies = await api('get_strategies');
+    let chId = data?.challenge_id || null;
+    let activeCh = null;
+    if(!data){
+        activeCh = await api('get_active_challenge');
+        chId = activeCh?.id || null;
+    }
+    allStrategies = await api('get_strategies' + (chId ? '&challenge_id=' + chId : ''));
     const sel = document.getElementById('f-strategy_id');
-    sel.innerHTML = '<option value="">— none —</option>' + allStrategies.filter(s=>s.is_active==1).map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
 
     let selectedId = data?.strategy_id || '';
-    if(!data){
-        const ch = await api('get_active_challenge');
-        if(ch && ch.default_strategy_id) selectedId = ch.default_strategy_id;
-    }
+    if(!data && activeCh && activeCh.default_strategy_id) selectedId = activeCh.default_strategy_id;
+
+    const visible = allStrategies.filter(s => s.is_active==1 && (!chId || s.valid_for_challenge || String(s.id)===String(selectedId)));
+    sel.innerHTML = '<option value="">— none —</option>' + visible.map(s=>{
+        const invalid = chId && !s.valid_for_challenge;
+        return `<option value="${s.id}">${s.name}${invalid ? ' (not assigned to this challenge)' : ''}</option>`;
+    }).join('');
+
     sel.value = selectedId || '';
 
     let prefillMap = null;

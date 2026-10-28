@@ -36,11 +36,19 @@ function fmtTradePrice(n){
 // is shared: both pages read get_stats() and both need the same strategy_filter options.
 // Preserves whatever's already selected (same pattern as trades.js's own loadPairs())
 // rather than resetting to "All trades" every reload.
+// v3.29.0 — options are now scoped to the active challenge (req #5): a strategy assigned
+// only to a different challenge is left out entirely, same `valid_for_challenge` flag
+// the trade form and bulk action read (get_strategies&challenge_id=X, never a second
+// endpoint). "All trades"/"No strategy" are always offered regardless, since neither
+// means a specific strategy.
 async function populateStrategyFilterSelect(selectId){
     const sel = document.getElementById(selectId);
     if(!sel) return;
     const cur = sel.value;
-    const strategies = (await api('get_strategies')).filter(s=>s.is_active==1);
+    const ch = await api('get_active_challenge');
+    const chId = ch && ch.id ? ch.id : 0;
+    const all = await api('get_strategies' + (chId ? '&challenge_id=' + chId : ''));
+    const strategies = all.filter(s=>s.is_active==1 && (!chId || s.valid_for_challenge));
     const opts = ['<option value="">All trades</option>', '<option value="none">No strategy</option>'];
     strategies.forEach(s=>{
         opts.push(`<option value="${s.id}">${s.name}</option>`);

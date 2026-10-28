@@ -552,6 +552,99 @@ function bf_attribute_funding(array $txRows, string $pair, string $timeIn, strin
 }
 
 /**
+ * v3.27.4 — the real fix this release ships. v3.27.3 correctly stopped double-counting
+ * margin-era funding into `challenges.funding_adjustment`, but left every margin-era
+ * trade's own `net_pnl` computed from Position History's own gross PnL (pnl - fees) —
+ * which is gross of the exact same funding, since margin era nets funding out of Close
+ * Position's own returned amount before Bitfunded ever reports a card's "Realized PnL".
+ * The result: that funding was excluded from funding_adjustment (correct) but never
+ * landed anywhere else either (wrong) — it just vanished, a real ~$17.46 hole confirmed
+ * on live (CLAUDE.md v3.27.4).
+ *
+ * This is the single entry point BitfundedImportController uses per position (replacing a
+ * direct bf_attribute_funding() call in that role — bf_attribute_funding() itself is
+ * unchanged and still used here as the zero-era/fallback path, and still exercised
+ * directly by its own self-test cases above).
+ *
+ * Margin era (every Open Position row found for this position has a non-zero Amount):
+ * realised PnL is read straight off the ledger — Close Position's own Amount plus the SUM
+ * of every matched Open Position row's own Amount (open amounts are negative margin; two
+ * same-timestamp Open rows, the real ledger's documented double-fill case, are two fills
+ * of one position and are summed, never picked or averaged) — exact to 4 decimals, no
+ * dependence on however many decimals Bitfunded's own card rounds its "Realized PnL" to.
+ * funding is then cardPnl minus that ledger figure. Verified against the same real TRX
+ * example as bf_attribute_funding()'s own margin-era branch: open margin 3488.4954,
+ * returned 3394.5281, card PnL -91.288 -> ledger PnL -93.9673, funding 2.6793 — identical
+ * result, this function and that one agree by construction (open_margin - returned_margin
+ * + pnl === pnl - (returned_margin - open_margin) === cardPnl - ledgerPnl), this one just
+ * also hands back the ledger PnL itself so the caller can use it for net_pnl.
+ *
+ * Zero era, or the ledger rows for this position can't be found/are ambiguous: realised
+ * PnL falls back to cardPnl unchanged (today's behaviour, net_pnl is unaffected), funding
+ * falls back to bf_attribute_funding()'s own existing logic for that same case. This is a
+ * deliberate, lower-priority scope boundary, not an oversight — see CLAUDE.md v3.27.4 for
+ * why zero era was left as-is rather than also moved onto its own ledger's exact Close
+ * Position amount.
+ *
+ * Returns ['realised_pnl' => float, 'funding' => float|null, 'era' => 'margin'|'other'].
+ */
+function bf_reconcile_trade_funding(array $txRows, string $pair, string $timeIn, string $timeOut, float $cardPnl): array {
+    $closeRow = bf_find_position_row($txRows, 'close position', $pair, $timeOut);
+    $openRows = bf_find_open_position_rows($txRows, $pair, $timeIn);
+
+    if ($closeRow !== null && $openRows !== null) {
+        $openSum = 0.0;
+        foreach ($openRows as $o) $openSum += $o['amount'];
+        if (abs($openSum) > 0.00005) {
+            $realised = round($closeRow['amount'] + $openSum, 4);
+            $funding = round($cardPnl - $realised, 4);
+            return ['realised_pnl' => $realised, 'funding' => $funding, 'era' => 'margin'];
+        }
+    }
+
+    $funding = bf_attribute_funding($txRows, $pair, $timeIn, $timeOut, $cardPnl);
+    return ['realised_pnl' => $cardPnl, 'funding' => $funding, 'era' => 'other'];
+}
+
+/**
+ * v3.27.4 — like bf_find_position_row(), but for Open Position rows specifically, and
+ * allowed to return MORE THAN ONE row when every one of them shares the position's own
+ * exact Opening Time — the real ledger's documented double-fill case (two Open Position
+ * rows at 2026-01-06 15:36:32, one position, closed once at 18:25:36). A same-symbol Open
+ * at any OTHER, distinct time is a different position and is never folded in.
+ *
+ * PRECONDITION, not checked in code: a same-symbol, same-exact-second Open Position group
+ * is always multiple fills of ONE position, never two genuinely separate positions that
+ * happened to open in the same second. True of the real ledger this was built against
+ * (confirmed — it has exactly one such group, and it is multiple fills); an account that
+ * can open two distinct same-symbol positions in the same second would need a different
+ * disambiguator than Time, which this importer does not have.
+ *
+ * Exact-timestamp rows are returned as a group (1 is the normal case, >1 is multiple
+ * fills). Only when there is no exact match at all does this fall back to
+ * bf_find_position_row()'s own +/-60s single-candidate window, wrapped in an array for a
+ * uniform return shape. Ambiguous within that window (more than one candidate, no exact
+ * match) is null, same rule as bf_find_position_row().
+ */
+function bf_find_open_position_rows(array $txRows, string $pair, string $targetTime): ?array {
+    $candidates = array_values(array_filter($txRows, function ($r) use ($pair) {
+        return $r['symbol'] === $pair && strcasecmp($r['type'], 'open position') === 0;
+    }));
+    if (!$candidates) return null;
+
+    $exact = array_values(array_filter($candidates, fn($r) => $r['time'] === $targetTime));
+    if (count($exact) >= 1) return $exact;
+
+    $targetTs = strtotime($targetTime);
+    $near = array_values(array_filter($candidates, function ($r) use ($targetTs) {
+        return abs(strtotime($r['time']) - $targetTs) <= 60;
+    }));
+    if (count($near) === 1) return $near;
+
+    return null; // zero or ambiguous within the fallback window
+}
+
+/**
  * v3.17.3 — finds exactly one Transaction History row of the given $type ('open position'
  * / 'close position', matched case-insensitively) whose normalized symbol equals $pair
  * and whose own Time matches $targetTime.
@@ -1088,6 +1181,61 @@ TXT;
         $fail++;
         fwrite(STDERR, "FAIL: zero-era-only Transaction History fixture threw: " . $e->getMessage() . "\n");
     }
+
+    // v3.27.4 — bf_reconcile_trade_funding() against the same mixed-era fixture above.
+    // SYM1 (margin era): ledger PnL read straight off the ledger (1050 + -1000 = 50 --
+    // note this is NOT the same as the card PnL of 10.0 used in the bf_attribute_funding
+    // check above; a different, round-numbered cardPnl is used here on purpose so
+    // realised_pnl and funding are each independently distinguishable from it in the
+    // assertion, not coincidentally equal).
+    if (isset($mixedResult)) {
+        $sym1 = bf_reconcile_trade_funding($mixedResult['rows'], 'SYM1USDT', '2026-01-01 00:00:00', '2026-01-01 01:00:00', 10.0);
+        $check('bf_reconcile_trade_funding SYM1 era', $sym1['era'], 'margin');
+        $check('bf_reconcile_trade_funding SYM1 realised_pnl (ledger-exact: 1050 + -1000)', $sym1['realised_pnl'], 50.0);
+        $check('bf_reconcile_trade_funding SYM1 funding (cardPnl 10 - ledgerPnl 50)', $sym1['funding'], -40.0);
+
+        // SYM2 (zero era): realised_pnl falls back to cardPnl unchanged; funding matches
+        // bf_attribute_funding()'s own zero-era branch exactly (same underlying call).
+        $sym2 = bf_reconcile_trade_funding($mixedResult['rows'], 'SYM2USDT', '2026-01-02 00:00:00', '2026-01-02 01:00:00', 20.0);
+        $check('bf_reconcile_trade_funding SYM2 era', $sym2['era'], 'other');
+        $check('bf_reconcile_trade_funding SYM2 realised_pnl falls back to cardPnl unchanged', $sym2['realised_pnl'], 20.0);
+        $check('bf_reconcile_trade_funding SYM2 funding matches the zero-era branch', $sym2['funding'], 0.1);
+    }
+
+    // v3.27.4 — the real ledger's own documented double-fill shape: two Open Position rows
+    // for the same symbol at the EXACT same second, one position, closed once. Both must
+    // be found and summed, not just the first one picked.
+    $doubleFill = <<<'TXT'
+Type	Transaction	Amount	Time	Balance
+Open Position	BTC/USDT	-2000.0000	2026-01-06 15:36:32	9000.0000
+Open Position	BTC/USDT	-1488.4954	2026-01-06 15:36:32	7000.0000
+Close Position	BTC/USDT	3394.5281	2026-01-06 18:25:36	5500.0000
+TXT;
+    try {
+        $dfResult = parseTransactionHistory($doubleFill);
+        $openRows = bf_find_open_position_rows($dfResult['rows'], 'BTCUSDT', '2026-01-06 15:36:32');
+        $check('bf_find_open_position_rows returns both same-second fills', count($openRows ?? []), 2);
+
+        // Same TRX numbers as every other check in this file, just split across two
+        // fills (-2000 + -1488.4954 = -3488.4954) instead of one Open Position row --
+        // must reconcile to the exact same funding, proving the fills are summed, not
+        // just the first one used.
+        $df = bf_reconcile_trade_funding($dfResult['rows'], 'BTCUSDT', '2026-01-06 15:36:32', '2026-01-06 18:25:36', -91.288);
+        $check('bf_reconcile_trade_funding double-fill era', $df['era'], 'margin');
+        $check('bf_reconcile_trade_funding double-fill realised_pnl (3394.5281 + -3488.4954)', $df['realised_pnl'], -93.9673);
+        $check('bf_reconcile_trade_funding double-fill funding (same TRX figure, fills summed not picked)', $df['funding'], 2.6793);
+    } catch (BitfundedParseException $e) {
+        $fail++;
+        fwrite(STDERR, "FAIL: double-fill Transaction History fixture threw: " . $e->getMessage() . "\n");
+    }
+
+    // v3.27.4 — a position whose ledger rows genuinely can't be found (absent from the
+    // paste entirely) must fall back cleanly: realised_pnl stays cardPnl, funding is null
+    // (unknown), era is 'other' -- never a crash, never a guessed number.
+    $noLedgerRows = bf_reconcile_trade_funding([], 'ETHUSDT', '2026-01-01 00:00:00', '2026-01-01 01:00:00', 5.0);
+    $check('bf_reconcile_trade_funding with no ledger rows at all: era', $noLedgerRows['era'], 'other');
+    $check('bf_reconcile_trade_funding with no ledger rows at all: realised_pnl falls back to cardPnl', $noLedgerRows['realised_pnl'], 5.0);
+    $check('bf_reconcile_trade_funding with no ledger rows at all: funding is unknown, not guessed', $noLedgerRows['funding'], null);
 
     fwrite(STDOUT, "bitfunded_parser.php self-test: $pass passed, $fail failed\n");
     if ($fail > 0) exit(1);

@@ -25,12 +25,25 @@
  * `confirm()` writes to `challenges.funding_adjustment` below, so netting it into both
  * double-subtracted it (see CLAUDE.md v3.18.1 for the incident this closes — the
  * Bitfunded Altcoin sidebar balance sat ~$1.60 short of Bitfunded's own reported figure
- * because of exactly this). `net_pnl` is now always `pnl - fees`, full stop — the same
- * formula every pre-v3.17.3 row already had. `trades.funding` is kept and still written
- * (display-only: shows what was attributed to this specific position) but no longer
- * feeds any P&L or balance sum anywhere in this codebase; the account's one real funding
- * figure is `challenges.funding_adjustment`, and `helpers.php::challengeBalance()`
- * subtracts it exactly once.
+ * because of exactly this). `trades.funding` is kept and written (display-only: shows
+ * what was attributed to this specific position) but never feeds `challenges.
+ * funding_adjustment` — that account-wide figure is `helpers.php::challengeBalance()`'s
+ * one real funding number, subtracted exactly once.
+ *
+ * `net_pnl` was `pnl - fees`, full stop, from v3.18.1 through v3.27.3 — **v3.27.4
+ * changed the basis for a margin-era position specifically** (see bf_reconcile_trade_
+ * funding() in bitfunded_parser.php): Position History's own card `pnl` is gross of
+ * whatever funding margin era already netted out of Close Position's own returned
+ * amount, so `pnl - fees` silently dropped that funding — real on live, ~$17.46 on one
+ * account (CLAUDE.md v3.27.4). `net_pnl` is now `realised_pnl - fees`, where
+ * `realised_pnl` is the ledger's own exact figure for a margin-era position (Close
+ * Position's Amount plus its own matched Open Position row(s)) and `pnl` unchanged for
+ * everything else (zero era, or no Transaction History pasted at all). `trades.pnl`
+ * itself is NEVER written as `realised_pnl` — it stays Position History's own card value
+ * regardless of era, because matchAll()'s own re-import matching compares an incoming
+ * paste's `pnl` against the STORED `trades.pnl` within a tight 0.01 tolerance; storing the
+ * ledger figure there instead would make every margin-era trade fail its own re-import
+ * match by the full funding amount.
  *
  * v3.14.1 adds one narrow exception: for a MATCHED row only, if the existing trade
  * already has a stop_loss on file (set pre-entry, before this execution data ever
@@ -75,18 +88,29 @@ class BitfundedImportController {
         // ordinary attention-card text alone, and never silent just because this
         // particular pass happened to resolve to exactly one candidate.
         $noEntryPriceWarnings = [];
+        // v3.27.4 — aggregate across every row actually eligible for ledger reconciliation
+        // (not 'attention' rows, which are never written), surfaced as its own preview
+        // line so Acrob can see the total before confirming, not only discover it per-row.
+        $marginEraCount = 0;
+        $marginEraFundingTotal = 0.0;
         foreach ($positions as $i => $p) {
             $m = $matches[$i];
             $counts['total']++;
             $counts[$m['status']]++;
-            // v3.17.3 — same derivation confirm() will use if this row is actually
-            // imported (named 'position_funding' here, distinct from the top-level
-            // 'funding' key below, which is the whole parsed Transaction History result).
-            // Shown per row so the derived figure is visible and checkable before
-            // confirming, not only discoverable afterward on the trade itself.
-            $positionFunding = ($funding !== null && $m['status'] !== 'attention')
-                ? bf_attribute_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
+            // v3.27.4 — bf_reconcile_trade_funding() replaces a direct bf_attribute_funding()
+            // call here: for a margin-era position it also hands back the ledger's own exact
+            // realised PnL (confirm() uses this for net_pnl; shown here too so the preview's
+            // own numbers match what confirming will actually write). Named 'position_funding'
+            // for continuity with pre-v3.27.4 responses, distinct from the top-level 'funding'
+            // key below (the whole parsed Transaction History result).
+            $reconciled = ($funding !== null && $m['status'] !== 'attention')
+                ? bf_reconcile_trade_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
                 : null;
+            $positionFunding = $reconciled['funding'] ?? null;
+            if ($reconciled !== null && $reconciled['era'] === 'margin') {
+                $marginEraCount++;
+                $marginEraFundingTotal += $reconciled['funding'];
+            }
             $rows[] = [
                 'line' => $p['line'], 'pair' => $p['pair'], 'direction' => $p['direction'],
                 'time_in' => $p['time_in'], 'entry_price' => $p['entry_price'], 'pnl' => $p['pnl'],
@@ -94,6 +118,7 @@ class BitfundedImportController {
                 'status' => $m['status'], 'trade_id' => $m['trade_id'] ?? null, 'reason' => $m['reason'] ?? null,
                 'no_entry_price' => $m['no_entry_price'] ?? false,
                 'position_funding' => $positionFunding,
+                'realised_pnl' => $reconciled['realised_pnl'] ?? $p['pnl'],
             ];
             if ($m['no_entry_price'] ?? false) {
                 $noEntryPriceWarnings[] = "{$p['pair']} {$p['direction']} — open trade found with no entry price. " .
@@ -109,6 +134,7 @@ class BitfundedImportController {
             'counts' => $counts,
             'rows' => $rows,
             'funding' => $funding,
+            'margin_era_funding' => ['count' => $marginEraCount, 'total' => round($marginEraFundingTotal, 4)],
             'reconciliation' => $reconciliation,
             'no_entry_price_warnings' => $noEntryPriceWarnings,
         ]);
@@ -144,15 +170,33 @@ class BitfundedImportController {
                 //
                 // $positionFunding is null whenever Transaction History wasn't
                 // pasted, or this specific position's Open/Close Position rows aren't in
-                // what was pasted (bf_attribute_funding()'s own null cases) — "unknown,"
-                // never a guessed 0, so trades.funding stores that same null rather than
-                // 0. v3.18.1: this value is display-only now (trades.funding), never part
-                // of $net — see this file's header comment for why folding it into net_pnl
-                // double-counted against challenges.funding_adjustment.
-                $positionFunding = $funding !== null
-                    ? bf_attribute_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
+                // what was pasted (bf_reconcile_trade_funding()'s own null cases) —
+                // "unknown," never a guessed 0, so trades.funding stores that same null
+                // rather than 0.
+                //
+                // v3.27.4 — $realisedPnl replaces $p['pnl'] as $net's own basis for a
+                // margin-era position specifically: Position History's own card PnL is
+                // gross of the funding margin era already nets out of Close Position's
+                // own returned amount, so using it for net_pnl silently dropped that
+                // funding (confirmed live — CLAUDE.md v3.27.4, a real ~$17.46 hole). The
+                // ledger's own Close Position amount + matched Open Position amount(s) is
+                // exact to 4 decimals and carries no such gap. trades.pnl itself is left as
+                // $p['pnl'] regardless of era — matchAll()'s own re-import matching
+                // compares an incoming paste's $p['pnl'] against the STORED trades.pnl
+                // within a tight 0.01 tolerance (see matchAll()'s own doc comment); writing
+                // the ledger figure there instead would make every margin-era trade fail
+                // its own re-import match by the full funding amount, far outside that
+                // tolerance. v3.18.1's division still holds for zero era / unmatched ledger
+                // rows: $net stays $p['pnl'] - fees there, funding stays display-only, never
+                // folded into $net or challenges.funding_adjustment (that total comes from
+                // parseTransactionHistory()'s own counted-rows-only funding_total, entirely
+                // separate from this per-trade figure).
+                $reconciled = $funding !== null
+                    ? bf_reconcile_trade_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
                     : null;
-                $net = round($p['pnl'] - $p['fees'], 4);
+                $positionFunding = $reconciled['funding'] ?? null;
+                $realisedPnl = $reconciled['realised_pnl'] ?? $p['pnl'];
+                $net = round($realisedPnl - $p['fees'], 4);
                 $exitReasonForDb = $p['exit_reason'] !== '' ? $p['exit_reason'] : null;
 
                 if ($m['status'] === 'matched') {
@@ -548,18 +592,25 @@ class BitfundedImportController {
 
         // v3.17.3 — deliberately NOT subtracting per-position funding here, even though
         // confirm()'s actual written net_pnl does. $fundingAdj below already subtracts
-        // the whole pasted Transaction History's funding_total from $derived — the same
-        // funding a position being imported right now would also be attributed via
-        // bf_attribute_funding(). Also subtracting it here would double-count it: once
-        // per-position in $importedSum, once again for the whole paste via $fundingAdj.
-        // This mirrors the ticket's own scope boundary verbatim ("don't double-count: if
-        // per-trade funding starts feeding equity, that's a separate decision, not part
-        // of this ticket") — the reconciliation preview's arithmetic is intentionally
-        // unchanged by Part 6; only the stored per-trade net_pnl is funding-aware.
+        // the whole pasted Transaction History's funding_total from $derived. Subtracting
+        // per-position funding again here would double-count it: once per-position (now
+        // inside $realisedPnl for a margin-era row, see v3.27.4 below), once again for the
+        // whole paste via $fundingAdj.
+        //
+        // v3.27.4 — $realisedPnl replaces the raw $p['pnl'] this sum used through v3.27.3,
+        // for the same reason confirm()'s own $net does (see bf_reconcile_trade_funding()
+        // in bitfunded_parser.php): a margin-era position's card pnl is gross of funding
+        // already netted into the ledger's own Close Position amount, and this preview's
+        // own "Derived balance" line needs to match what confirm() will actually write, not
+        // the pre-fix figure that was still off by the same ~$17.46 this release closes.
         $importedSum = 0.0;
         foreach ($positions as $i => $p) {
             if ($matches[$i]['status'] === 'attention') continue;
-            $importedSum += ($p['pnl'] - $p['fees']);
+            $reconciled = $funding !== null
+                ? bf_reconcile_trade_funding($funding['rows'], $p['pair'], $p['time_in'], $p['time_out'], $p['pnl'])
+                : null;
+            $realisedPnl = $reconciled['realised_pnl'] ?? $p['pnl'];
+            $importedSum += ($realisedPnl - $p['fees']);
         }
 
         $fundingAdj = $funding !== null ? $funding['funding_total'] : (float)($challenge['funding_adjustment'] ?? 0);

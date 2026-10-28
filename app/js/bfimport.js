@@ -47,7 +47,7 @@ async function bfPreview() {
     document.getElementById('bf-summary').innerHTML =
         `Found ${c.total} position${c.total == 1 ? '' : 's'}<br>` +
         `<span style="color:var(--green)">${c.new} new</span> — will be added<br>` +
-        `<span style="color:var(--blue2)">${c.matched} matched</span> — prices, fees and times will be updated<br>` +
+        `<span style="color:var(--blue2)">${c.matched} matched</span> — prices, fees, times and funding will be updated<br>` +
         (c.attention ? `<span style="color:var(--orange)">${c.attention} needs attention</span> — will be skipped, resolve manually` : `<span style="color:var(--text3)">0 needs attention</span>`) +
         (r.funding ? `<br><br>Funding total: <strong>${fmt(-1 * r.funding.funding_total)}</strong> → challenge adjustment (${r.funding.row_count} transaction rows read)` : '') +
         // v3.27.3 — margin-era Funding Fee rows are already folded into their own Close
@@ -57,6 +57,17 @@ async function bfPreview() {
         (r.funding && r.funding.funding_excluded_count > 0
             ? `<br><span style="color:var(--text3)">${r.funding.funding_excluded_count} funding row${r.funding.funding_excluded_count == 1 ? '' : 's'} excluded as margin-era ` +
               `(${fmt(r.funding.funding_excluded_total)}, already folded into their own Close Position amount) — cutover ${r.funding.era_cutover_time}</span>`
+            : '') +
+        // v3.27.4 — that excluded ledger total is informational only; this is the figure
+        // that actually lands inside each margin-era trade's own net_pnl once confirmed
+        // (see bf_reconcile_trade_funding() in bitfunded_parser.php), shown so Acrob can
+        // see it before confirming rather than only discover it per-trade afterward.
+        // Negated for display, matching the funding-excluded line's own sign convention
+        // (raw ledger cost, negative) rather than trades.funding's internal "positive =
+        // cost" convention -- the two totals should read the same sign since they're the
+        // same money, just one still folded into Close Position and one now attributed.
+        (r.margin_era_funding && r.margin_era_funding.count > 0
+            ? `<br>Margin-era funding attributed to ${r.margin_era_funding.count} trade${r.margin_era_funding.count == 1 ? '' : 's'}: <strong>${fmt(-1 * r.margin_era_funding.total)}</strong>`
             : '');
 
     // v3.17.3 — Bitfunded's own reported balance is the free wallet balance, excluding

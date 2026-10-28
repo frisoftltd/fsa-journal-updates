@@ -86,7 +86,7 @@ function isOpenTrade(t){
 
 function renderTradesTable(trades) {
     const tbody=document.getElementById('trades-tbody');
-    if(!trades.length){tbody.innerHTML='<tr><td colspan="13" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';return;}
+    if(!trades.length){tbody.innerHTML='<tr><td colspan="14" class="empty"><div class="empty-icon">📋</div><p>No trades yet.</p></td></tr>';return;}
     tbody.innerHTML = trades.map((t,i)=>`<tr>
         <td style="white-space:nowrap">${t.trade_date}</td>
         <td><span class="badge" style="background:rgba(79,124,255,0.1);color:var(--blue2);font-size:10px">${t.session||'—'}</span></td>
@@ -97,6 +97,7 @@ function renderTradesTable(trades) {
         <td style="font-family:var(--font-head);font-size:11px">${t.exit_price?fmtTradePrice(t.exit_price):'—'}</td>
         <td><span class="${pnlCls(t.pnl)}">${fmt(t.pnl)}</span></td>
         <td style="color:var(--orange);font-size:12px;font-family:var(--font-head)">${fmt(t.fees)}</td>
+        <td style="font-size:12px;font-family:var(--font-head)" title="Attributed from Bitfunded's Transaction History — positive is a cost, negative means paid to hold">${t.funding!=null?fmt(t.funding):'—'}</td>
         <td><span class="${pnlCls(t.net_pnl)}">${fmt(t.net_pnl)}</span></td>
         <td style="font-family:var(--font-head);font-size:11px;color:${parseFloat(t.r_multiple)>=0?'var(--green)':'var(--red)'}">${t.r_multiple!==null?t.r_multiple+'R':'—'}</td>
         <td>${resultBadge(t.result)}</td>
@@ -449,6 +450,7 @@ function renderExecutionSummary(data){
         field('Exit', data.exit_price ? fmtTradePrice(data.exit_price) : '—'),
         field('Lot Size', data.lot_size ?? '—'),
         field('Fees', data.fees != null ? fmt(data.fees) : '—'),
+        field('Funding', data.funding != null ? fmt(data.funding) : '—'),
         field('PnL', data.pnl != null ? fmt(data.pnl) : '—'),
         field('Net PnL', data.net_pnl != null ? fmt(data.net_pnl) : '—'),
         field('Exit Reason', data.exit_reason || '—'),

@@ -4,7 +4,7 @@
 **Product:** FundedControl (formerly FSA Trading Journal)
 **Developer:** Acrob — Solo developer, crypto trader, Kigali, Rwanda
 **Experience:** 10 years PHP
-**Last Updated:** 2026-10-27 (v3.27.3 — Bitfunded importer no longer double-counts margin-era funding on a ledger that spans both Transaction History formats)
+**Last Updated:** 2026-10-28 (v3.27.4 — margin-era funding is now attributed per trade and lands in net_pnl, closing the gap v3.27.3 left — that release stopped double-counting it but never routed it anywhere)
 
 > **Per-release history lives in `docs/CHANGELOG-archive.md`**, not here. Every dated
 > "what changed and why" writeup (v3.9.x through v3.22.10, plus some retired reference
@@ -31,7 +31,7 @@ enforcement, and performance analytics designed around prop firm rules.
 | Updater | https://www.fundedcontrol.com/updater.php |
 | GitHub Repo | https://github.com/frisoftltd/fsa-journal-updates (the old `acrobcrypto250` name is stale in `updater.php` and the git remote URL, but GitHub redirects it, so it still works) |
 | DB Name | `fundedcontrol` — MySQL 8.4 on the Hetzner VPS in §1A below |
-| Current Version | v3.27.3 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
+| Current Version | v3.27.4 (repo/tag version — not confirmed to match `updater.php`'s own `local_version` on live; see "Deploy & Release Workflow" below for why that gap can happen) |
 
 ### Tech Stack
 
@@ -382,10 +382,64 @@ not committed to this repo): cutover `2026-01-26 23:36:16`, 201 Funding Fee rows
 (`-17.4617`), 188 counted (`+4.5880`); Recharge + every Open/Close Position amount + every
 fee + only the counted funding rows = `9240.3604` against the ledger's own final Balance
 column `9240.3514` (0.009 off, inside the $0.05 tolerance) — the pre-fix sum would have been
-`9222.8987`, wrong by 17.45, matching the incident exactly. Margin-era funding lives inside
-each affected trade's own `net_pnl` (via Position History's realised PnL, which already
-reflects the funding-adjusted margin return); zero-era funding lives in
-`challenges.funding_adjustment` — the two never overlap, so nothing is counted twice.
+`9222.8987`, wrong by 17.45, matching the incident exactly.
+
+**This release's own stated "margin-era funding lives inside each affected trade's own
+`net_pnl`" turned out to be false on live — fixed in v3.27.4 below.** v3.27.3 correctly
+excluded margin-era funding from `challenges.funding_adjustment`, but never actually
+routed it anywhere else: `confirm()` still computed every trade's `net_pnl` from Position
+History's own gross `pnl - fees`, and that `pnl` is gross of the exact same funding margin
+era already nets out of Close Position's own returned amount. The money didn't double
+count — it just vanished. Acrob caught this immediately on the first live re-import (a
+real $17.66 "flagged" mismatch in the import preview that should have reconciled).
+
+### Margin-era funding attribution, per trade (v3.27.4)
+
+Closes the gap above. `bf_reconcile_trade_funding()` (`includes/bitfunded_parser.php`) is
+the new single entry point `BitfundedImportController::preview()`/`confirm()` call per
+position instead of a direct `bf_attribute_funding()` call. For a margin-era position
+(every matched Open Position row's Amount non-zero): `realised_pnl` is read straight off
+the ledger — Close Position's own Amount plus the SUM of every matched Open Position row's
+own Amount (`bf_find_open_position_rows()`, new — a same-symbol, same-exact-second group of
+Open rows, the real ledger's documented double-fill case, is summed as multiple fills of
+one position, never picked or averaged) — exact to 4 decimals, no dependence on whatever
+Bitfunded's own card rounds "Realized PnL" to. `funding = cardPnl - realised_pnl`.
+`net_pnl = realised_pnl - fees` for these trades now, not `cardPnl - fees`. `trades.pnl`
+itself is left untouched regardless of era — `matchAll()`'s own re-import matching compares
+an incoming paste's `pnl` against the STORED `trades.pnl` within a tight 0.01 tolerance;
+writing the ledger figure there instead would make every margin-era trade fail its own
+re-import match by the full funding amount. Zero era (or ledger rows not found/ambiguous
+for a position) is unchanged — `realised_pnl` falls back to `cardPnl`, funding falls back
+to `bf_attribute_funding()`'s own existing zero-era window-sum. Deliberately **not** done
+this release: the same ledger-exact treatment for zero-era trades too (would close the
+remaining ~0.2 cent-rounding gap between Bitfunded's card PnL and the ledger's own Close
+Position amount) — judged lower-priority/more invasive than this release's actual bug, left
+as-is per the briefing's own explicit permission to do so.
+
+`challenges.funding_adjustment` is unaffected by this release — it's still
+`parseTransactionHistory()`'s own counted (post-cutover) `funding_total`, entirely separate
+from this per-trade figure. Margin-era funding now lives inside each affected trade's own
+`net_pnl`; zero-era funding lives in `funding_adjustment`; the two never overlap. Re-running
+the same import twice is idempotent by construction — every value here is a deterministic
+function of the pasted data, nothing is additive or stateful across imports (`confirm()`
+still *replaces* `funding_adjustment` wholesale, as before). Import preview gained a
+`margin_era_funding` count/total and a "Margin-era funding attributed to N trades" line
+(`js/bfimport.js`); the Trade Log table and trade detail panel both gained a `Funding`
+field (`pages/trades.php`, `js/trades.js`) — previously written to `trades.funding` but
+never shown anywhere in the UI.
+
+Verified structurally against the real ledger (not the real Position History cards, which
+aren't available in this environment): the exact TRX figure already verified in v3.27.3/
+v3.17.3 (open margin 3488.4954, returned 3394.5281, card loss 91.288 → funding 2.6793) is
+reproduced bit-for-bit by the new function; a synthetic double-fill fixture modeled on the
+real ledger's own documented case confirms two same-second Open rows are summed, not
+picked; and every one of the real ledger's 56 actual margin-era positions (FIFO-paired the
+same way `bf_era_cutover_timestamp()` already does) resolves to the margin branch through
+the real `bf_find_open_position_rows()`/`bf_find_position_row()` matching path, not a
+hand-picked example. The full aggregate acceptance numbers from the briefing (margin-era
+funding ≈ `-17.4617` across the real 120 cards, final balance `9240.36`) need Acrob's real
+Position History paste to confirm independently of the live re-import already planned as
+this release's own after-the-fact check.
 
 ## 2. ARCHITECTURE — MODULAR BACKEND
 
@@ -891,7 +945,7 @@ fsa-journal-updates/          ← Repo root
 Project: FundedControl — PHP 8.1 + MySQL 8.4 + Vanilla JS
 Live URL: https://www.fundedcontrol.com/
 Repo: https://github.com/frisoftltd/fsa-journal-updates
-Current Version: v3.27.3
+Current Version: v3.27.4
 Server: Hetzner CX23 VPS (Helsinki), CloudPanel, nginx + PHP-FPM — see §1A
 DB: fundedcontrol on 127.0.0.1:3306
 CLAUDE.md is in the repo root — read it for full context; docs/CHANGELOG-archive.md
